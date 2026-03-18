@@ -1,0 +1,13 @@
+[Unit]
+Description=WiFi antenna MIMO status tray icon
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/wifi-antenna-tray
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

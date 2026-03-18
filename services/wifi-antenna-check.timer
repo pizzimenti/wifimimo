@@ -1,0 +1,11 @@
+[Unit]
+Description=Run WiFi antenna health check periodically
+After=network-online.target
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+Unit=wifi-antenna-check.service
+
+[Install]
+WantedBy=timers.target

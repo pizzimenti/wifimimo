@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=WiFi Monitor
+Comment=WiFi antenna MIMO health monitor
+Icon=network-wireless
+Exec=wifi-antenna-mon
+NoDisplay=true
+Categories=Network;System;
