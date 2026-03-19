@@ -4,66 +4,105 @@ set -euo pipefail
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_DIR="$ROOT_DIR/services"
+PLASMOID_DIR="$ROOT_DIR/plasmoid/org.kde.plasma.wifimimo"
 
-TARGET_SCRIPT="/usr/local/bin/wifi-antenna-check"
-TARGET_TRAY="/usr/local/bin/wifi-antenna-tray"
-TARGET_MON="/usr/local/bin/wifi-antenna-mon"
-TARGET_SERVICE="/etc/systemd/system/wifi-antenna-check.service"
-TARGET_TIMER="/etc/systemd/system/wifi-antenna-check.timer"
-TRAY_SERVICE_SRC="$SERVICE_DIR/wifi-antenna-tray.service"
+TARGET_DAEMON="/usr/local/bin/wifimimo-daemon"
+TARGET_MON="/usr/local/bin/wifimimo-mon"
+TARGET_DESKTOP="/usr/share/applications/wifimimo.desktop"
+USER_SERVICE_NAME="wifimimo-daemon.service"
+
+OLD_ROOT_FILES=(
+    "/usr/local/bin/wifimimo-check"
+    "/usr/local/bin/wifimimo-notify"
+    "/usr/local/bin/wifi-antenna-check"
+    "/usr/local/bin/wifi-antenna-mon"
+    "/usr/local/bin/wifi-antenna-notify"
+    "/etc/systemd/system/wifimimo-check.service"
+    "/etc/systemd/system/wifimimo-check.timer"
+    "/etc/systemd/system/wifi-antenna-check.service"
+    "/etc/systemd/system/wifi-antenna-check.timer"
+    "/usr/share/applications/wifi-monitor.desktop"
+)
 
 if [[ $EUID -ne 0 ]]; then
     exec pkexec bash "$SELF" "$@"
 fi
 
-install -Dm755 "$ROOT_DIR/wifi-antenna-check.sh" "$TARGET_SCRIPT"
-install -Dm644 "$SERVICE_DIR/wifi-antenna-check.service" "$TARGET_SERVICE"
-install -Dm644 "$SERVICE_DIR/wifi-antenna-check.timer"   "$TARGET_TIMER"
-
-# Launcher shim for the TUI monitor
-install -Dm755 /dev/stdin "$TARGET_MON" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-exec python3 "$ROOT_DIR/wifi-antenna-mon.py" "\$@"
-EOF
-
-# Launcher shim for the systray app
-install -Dm755 /dev/stdin "$TARGET_TRAY" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-exec python3 "$ROOT_DIR/wifi-antenna-tray.py" "\$@"
-EOF
-
-# Tray user service (optional — skip if file missing)
-if [[ -f "$TRAY_SERVICE_SRC" ]]; then
-    TRAY_USER_SVC_DIR="/etc/xdg/systemd/user"
-    install -Dm644 "$TRAY_SERVICE_SRC" "$TRAY_USER_SVC_DIR/wifi-antenna-tray.service"
-fi
-
-# Desktop entry — lets KDE log notifications under a known app name
-install -Dm644 "$ROOT_DIR/wifi-monitor.desktop" "/usr/share/applications/wifi-monitor.desktop"
-
-# Fix ownership if invoked via pkexec (PKEXEC_UID is set by polkit)
-if [[ -n "${PKEXEC_UID:-}" ]]; then
-    owner_home="$(getent passwd "$PKEXEC_UID" | cut -d: -f6)"
-    if [[ -n "$owner_home" && -d "$owner_home" ]]; then
-        find "$ROOT_DIR" -xdev -user root -exec chown "$(id -un "$PKEXEC_UID"):$(id -gn "$PKEXEC_UID")" {} +
+run_as_user() {
+    if [[ -n "${PKEXEC_UID:-}" ]]; then
+        sudo -u "#${PKEXEC_UID}" XDG_RUNTIME_DIR="/run/user/${PKEXEC_UID}" HOME="$HOME" "$@"
+    else
+        "$@"
     fi
+}
+
+if [[ -n "${PKEXEC_UID:-}" ]]; then
+    HOME="$(getent passwd "$PKEXEC_UID" | cut -d: -f6)"
+    export HOME
+    export XDG_DATA_HOME="${HOME}/.local/share"
 fi
 
-systemctl daemon-reload
-systemctl enable --now wifi-antenna-check.timer
+install -Dm755 /dev/stdin "$TARGET_DAEMON" <<EOF2
+#!/usr/bin/env bash
+set -euo pipefail
+exec python3 "$ROOT_DIR/wifimimo-daemon.py" "\$@"
+EOF2
 
-echo "Installed:"
-echo "  $TARGET_SCRIPT"
-echo "  $TARGET_MON      (→ $ROOT_DIR/wifi-antenna-mon.py)"
-echo "  $TARGET_TRAY     (→ $ROOT_DIR/wifi-antenna-tray.py)"
-echo "  $TARGET_SERVICE"
-echo "  $TARGET_TIMER"
-echo
-echo "Timer status:"
-systemctl status wifi-antenna-check.timer --no-pager
-echo
-echo "Run monitor:  wifi-antenna-mon"
-echo "Run tray:     systemctl --user enable --now wifi-antenna-tray"
-echo "View logs:    journalctl -t wifi-antenna-check -f"
+install -Dm755 /dev/stdin "$TARGET_MON" <<EOF2
+#!/usr/bin/env bash
+set -euo pipefail
+exec python3 "$ROOT_DIR/wifimimo-mon.py" "\$@"
+EOF2
+
+install -Dm644 "$ROOT_DIR/wifimimo.desktop" "$TARGET_DESKTOP"
+
+for old_file in "${OLD_ROOT_FILES[@]}"; do
+    rm -f "$old_file"
+done
+
+systemctl disable --now wifimimo-check.timer 2>/dev/null || true
+systemctl disable --now wifimimo-check.service 2>/dev/null || true
+systemctl disable --now wifi-antenna-check.timer 2>/dev/null || true
+systemctl disable --now wifi-antenna-check.service 2>/dev/null || true
+systemctl daemon-reload
+
+USER_SYSTEMD_DIR="$HOME/.config/systemd/user"
+USER_SERVICE_PATH="$USER_SYSTEMD_DIR/$USER_SERVICE_NAME"
+OLD_USER_FILES=(
+    "$USER_SYSTEMD_DIR/wifimimo-notify.service"
+    "$USER_SYSTEMD_DIR/wifimimo-notify.path"
+    "$USER_SYSTEMD_DIR/wifi-antenna-notify.service"
+    "$USER_SYSTEMD_DIR/wifi-antenna-notify.path"
+    "$HOME/.config/autostart/wifimimo-plasma.desktop"
+    "$HOME/.config/autostart/wifi-antenna-plasma.desktop"
+)
+
+install -d -m 755 "$USER_SYSTEMD_DIR"
+install -Dm644 "$SERVICE_DIR/wifimimo-daemon.service" "$USER_SERVICE_PATH"
+for old_file in "${OLD_USER_FILES[@]}"; do
+    rm -f "$old_file"
+done
+
+PLASMOID_INSTALL_DIR="$HOME/.local/share/plasma/plasmoids/org.kde.plasma.wifimimo"
+rm -rf "$PLASMOID_INSTALL_DIR"
+run_as_user kpackagetool6 -t Plasma/Applet -r org.kde.plasma.wifimimo 2>/dev/null || true
+run_as_user kpackagetool6 -t Plasma/Applet -r org.kde.plasma.wifiantennamonitor 2>/dev/null || true
+run_as_user kpackagetool6 -t Plasma/Applet -i "$PLASMOID_DIR"
+
+run_as_user systemctl --user daemon-reload
+run_as_user systemctl --user disable --now wifimimo-notify.path 2>/dev/null || true
+run_as_user systemctl --user disable --now wifimimo-notify.service 2>/dev/null || true
+run_as_user systemctl --user disable --now wifi-antenna-notify.path 2>/dev/null || true
+run_as_user systemctl --user disable --now wifi-antenna-notify.service 2>/dev/null || true
+run_as_user systemctl --user enable --now "$USER_SERVICE_NAME"
+
+printf 'Installed:\n'
+printf '  %s\n' "$TARGET_DAEMON"
+printf '  %s\n' "$TARGET_MON"
+printf '  %s\n' "$TARGET_DESKTOP"
+printf '  %s\n' "$USER_SERVICE_PATH"
+printf '\nUser service status:\n'
+run_as_user systemctl --user status "$USER_SERVICE_NAME" --no-pager
+printf '\nRun monitor:  wifimimo-mon\n'
+printf 'Panel applet: org.kde.plasma.wifimimo\n'
+printf 'View logs:    journalctl --user -u %s -f\n' "$USER_SERVICE_NAME"

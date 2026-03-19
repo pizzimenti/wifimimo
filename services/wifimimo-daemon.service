@@ -1,0 +1,17 @@
+[Unit]
+Description=wifimimo live data daemon
+After=graphical-session.target network-online.target
+Wants=network-online.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/wifimimo-daemon
+Restart=always
+RestartSec=1
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wifimimo-daemon
+
+[Install]
+WantedBy=default.target

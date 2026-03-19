@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=WiFi Monitor
-Comment=WiFi antenna MIMO health monitor
+Name=wifimimo
+Comment=wifimimo terminal monitor
 Icon=network-wireless
-Exec=wifi-antenna-mon
+Exec=wifimimo-mon
 NoDisplay=true
 Categories=Network;System;
