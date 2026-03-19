@@ -12,19 +12,6 @@ TARGET_PLASMOID_SOURCE="/usr/local/bin/wifimimo-plasmoid-source"
 TARGET_DESKTOP="/usr/share/applications/wifimimo.desktop"
 USER_SERVICE_NAME="wifimimo-daemon.service"
 
-OLD_ROOT_FILES=(
-    "/usr/local/bin/wifimimo-check"
-    "/usr/local/bin/wifimimo-notify"
-    "/usr/local/bin/wifi-antenna-check"
-    "/usr/local/bin/wifi-antenna-mon"
-    "/usr/local/bin/wifi-antenna-notify"
-    "/etc/systemd/system/wifimimo-check.service"
-    "/etc/systemd/system/wifimimo-check.timer"
-    "/etc/systemd/system/wifi-antenna-check.service"
-    "/etc/systemd/system/wifi-antenna-check.timer"
-    "/usr/share/applications/wifi-monitor.desktop"
-)
-
 if [[ $EUID -ne 0 ]]; then
     exec pkexec bash "$SELF" "$@"
 fi
@@ -63,44 +50,19 @@ EOF2
 
 install -Dm644 "$ROOT_DIR/wifimimo.desktop" "$TARGET_DESKTOP"
 
-for old_file in "${OLD_ROOT_FILES[@]}"; do
-    rm -f "$old_file"
-done
-
-systemctl disable --now wifimimo-check.timer 2>/dev/null || true
-systemctl disable --now wifimimo-check.service 2>/dev/null || true
-systemctl disable --now wifi-antenna-check.timer 2>/dev/null || true
-systemctl disable --now wifi-antenna-check.service 2>/dev/null || true
 systemctl daemon-reload
 
 USER_SYSTEMD_DIR="$HOME/.config/systemd/user"
 USER_SERVICE_PATH="$USER_SYSTEMD_DIR/$USER_SERVICE_NAME"
-OLD_USER_FILES=(
-    "$USER_SYSTEMD_DIR/wifimimo-notify.service"
-    "$USER_SYSTEMD_DIR/wifimimo-notify.path"
-    "$USER_SYSTEMD_DIR/wifi-antenna-notify.service"
-    "$USER_SYSTEMD_DIR/wifi-antenna-notify.path"
-    "$HOME/.config/autostart/wifimimo-plasma.desktop"
-    "$HOME/.config/autostart/wifi-antenna-plasma.desktop"
-)
 
 install -d -m 755 "$USER_SYSTEMD_DIR"
 install -Dm644 "$SERVICE_DIR/wifimimo-daemon.service" "$USER_SERVICE_PATH"
-for old_file in "${OLD_USER_FILES[@]}"; do
-    rm -f "$old_file"
-done
 
-PLASMOID_INSTALL_DIR="$HOME/.local/share/plasma/plasmoids/org.kde.plasma.wifimimo"
-rm -rf "$PLASMOID_INSTALL_DIR"
-run_as_user kpackagetool6 -t Plasma/Applet -r org.kde.plasma.wifimimo 2>/dev/null || true
-run_as_user kpackagetool6 -t Plasma/Applet -r org.kde.plasma.wifiantennamonitor 2>/dev/null || true
-run_as_user kpackagetool6 -t Plasma/Applet -i "$PLASMOID_DIR"
+run_as_user kpackagetool6 -t Plasma/Applet --upgrade "$PLASMOID_DIR" 2>&1 \
+    || run_as_user kpackagetool6 -t Plasma/Applet --install "$PLASMOID_DIR" 2>&1 \
+    || echo "Note: Plasma widget install/upgrade skipped (may need manual add)"
 
 run_as_user systemctl --user daemon-reload
-run_as_user systemctl --user disable --now wifimimo-notify.path 2>/dev/null || true
-run_as_user systemctl --user disable --now wifimimo-notify.service 2>/dev/null || true
-run_as_user systemctl --user disable --now wifi-antenna-notify.path 2>/dev/null || true
-run_as_user systemctl --user disable --now wifi-antenna-notify.service 2>/dev/null || true
 run_as_user systemctl --user enable --now "$USER_SERVICE_NAME"
 
 printf 'Installed:\n'
