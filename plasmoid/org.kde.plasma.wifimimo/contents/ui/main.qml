@@ -13,7 +13,9 @@ import org.kde.plasma.plasmoid
 PlasmoidItem {
     id: root
 
-    property string liveScript: "/home/bradley/Code/scripts/wifimimo/wifimimo-plasmoid-source.py"
+    preferredRepresentation: compactRepresentation
+
+    property string liveScript: "wifimimo-plasmoid-source"
     property string currentCommand: ""
     property int refreshMs: 1000
     property string monospaceFamily: "monospace"
@@ -249,10 +251,10 @@ PlasmoidItem {
     }
 
     function signalColor(dbm) {
-        if (dbm < -75) {
+        if (dbm < -70) {
             return Kirigami.Theme.negativeTextColor;
         }
-        if (dbm < -65) {
+        if (dbm < -55) {
             return Kirigami.Theme.neutralTextColor;
         }
         return Kirigami.Theme.positiveTextColor;
@@ -408,442 +410,410 @@ PlasmoidItem {
     }
 
     fullRepresentation: PlasmaExtras.Representation {
-        Layout.minimumWidth: Kirigami.Units.gridUnit * 44
-        Layout.minimumHeight: Kirigami.Units.gridUnit * 37
-        Layout.maximumWidth: Kirigami.Units.gridUnit * 44
-        Layout.maximumHeight: Kirigami.Units.gridUnit * 37
+        Layout.minimumWidth:  Kirigami.Units.gridUnit * 30
+        Layout.minimumHeight: 550
+        Layout.maximumWidth:  Kirigami.Units.gridUnit * 30
+        Layout.maximumHeight: 550
         collapseMarginsHint: true
 
-        Item {
-            id: fitFrame
-            anchors.fill: parent
-            anchors.margins: Kirigami.Units.largeSpacing * 1.5
-            clip: true
+        ColumnLayout {
+            id: contentColumn
+            anchors {
+                fill: parent
+                margins: Kirigami.Units.smallSpacing
+            }
+            spacing: 1
 
-            readonly property real scaleFactor: Math.min(
-                1,
-                Math.min(
-                    width / Math.max(1, contentColumn.implicitWidth),
-                    height / Math.max(1, contentColumn.implicitHeight)
-                )
-            )
+            PlasmaComponents3.Label {
+                Layout.fillWidth: true
+                text: "wifimimo"
+                font.bold: true
+                font.family: root.monospaceFamily
+                horizontalAlignment: Text.AlignHCenter
+            }
+
+            PlasmaComponents3.Label {
+                Layout.fillWidth: true
+                text: root.hasRecentData ? root.connectionSummary() : ("Not connected on " + root.data.iface)
+                wrapMode: Text.Wrap
+                maximumLineCount: 2
+                font.bold: true
+                font.family: root.monospaceFamily
+                color: root.hasRecentData ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.negativeTextColor
+            }
+
+            PlasmaComponents3.Label {
+                Layout.fillWidth: true
+                text: "SIGNAL"
+                font.bold: true
+                font.family: root.monospaceFamily
+                color: Kirigami.Theme.highlightColor
+            }
+
+            Repeater {
+                model: [
+                    { label: "Overall", value: root.data.signal_dbm, hist: "sig_overall", kind: "signal" },
+                    { label: "Avg", value: root.data.signal_avg_dbm, hist: "sig_avg", kind: "signal" },
+                    { label: "Antenna 1", value: root.antennaSignalAt(0), hist: "sig_ant0", kind: "signal" },
+                    { label: "Antenna 2", value: root.antennaSignalAt(1), hist: "sig_ant1", kind: "signal" },
+                    { label: "Spread", value: root.spreadValue(), hist: "sig_spread", kind: "spread", suffix: "warn >15" }
+                ]
+
+                delegate: ColumnLayout {
+                    id: signalBlock
+                    required property var modelData
+                    Layout.fillWidth: true
+                    spacing: 0
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Kirigami.Units.largeSpacing
+
+                        PlasmaComponents3.Label {
+                            Layout.preferredWidth: Kirigami.Units.gridUnit * 6
+                            text: signalBlock.modelData.label
+                            color: Kirigami.Theme.disabledTextColor
+                            font.family: root.monospaceFamily
+                        }
+
+                        PlasmaComponents3.Label {
+                            Layout.preferredWidth: Kirigami.Units.gridUnit * 5
+                            text: Number(signalBlock.modelData.value).toFixed(0) + " dBm"
+                            color: signalBlock.modelData.kind === "spread"
+                                ? root.alertColor(signalBlock.modelData.value, 10, 15)
+                                : root.signalColor(signalBlock.modelData.value)
+                            font.family: root.monospaceFamily
+                        }
+
+                        PlasmaComponents3.Label {
+                            Layout.fillWidth: true
+                            text: Number(root.histMin(signalBlock.modelData.hist, signalBlock.modelData.value)).toFixed(0)
+                                  + " .. "
+                                  + Number(root.histMax(signalBlock.modelData.hist, signalBlock.modelData.value)).toFixed(0)
+                                  + (signalBlock.modelData.suffix ? "  " + signalBlock.modelData.suffix : "")
+                            horizontalAlignment: Text.AlignRight
+                            color: Kirigami.Theme.disabledTextColor
+                            font.family: root.monospaceFamily
+                        }
+                    }
+
+                    Item {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 8
+                        Layout.minimumHeight: 8
+                        Layout.maximumHeight: 8
+
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: height / 2
+                            color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g, Kirigami.Theme.textColor.b, 0.12)
+                        }
+
+                        Rectangle {
+                            anchors.left: parent.left
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            width: Math.max(4, parent.width * (signalBlock.modelData.kind === "spread"
+                                ? root.spreadFraction(signalBlock.modelData.value)
+                                : root.signalFraction(signalBlock.modelData.value)))
+                            radius: height / 2
+                            color: signalBlock.modelData.kind === "spread"
+                                ? root.alertColor(signalBlock.modelData.value, 10, 15)
+                                : root.signalColor(signalBlock.modelData.value)
+                        }
+
+                        Rectangle {
+                            width: 2
+                            radius: 1
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            x: Math.max(0, Math.min(parent.width - width, parent.width * (signalBlock.modelData.kind === "spread"
+                                ? root.spreadFraction(root.histMax(signalBlock.modelData.hist, signalBlock.modelData.value))
+                                : root.signalFraction(root.histMax(signalBlock.modelData.hist, signalBlock.modelData.value)))))
+                            color: Kirigami.Theme.textColor
+                            opacity: 0.6
+                        }
+                    }
+                }
+            }
+
+            PlasmaComponents3.Label {
+                Layout.fillWidth: true
+                text: "RATES"
+                font.bold: true
+                font.family: root.monospaceFamily
+                color: Kirigami.Theme.highlightColor
+            }
+
+            Repeater {
+                model: [
+                    { label: "TX", rate: root.data.tx_rate_mbps, nss: root.data.tx_nss, mcs: root.data.tx_mcs, mode: root.data.tx_mode, gi: root.data.tx_gi, hist: "tx_rate" },
+                    { label: "RX", rate: root.data.rx_rate_mbps, nss: root.data.rx_nss, mcs: root.data.rx_mcs, mode: root.data.rx_mode, gi: root.data.rx_gi, hist: "rx_rate" }
+                ]
+
+                delegate: ColumnLayout {
+                    id: rateBlock
+                    required property var modelData
+                    Layout.fillWidth: true
+                    spacing: 0
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Kirigami.Units.largeSpacing
+
+                        PlasmaComponents3.Label {
+                            Layout.preferredWidth: Kirigami.Units.gridUnit * 3
+                            text: rateBlock.modelData.label
+                            color: Kirigami.Theme.disabledTextColor
+                            font.family: root.monospaceFamily
+                        }
+
+                        PlasmaComponents3.Label {
+                            Layout.preferredWidth: Kirigami.Units.gridUnit * 6
+                            text: Number(rateBlock.modelData.rate).toFixed(1) + " Mb/s"
+                            font.family: root.monospaceFamily
+                        }
+
+                        PlasmaComponents3.Label {
+                            Layout.fillWidth: true
+                            text: Number(root.histMin(rateBlock.modelData.hist, rateBlock.modelData.rate)).toFixed(0)
+                                  + " .. "
+                                  + Number(root.histMax(rateBlock.modelData.hist, rateBlock.modelData.rate)).toFixed(0)
+                                  + "  NSS " + rateBlock.modelData.nss + " " + root.nssDots(rateBlock.modelData.nss)
+                                  + (rateBlock.modelData.gi >= 0 ? "  GI " + root.giLabel(rateBlock.modelData.gi) : "")
+                            horizontalAlignment: Text.AlignRight
+                            color: Kirigami.Theme.disabledTextColor
+                            font.family: root.monospaceFamily
+                        }
+                    }
+
+                    Item {
+                        id: rateBar
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 8
+                        Layout.minimumHeight: 8
+                        Layout.maximumHeight: 8
+
+                        readonly property real ceiling: root.rateCeiling(rateBlock.modelData.rate, rateBlock.modelData.mcs, rateBlock.modelData.mode)
+
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: height / 2
+                            color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g, Kirigami.Theme.textColor.b, 0.12)
+                        }
+
+                        Rectangle {
+                            anchors.left: parent.left
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            width: Math.max(4, parent.width * Math.max(0, Math.min(1, rateBlock.modelData.rate / rateBar.ceiling)))
+                            radius: height / 2
+                            color: Kirigami.Theme.positiveTextColor
+                        }
+
+                        Rectangle {
+                            width: 2
+                            radius: 1
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            x: Math.max(0, Math.min(parent.width - width, parent.width * Math.max(0, Math.min(1, root.histMax(rateBlock.modelData.hist, rateBlock.modelData.rate) / rateBar.ceiling))))
+                            color: Kirigami.Theme.textColor
+                            opacity: 0.6
+                        }
+                    }
+                }
+            }
+
+            PlasmaComponents3.Label {
+                Layout.fillWidth: true
+                text: "MCS INDEX"
+                font.bold: true
+                font.family: root.monospaceFamily
+                color: Kirigami.Theme.highlightColor
+            }
+
+            Repeater {
+                model: [
+                    { label: "TX", mcs: root.data.tx_mcs, rate: root.data.tx_rate_mbps, mode: root.data.tx_mode, hist: "tx_mcs" },
+                    { label: "RX", mcs: root.data.rx_mcs, rate: root.data.rx_rate_mbps, mode: root.data.rx_mode, hist: "rx_mcs" }
+                ]
+
+                delegate: ColumnLayout {
+                    id: mcsBlock
+                    required property var modelData
+                    readonly property var rates: root.computeRates(mcsBlock.modelData.rate, mcsBlock.modelData.mcs, mcsBlock.modelData.mode)
+                    Layout.fillWidth: true
+                    spacing: 1
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Kirigami.Units.smallSpacing
+
+                        PlasmaComponents3.Label {
+                            text: mcsBlock.modelData.label + "  MCS " + root.displayMcs(mcsBlock.modelData.mcs)
+                            font.family: root.monospaceFamily
+                        }
+
+                        PlasmaComponents3.Label {
+                            text: Number(mcsBlock.modelData.rate).toFixed(0) + " Mb/s"
+                            color: root.mcsColor(
+                                mcsBlock.modelData.mcs,
+                                mcsBlock.modelData.mcs,
+                                mcsBlock.modelData.mcs,
+                                mcsBlock.modelData.mcs,
+                                Math.max(0, mcsBlock.rates.length - 1)
+                            )
+                            font.family: root.monospaceFamily
+                        }
+
+                        Item {
+                            Layout.fillWidth: true
+                        }
+
+                        PlasmaComponents3.Label {
+                            text: mcsBlock.modelData.mcs >= 0
+                                  ? ("min " + Number(root.histMin(mcsBlock.modelData.hist, mcsBlock.modelData.mcs)).toFixed(0)
+                                     + "  max " + Number(root.histMax(mcsBlock.modelData.hist, mcsBlock.modelData.mcs)).toFixed(0))
+                                  : "min -  max -"
+                            font.family: root.monospaceFamily
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 1
+
+                        Repeater {
+                            model: root.mcsGridCount(mcsBlock.rates.length, mcsBlock.modelData.mode)
+
+                            delegate: Rectangle {
+                                required property int index
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: Kirigami.Units.gridUnit * 1.1
+                                radius: 3
+                                color: root.mcsColor(
+                                    index,
+                                    Math.max(0, mcsBlock.modelData.mcs),
+                                    mcsBlock.modelData.mcs >= 0 ? root.histMin(mcsBlock.modelData.hist, mcsBlock.modelData.mcs) : -1,
+                                    mcsBlock.modelData.mcs >= 0 ? root.histMax(mcsBlock.modelData.hist, mcsBlock.modelData.mcs) : -1,
+                                    Math.max(0, root.mcsGridCount(mcsBlock.rates.length, mcsBlock.modelData.mode) - 1)
+                                )
+
+                                PlasmaComponents3.Label {
+                                    anchors.centerIn: parent
+                                    text: index
+                                    color: index === mcsBlock.modelData.mcs ? Kirigami.Theme.backgroundColor : Kirigami.Theme.textColor
+                                    font.family: root.monospaceFamily
+                                    font.pixelSize: Math.max(9, Kirigami.Theme.defaultFont.pixelSize - 2)
+                                }
+                            }
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 1
+
+                        Repeater {
+                            model: root.mcsGridCount(mcsBlock.rates.length, mcsBlock.modelData.mode)
+
+                            delegate: PlasmaComponents3.Label {
+                                required property int index
+                                Layout.fillWidth: true
+                                horizontalAlignment: Text.AlignHCenter
+                                text: index < mcsBlock.rates.length ? mcsBlock.rates[index] : "-"
+                                color: Kirigami.Theme.disabledTextColor
+                                font.family: root.monospaceFamily
+                                font.pixelSize: Math.max(9, Kirigami.Theme.defaultFont.pixelSize - 2)
+                            }
+                        }
+                    }
+                }
+            }
+
+            PlasmaComponents3.Label {
+                Layout.fillWidth: true
+                text: "TX RETRIES"
+                font.bold: true
+                font.family: root.monospaceFamily
+                color: Kirigami.Theme.highlightColor
+            }
 
             ColumnLayout {
-                id: contentColumn
-                width: fitFrame.width / fitFrame.scaleFactor
-                scale: fitFrame.scaleFactor
-                transformOrigin: Item.TopLeft
-                spacing: Kirigami.Units.mediumSpacing
+                id: retryBlock
+                Layout.fillWidth: true
+                spacing: 0
 
-                PlasmaComponents3.Label {
-                    Layout.fillWidth: true
-                    text: "wifimimo"
-                    font.bold: true
-                    font.family: root.monospaceFamily
-                    horizontalAlignment: Text.AlignHCenter
-                }
+                readonly property real retryPct: root.data.retry_10s_pct
 
-                Text {
+                RowLayout {
                     Layout.fillWidth: true
-                    text: root.hasRecentData ? root.connectionSummary() : ("Not connected on " + root.data.iface)
-                    wrapMode: Text.Wrap
-                    maximumLineCount: 2
-                    fontSizeMode: Text.Fit
-                    minimumPixelSize: Kirigami.Theme.defaultFont.pixelSize + 2
-                    font.pixelSize: Kirigami.Theme.defaultFont.pixelSize + 10
-                    font.bold: true
-                    font.family: root.monospaceFamily
-                    color: root.hasRecentData ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.negativeTextColor
-                }
-
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    Layout.topMargin: Kirigami.Units.smallSpacing / 2
                     spacing: Kirigami.Units.mediumSpacing
 
-                PlasmaComponents3.Label {
-                    Layout.fillWidth: true
-                    text: "SIGNAL"
-                    font.bold: true
-                    font.family: root.monospaceFamily
-                    color: Kirigami.Theme.highlightColor
-                }
-
-                Repeater {
-                    model: {
-                        return [
-                            { label: "Overall", value: root.data.signal_dbm, hist: "sig_overall", kind: "signal" },
-                            { label: "Avg", value: root.data.signal_avg_dbm, hist: "sig_avg", kind: "signal" },
-                            { label: "Antenna 1", value: root.antennaSignalAt(0), hist: "sig_ant0", kind: "signal" },
-                            { label: "Antenna 2", value: root.antennaSignalAt(1), hist: "sig_ant1", kind: "signal" },
-                            { label: "Spread", value: root.spreadValue(), hist: "sig_spread", kind: "spread", suffix: "warn >15" }
-                        ];
-                    }
-
-                    delegate: ColumnLayout {
-                        id: signalBlock
-                        required property var modelData
-                        Layout.fillWidth: true
-                        spacing: Kirigami.Units.smallSpacing / 2
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: Kirigami.Units.largeSpacing
-
-                            PlasmaComponents3.Label {
-                                Layout.preferredWidth: Kirigami.Units.gridUnit * 8
-                                text: signalBlock.modelData.label
-                                color: Kirigami.Theme.disabledTextColor
-                                font.family: root.monospaceFamily
-                            }
-
-                            PlasmaComponents3.Label {
-                                Layout.preferredWidth: Kirigami.Units.gridUnit * 6
-                                text: Number(signalBlock.modelData.value).toFixed(0) + " dBm"
-                                color: signalBlock.modelData.kind === "spread"
-                                    ? root.alertColor(signalBlock.modelData.value, 10, 15)
-                                    : root.signalColor(signalBlock.modelData.value)
-                                font.family: root.monospaceFamily
-                            }
-
-                            PlasmaComponents3.Label {
-                                Layout.fillWidth: true
-                                text: Number(root.histMin(signalBlock.modelData.hist, signalBlock.modelData.value)).toFixed(0)
-                                      + " .. "
-                                      + Number(root.histMax(signalBlock.modelData.hist, signalBlock.modelData.value)).toFixed(0)
-                                      + (signalBlock.modelData.suffix ? "  " + signalBlock.modelData.suffix : "")
-                                horizontalAlignment: Text.AlignRight
-                                color: Kirigami.Theme.disabledTextColor
-                                font.family: root.monospaceFamily
-                            }
-                        }
-
-                        Item {
-                            Layout.fillWidth: true
-                            implicitHeight: Kirigami.Units.gridUnit
-
-                            Rectangle {
-                                anchors.fill: parent
-                                radius: height / 2
-                                color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g, Kirigami.Theme.textColor.b, 0.12)
-                            }
-
-                            Rectangle {
-                                anchors.left: parent.left
-                                anchors.top: parent.top
-                                anchors.bottom: parent.bottom
-                                width: Math.max(6, parent.width * (signalBlock.modelData.kind === "spread"
-                                    ? root.spreadFraction(signalBlock.modelData.value)
-                                    : root.signalFraction(signalBlock.modelData.value)))
-                                radius: height / 2
-                                color: signalBlock.modelData.kind === "spread"
-                                    ? root.alertColor(signalBlock.modelData.value, 10, 15)
-                                    : root.signalColor(signalBlock.modelData.value)
-                            }
-
-                            Rectangle {
-                                width: 2
-                                radius: 1
-                                anchors.top: parent.top
-                                anchors.bottom: parent.bottom
-                                x: Math.max(0, Math.min(parent.width - width, parent.width * (signalBlock.modelData.kind === "spread"
-                                    ? root.spreadFraction(root.histMax(signalBlock.modelData.hist, signalBlock.modelData.value))
-                                    : root.signalFraction(root.histMax(signalBlock.modelData.hist, signalBlock.modelData.value)))))
-                                color: Kirigami.Theme.textColor
-                                opacity: 0.6
-                            }
-                        }
-                    }
-                }
-                PlasmaComponents3.Label {
-                    Layout.fillWidth: true
-                    text: "RATES"
-                    font.bold: true
-                    font.family: root.monospaceFamily
-                    color: Kirigami.Theme.highlightColor
-                }
-
-                    Repeater {
-                        model: [
-                            { label: "TX", rate: root.data.tx_rate_mbps, nss: root.data.tx_nss, mcs: root.data.tx_mcs, mode: root.data.tx_mode, gi: root.data.tx_gi, hist: "tx_rate" },
-                            { label: "RX", rate: root.data.rx_rate_mbps, nss: root.data.rx_nss, mcs: root.data.rx_mcs, mode: root.data.rx_mode, gi: root.data.rx_gi, hist: "rx_rate" }
-                        ]
-
-                        delegate: ColumnLayout {
-                            id: rateBlock
-                            required property var modelData
-                            Layout.fillWidth: true
-                            spacing: Kirigami.Units.smallSpacing / 2
-
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: Kirigami.Units.largeSpacing
-
-                                PlasmaComponents3.Label {
-                                    Layout.preferredWidth: Kirigami.Units.gridUnit * 3
-                                    text: rateBlock.modelData.label
-                                    color: Kirigami.Theme.disabledTextColor
-                                    font.family: root.monospaceFamily
-                                }
-
-                                PlasmaComponents3.Label {
-                                    Layout.preferredWidth: Kirigami.Units.gridUnit * 8
-                                    text: Number(rateBlock.modelData.rate).toFixed(1) + " Mb/s"
-                                    font.family: root.monospaceFamily
-                                }
-
-                                PlasmaComponents3.Label {
-                                    Layout.fillWidth: true
-                                    text: Number(root.histMin(rateBlock.modelData.hist, rateBlock.modelData.rate)).toFixed(0)
-                                          + " .. "
-                                          + Number(root.histMax(rateBlock.modelData.hist, rateBlock.modelData.rate)).toFixed(0)
-                                          + "  NSS " + rateBlock.modelData.nss + " " + root.nssDots(rateBlock.modelData.nss)
-                                          + (rateBlock.modelData.gi >= 0 ? "  GI " + root.giLabel(rateBlock.modelData.gi) : "")
-                                    horizontalAlignment: Text.AlignRight
-                                    color: Kirigami.Theme.disabledTextColor
-                                    font.family: root.monospaceFamily
-                                }
-                            }
-
-                            Item {
-                                id: rateBar
-                                Layout.fillWidth: true
-                                implicitHeight: Kirigami.Units.gridUnit
-
-                                readonly property real ceiling: root.rateCeiling(rateBlock.modelData.rate, rateBlock.modelData.mcs, rateBlock.modelData.mode)
-
-                                Rectangle {
-                                    anchors.fill: parent
-                                    radius: height / 2
-                                    color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g, Kirigami.Theme.textColor.b, 0.12)
-                                }
-
-                                Rectangle {
-                                    anchors.left: parent.left
-                                    anchors.top: parent.top
-                                    anchors.bottom: parent.bottom
-                                    width: Math.max(6, parent.width * Math.max(0, Math.min(1, rateBlock.modelData.rate / rateBar.ceiling)))
-                                    radius: height / 2
-                                    color: Kirigami.Theme.positiveTextColor
-                                }
-
-                                Rectangle {
-                                    width: 2
-                                    radius: 1
-                                    anchors.top: parent.top
-                                    anchors.bottom: parent.bottom
-                                    x: Math.max(0, Math.min(parent.width - width, parent.width * Math.max(0, Math.min(1, root.histMax(rateBlock.modelData.hist, rateBlock.modelData.rate) / rateBar.ceiling))))
-                                    color: Kirigami.Theme.textColor
-                                    opacity: 0.6
-                                }
-                            }
-                        }
-                    }
-
                     PlasmaComponents3.Label {
-                        Layout.fillWidth: true
-                        text: "MCS INDEX"
-                        font.bold: true
+                        Layout.preferredWidth: Kirigami.Units.gridUnit * 6
+                        text: "Retry rate"
+                        color: Kirigami.Theme.disabledTextColor
                         font.family: root.monospaceFamily
-                        color: Kirigami.Theme.highlightColor
-                    }
-
-                    Repeater {
-                        model: [
-                            { label: "TX", mcs: root.data.tx_mcs, rate: root.data.tx_rate_mbps, mode: root.data.tx_mode, hist: "tx_mcs" },
-                            { label: "RX", mcs: root.data.rx_mcs, rate: root.data.rx_rate_mbps, mode: root.data.rx_mode, hist: "rx_mcs" }
-                        ]
-
-                        delegate: ColumnLayout {
-                            id: mcsBlock
-                            required property var modelData
-                            readonly property var rates: root.computeRates(mcsBlock.modelData.rate, mcsBlock.modelData.mcs, mcsBlock.modelData.mode)
-                            Layout.fillWidth: true
-                            spacing: Kirigami.Units.smallSpacing
-
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: Kirigami.Units.smallSpacing
-
-                                PlasmaComponents3.Label {
-                                    text: mcsBlock.modelData.label + "  MCS " + root.displayMcs(mcsBlock.modelData.mcs)
-                                    font.family: root.monospaceFamily
-                                }
-
-                                PlasmaComponents3.Label {
-                                    text: Number(mcsBlock.modelData.rate).toFixed(0) + " Mb/s"
-                                    color: root.mcsColor(
-                                        mcsBlock.modelData.mcs,
-                                        mcsBlock.modelData.mcs,
-                                        mcsBlock.modelData.mcs,
-                                        mcsBlock.modelData.mcs,
-                                        Math.max(0, mcsBlock.rates.length - 1)
-                                    )
-                                    font.family: root.monospaceFamily
-                                }
-
-                                Item {
-                                    Layout.fillWidth: true
-                                }
-
-                                PlasmaComponents3.Label {
-                                    text: mcsBlock.modelData.mcs >= 0
-                                          ? ("min " + Number(root.histMin(mcsBlock.modelData.hist, mcsBlock.modelData.mcs)).toFixed(0)
-                                             + "  max " + Number(root.histMax(mcsBlock.modelData.hist, mcsBlock.modelData.mcs)).toFixed(0))
-                                          : "min -  max -"
-                                    font.family: root.monospaceFamily
-                                }
-                            }
-
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: Kirigami.Units.smallSpacing / 2
-
-                                Repeater {
-                                    model: root.mcsGridCount(mcsBlock.rates.length, mcsBlock.modelData.mode)
-
-                                    delegate: Rectangle {
-                                        required property int index
-                                        Layout.fillWidth: true
-                                        Layout.preferredHeight: Kirigami.Units.gridUnit * 1.15
-                                        radius: 3
-                                        color: root.mcsColor(
-                                            index,
-                                            Math.max(0, mcsBlock.modelData.mcs),
-                                            mcsBlock.modelData.mcs >= 0 ? root.histMin(mcsBlock.modelData.hist, mcsBlock.modelData.mcs) : -1,
-                                            mcsBlock.modelData.mcs >= 0 ? root.histMax(mcsBlock.modelData.hist, mcsBlock.modelData.mcs) : -1,
-                                            Math.max(0, root.mcsGridCount(mcsBlock.rates.length, mcsBlock.modelData.mode) - 1)
-                                        )
-
-                                        PlasmaComponents3.Label {
-                                            anchors.centerIn: parent
-                                            text: index
-                                            color: index === mcsBlock.modelData.mcs ? Kirigami.Theme.backgroundColor : Kirigami.Theme.textColor
-                                            font.family: root.monospaceFamily
-                                        }
-                                    }
-                                }
-                            }
-
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: Kirigami.Units.smallSpacing / 2
-
-                                Repeater {
-                                    model: root.mcsGridCount(mcsBlock.rates.length, mcsBlock.modelData.mode)
-
-                                    delegate: PlasmaComponents3.Label {
-                                        required property int index
-                                        Layout.fillWidth: true
-                                        horizontalAlignment: Text.AlignHCenter
-                                        text: index < mcsBlock.rates.length ? mcsBlock.rates[index] : "-"
-                                        color: Kirigami.Theme.disabledTextColor
-                                        font.family: root.monospaceFamily
-                                        font.pixelSize: Math.max(10, Kirigami.Theme.defaultFont.pixelSize - 1)
-                                    }
-                                }
-                            }
-
-                            PlasmaComponents3.Label {
-                                Layout.fillWidth: true
-                                text: "Mb/s"
-                                horizontalAlignment: Text.AlignRight
-                                color: Kirigami.Theme.disabledTextColor
-                                font.family: root.monospaceFamily
-                                font.pixelSize: Math.max(10, Kirigami.Theme.defaultFont.pixelSize - 1)
-                            }
-                        }
                     }
 
                     PlasmaComponents3.Label {
-                        Layout.fillWidth: true
-                        text: "TX RETRIES"
-                        font.bold: true
+                        Layout.preferredWidth: Kirigami.Units.gridUnit * 5
+                        text: retryBlock.retryPct.toFixed(1) + "%"
+                        color: root.alertColor(retryBlock.retryPct, 10, 30)
                         font.family: root.monospaceFamily
-                        color: Kirigami.Theme.highlightColor
                     }
-
-                    ColumnLayout {
-                        id: retryBlock
-                        Layout.fillWidth: true
-                        spacing: Kirigami.Units.smallSpacing / 2
-
-                        readonly property real retryPct: root.data.retry_10s_pct
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: Kirigami.Units.mediumSpacing
-
-                            PlasmaComponents3.Label {
-                                Layout.preferredWidth: Kirigami.Units.gridUnit * 8
-                                text: "Retry rate"
-                                color: Kirigami.Theme.disabledTextColor
-                                font.family: root.monospaceFamily
-                            }
-
-                            PlasmaComponents3.Label {
-                                Layout.preferredWidth: Kirigami.Units.gridUnit * 6
-                                text: retryBlock.retryPct.toFixed(1) + "%"
-                                color: root.alertColor(retryBlock.retryPct, 10, 30)
-                                font.family: root.monospaceFamily
-                            }
-                        }
-
-                        PlasmaComponents3.Label {
-                            Layout.fillWidth: true
-                            text: root.histMax("retry_pct", retryBlock.retryPct).toFixed(1) + "% max  warn >30%"
-                            color: Kirigami.Theme.disabledTextColor
-                            font.family: root.monospaceFamily
-                        }
-
-                        PlasmaComponents3.Label {
-                            Layout.fillWidth: true
-                            text: root.data.retry_10s_retries + "/" + root.data.retry_10s_packets + " retries  fail " + root.data.retry_10s_failed + " over 10s"
-                            wrapMode: Text.Wrap
-                            color: Kirigami.Theme.disabledTextColor
-                            font.family: root.monospaceFamily
-                        }
-
-                        Item {
-                            Layout.fillWidth: true
-                            implicitHeight: Kirigami.Units.gridUnit
-
-                            Rectangle {
-                                anchors.fill: parent
-                                radius: height / 2
-                                color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g, Kirigami.Theme.textColor.b, 0.12)
-                            }
-
-                            Rectangle {
-                                anchors.left: parent.left
-                                anchors.top: parent.top
-                                anchors.bottom: parent.bottom
-                                width: Math.max(6, parent.width * Math.max(0, Math.min(1, retryBlock.retryPct / 100.0)))
-                                radius: height / 2
-                                color: root.alertColor(retryBlock.retryPct, 10, 30)
-                            }
-
-                            Rectangle {
-                                width: 2
-                                radius: 1
-                                anchors.top: parent.top
-                                anchors.bottom: parent.bottom
-                                x: Math.max(0, Math.min(parent.width - width, parent.width * Math.max(0, Math.min(1, root.histMax("retry_pct", retryBlock.retryPct) / 100.0))))
-                                color: Kirigami.Theme.textColor
-                                opacity: 0.6
-                            }
-                        }
-                }
 
                     PlasmaComponents3.Label {
                         Layout.fillWidth: true
-                        text: root.hasRecentData
-                            ? "Source: wifimimo-daemon shared state"
-                            : "Waiting for wifimimo-daemon state"
+                        text: root.histMax("retry_pct", retryBlock.retryPct).toFixed(1) + "% max  "
+                              + root.data.retry_10s_retries + "/" + root.data.retry_10s_packets + " retries  fail " + root.data.retry_10s_failed
+                        horizontalAlignment: Text.AlignRight
                         color: Kirigami.Theme.disabledTextColor
                         font.family: root.monospaceFamily
                     }
                 }
+
+                Item {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 8
+                    Layout.minimumHeight: 8
+                    Layout.maximumHeight: 8
+
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: height / 2
+                        color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g, Kirigami.Theme.textColor.b, 0.12)
+                    }
+
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        width: Math.max(4, parent.width * Math.max(0, Math.min(1, retryBlock.retryPct / 100.0)))
+                        radius: height / 2
+                        color: root.alertColor(retryBlock.retryPct, 10, 30)
+                    }
+
+                    Rectangle {
+                        width: 2
+                        radius: 1
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        x: Math.max(0, Math.min(parent.width - width, parent.width * Math.max(0, Math.min(1, root.histMax("retry_pct", retryBlock.retryPct) / 100.0))))
+                        color: Kirigami.Theme.textColor
+                        opacity: 0.6
+                    }
+                }
+            }
+
+            PlasmaComponents3.Label {
+                Layout.fillWidth: true
+                text: root.hasRecentData
+                    ? "Source: wifimimo-daemon shared state"
+                    : "Waiting for wifimimo-daemon state"
+                color: Kirigami.Theme.disabledTextColor
+                font.family: root.monospaceFamily
             }
         }
     }

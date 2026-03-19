@@ -8,6 +8,7 @@ PLASMOID_DIR="$ROOT_DIR/plasmoid/org.kde.plasma.wifimimo"
 
 TARGET_DAEMON="/usr/local/bin/wifimimo-daemon"
 TARGET_MON="/usr/local/bin/wifimimo-mon"
+TARGET_PLASMOID_SOURCE="/usr/local/bin/wifimimo-plasmoid-source"
 TARGET_DESKTOP="/usr/share/applications/wifimimo.desktop"
 USER_SERVICE_NAME="wifimimo-daemon.service"
 
@@ -52,6 +53,12 @@ install -Dm755 /dev/stdin "$TARGET_MON" <<EOF2
 #!/usr/bin/env bash
 set -euo pipefail
 exec python3 "$ROOT_DIR/wifimimo-mon.py" "\$@"
+EOF2
+
+install -Dm755 /dev/stdin "$TARGET_PLASMOID_SOURCE" <<EOF2
+#!/usr/bin/env bash
+set -euo pipefail
+exec python3 "$ROOT_DIR/wifimimo-plasmoid-source.py" "\$@"
 EOF2
 
 install -Dm644 "$ROOT_DIR/wifimimo.desktop" "$TARGET_DESKTOP"
@@ -99,6 +106,7 @@ run_as_user systemctl --user enable --now "$USER_SERVICE_NAME"
 printf 'Installed:\n'
 printf '  %s\n' "$TARGET_DAEMON"
 printf '  %s\n' "$TARGET_MON"
+printf '  %s\n' "$TARGET_PLASMOID_SOURCE"
 printf '  %s\n' "$TARGET_DESKTOP"
 printf '  %s\n' "$USER_SERVICE_PATH"
 printf '\nUser service status:\n'
