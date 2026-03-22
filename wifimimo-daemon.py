@@ -23,6 +23,7 @@ TRANSITION_COOLDOWN_S = 30.0
 RETRY_WINDOW_S = 10.0
 ICON_NAME = "network-wireless-hotspot-symbolic"
 DESKTOP_ENTRY = "wifimimo"
+U32_COUNTER_MODULUS = 2 ** 32
 
 
 def log(message: str) -> None:
@@ -62,6 +63,12 @@ class WifimimoDaemon:
 
     def reset_retry_window(self) -> None:
         self.retry_samples.clear()
+
+    @staticmethod
+    def counter_delta(current: int, previous: int) -> int:
+        if current >= previous:
+            return current - previous
+        return U32_COUNTER_MODULUS - previous + current
 
     def session_changed(self, state: dict) -> bool:
         if not self.retry_samples:
@@ -151,9 +158,9 @@ class WifimimoDaemon:
             return
 
         base = self.retry_samples[0]
-        packet_delta = max(0, sample["tx_packets"] - base["tx_packets"])
-        retry_delta = max(0, sample["tx_retries"] - base["tx_retries"])
-        failed_delta = max(0, sample["tx_failed"] - base["tx_failed"])
+        packet_delta = self.counter_delta(sample["tx_packets"], base["tx_packets"])
+        retry_delta = self.counter_delta(sample["tx_retries"], base["tx_retries"])
+        failed_delta = self.counter_delta(sample["tx_failed"], base["tx_failed"])
 
         state["retry_10s_packets"] = packet_delta
         state["retry_10s_retries"] = retry_delta
