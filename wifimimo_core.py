@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import subprocess
+import threading
 from pathlib import Path
 
 try:
@@ -37,6 +39,45 @@ NL80211_WIDTH_TO_MHZ = {
     6: 5,
     7: 10,
 }
+NL80211_CALL_TIMEOUT_S = 1.0
+
+
+class NetlinkTimeoutError(TimeoutError):
+    """Raised when an nl80211 call exceeds its bounded collection window."""
+
+
+class _TimeoutContext:
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
+        self.previous_handler = None
+        self.previous_timer: tuple[float, float] | None = None
+        self.enabled = (
+            seconds > 0
+            and hasattr(signal, "setitimer")
+            and threading.current_thread() is threading.main_thread()
+        )
+
+    def _handle_timeout(self, _signum, _frame) -> None:
+        raise NetlinkTimeoutError()
+
+    def __enter__(self) -> "_TimeoutContext":
+        if self.enabled:
+            self.previous_handler = signal.getsignal(signal.SIGALRM)
+            self.previous_timer = signal.setitimer(signal.ITIMER_REAL, 0.0)
+            signal.signal(signal.SIGALRM, self._handle_timeout)
+            signal.setitimer(signal.ITIMER_REAL, self.seconds)
+        return self
+
+    def __exit__(self, exc_type, exc, _tb) -> bool:
+        if self.enabled:
+            signal.setitimer(signal.ITIMER_REAL, 0.0)
+            if self.previous_timer is not None:
+                delay, interval = self.previous_timer
+                if delay > 0 or interval > 0:
+                    signal.setitimer(signal.ITIMER_REAL, delay, interval)
+            if self.previous_handler is not None:
+                signal.signal(signal.SIGALRM, self.previous_handler)
+        return False
 
 
 def default_state(iface: str = IFACE) -> dict:
@@ -221,60 +262,61 @@ def _collect_via_netlink(iface: str) -> dict | None:
 
     iw = IW()
     try:
-        ifindex = None
-        interface_attrs = None
-        for message in iw.list_dev():
-            attrs = _attrs_to_dict(message)
-            if attrs.get("NL80211_ATTR_IFNAME") == iface:
-                ifindex = _int(attrs.get("NL80211_ATTR_IFINDEX"), 0)
-                interface_attrs = attrs
+        with _TimeoutContext(NL80211_CALL_TIMEOUT_S):
+            ifindex = None
+            interface_attrs = None
+            for message in iw.list_dev():
+                attrs = _attrs_to_dict(message)
+                if attrs.get("NL80211_ATTR_IFNAME") == iface:
+                    ifindex = _int(attrs.get("NL80211_ATTR_IFINDEX"), 0)
+                    interface_attrs = attrs
+                    break
+            if not ifindex or not interface_attrs:
+                return None
+
+            data = default_state(iface)
+            ssid = interface_attrs.get("NL80211_ATTR_SSID", "")
+            freq_mhz = _int(interface_attrs.get("NL80211_ATTR_WIPHY_FREQ"), 0)
+            chan_width = interface_attrs.get("NL80211_ATTR_CHANNEL_WIDTH")
+            data["iface"] = iface
+            data["ssid"] = ssid
+            data["ssid_display"] = safe_ssid(ssid)
+            data["freq_mhz"] = freq_mhz
+            data["chan_num"] = freq_to_channel(freq_mhz)
+            data["bandwidth_mhz"] = NL80211_WIDTH_TO_MHZ.get(_int(chan_width, -1), 0)
+
+            station_message = None
+            for message in iw.get_stations(ifindex):
+                station_message = message
                 break
-        if not ifindex or not interface_attrs:
-            return None
+            if station_message is None:
+                return data
 
-        data = default_state(iface)
-        ssid = interface_attrs.get("NL80211_ATTR_SSID", "")
-        freq_mhz = _int(interface_attrs.get("NL80211_ATTR_WIPHY_FREQ"), 0)
-        chan_width = interface_attrs.get("NL80211_ATTR_CHANNEL_WIDTH")
-        data["iface"] = iface
-        data["ssid"] = ssid
-        data["ssid_display"] = safe_ssid(ssid)
-        data["freq_mhz"] = freq_mhz
-        data["chan_num"] = freq_to_channel(freq_mhz)
-        data["bandwidth_mhz"] = NL80211_WIDTH_TO_MHZ.get(_int(chan_width, -1), 0)
+            station_attrs = _attrs_to_dict(station_message)
+            station_info = _attrs_to_dict(station_attrs.get("NL80211_ATTR_STA_INFO"))
+            if not station_info:
+                return data
 
-        station_message = None
-        for message in iw.get_stations(ifindex):
-            station_message = message
-            break
-        if station_message is None:
+            data["connected"] = True
+            data["bssid"] = station_attrs.get("NL80211_ATTR_MAC", "")
+            data["station_dump_available"] = True
+            data["signal_dbm"] = _int(station_info.get("NL80211_STA_INFO_SIGNAL"), 0)
+            data["signal_avg_dbm"] = _int(station_info.get("NL80211_STA_INFO_SIGNAL_AVG"), 0)
+            data["signal_antennas"] = [
+                _int(value)
+                for value in station_info.get("NL80211_STA_INFO_CHAIN_SIGNAL", []) or []
+            ]
+            data["tx_packets"] = _int(station_info.get("NL80211_STA_INFO_TX_PACKETS"), 0)
+            data["tx_retries"] = _int(station_info.get("NL80211_STA_INFO_TX_RETRIES"), 0)
+            data["tx_failed"] = _int(station_info.get("NL80211_STA_INFO_TX_FAILED"), 0)
+            data["rx_packets"] = _int(station_info.get("NL80211_STA_INFO_RX_PACKETS"), 0)
+            data["connected_time_s"] = _int(
+                station_info.get("NL80211_STA_INFO_CONNECTED_TIME"), 0
+            )
+
+            _parse_rate_info(data, "tx", station_info.get("NL80211_STA_INFO_TX_BITRATE"))
+            _parse_rate_info(data, "rx", station_info.get("NL80211_STA_INFO_RX_BITRATE"))
             return data
-
-        station_attrs = _attrs_to_dict(station_message)
-        station_info = _attrs_to_dict(station_attrs.get("NL80211_ATTR_STA_INFO"))
-        if not station_info:
-            return data
-
-        data["connected"] = True
-        data["bssid"] = station_attrs.get("NL80211_ATTR_MAC", "")
-        data["station_dump_available"] = True
-        data["signal_dbm"] = _int(station_info.get("NL80211_STA_INFO_SIGNAL"), 0)
-        data["signal_avg_dbm"] = _int(station_info.get("NL80211_STA_INFO_SIGNAL_AVG"), 0)
-        data["signal_antennas"] = [
-            _int(value)
-            for value in station_info.get("NL80211_STA_INFO_CHAIN_SIGNAL", []) or []
-        ]
-        data["tx_packets"] = _int(station_info.get("NL80211_STA_INFO_TX_PACKETS"), 0)
-        data["tx_retries"] = _int(station_info.get("NL80211_STA_INFO_TX_RETRIES"), 0)
-        data["tx_failed"] = _int(station_info.get("NL80211_STA_INFO_TX_FAILED"), 0)
-        data["rx_packets"] = _int(station_info.get("NL80211_STA_INFO_RX_PACKETS"), 0)
-        data["connected_time_s"] = _int(
-            station_info.get("NL80211_STA_INFO_CONNECTED_TIME"), 0
-        )
-
-        _parse_rate_info(data, "tx", station_info.get("NL80211_STA_INFO_TX_BITRATE"))
-        _parse_rate_info(data, "rx", station_info.get("NL80211_STA_INFO_RX_BITRATE"))
-        return data
     except Exception:
         return None
     finally:

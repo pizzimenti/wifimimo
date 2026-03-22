@@ -147,6 +147,9 @@ class WifimimoDaemon:
         while self.retry_samples and now - self.retry_samples[0]["monotonic"] > RETRY_WINDOW_S:
             self.retry_samples.popleft()
 
+        if not self.retry_samples:
+            return
+
         base = self.retry_samples[0]
         packet_delta = max(0, sample["tx_packets"] - base["tx_packets"])
         retry_delta = max(0, sample["tx_retries"] - base["tx_retries"])
