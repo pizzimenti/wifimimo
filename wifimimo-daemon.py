@@ -185,6 +185,7 @@ class WifimimoDaemon:
                 body,
             ],
             check=False,
+            timeout=5,
         )
 
 

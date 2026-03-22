@@ -86,15 +86,17 @@ PlasmoidItem {
     }
 
     function updateHistory(key, value) {
-        const next = Object.assign({}, history);
-        const current = next[key];
+        const current = history[key];
         if (!current) {
-            next[key] = { min: value, max: value };
+            history[key] = { min: value, max: value };
         } else {
             current.min = Math.min(current.min, value);
             current.max = Math.max(current.max, value);
         }
-        history = next;
+    }
+
+    function commitHistory() {
+        history = Object.assign({}, history);
     }
 
     function histMin(key, fallback) {
@@ -240,6 +242,7 @@ PlasmoidItem {
         }
         updateHistory("retry_pct", next.retry_10s_pct);
 
+        commitHistory();
     }
 
     function signalFraction(dbm) {
@@ -833,7 +836,7 @@ PlasmoidItem {
 
     Timer {
         id: pollTimer
-        interval: root.refreshMs
+        interval: root.expanded ? root.refreshMs : 5000
         repeat: true
         running: true
         triggeredOnStart: true
