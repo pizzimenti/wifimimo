@@ -11,6 +11,7 @@ TARGET_DAEMON="/usr/local/bin/wifimimo-daemon"
 TARGET_MON="/usr/local/bin/wifimimo-mon"
 TARGET_DESKTOP="/usr/share/applications/wifimimo.desktop"
 USER_SERVICE_NAME="wifimimo-daemon.service"
+PLASMOID_PLUGIN_ID="org.kde.plasma.wifimimo"
 
 if [[ $EUID -ne 0 ]]; then
     exec pkexec bash "$SELF" "$@"
@@ -21,6 +22,18 @@ run_as_user() {
         sudo -u "#${PKEXEC_UID}" XDG_RUNTIME_DIR="/run/user/${PKEXEC_UID}" HOME="$HOME" "$@"
     else
         "$@"
+    fi
+}
+
+upgrade_or_install_plasmoid() {
+    local plasmoid_dir="$1"
+    local plugin_id="$2"
+    local canonical_dir
+    canonical_dir="$(realpath "$plasmoid_dir")"
+    if run_as_user kpackagetool6 -t Plasma/Applet --show "$plugin_id" >/dev/null 2>&1; then
+        run_as_user kpackagetool6 -t Plasma/Applet --upgrade "$canonical_dir"
+    else
+        run_as_user kpackagetool6 -t Plasma/Applet --install "$canonical_dir"
     fi
 }
 
@@ -57,12 +70,12 @@ USER_SERVICE_PATH="$USER_SYSTEMD_DIR/$USER_SERVICE_NAME"
 install -d -m 755 "$USER_SYSTEMD_DIR"
 install -Dm644 "$SERVICE_DIR/wifimimo-daemon.service" "$USER_SERVICE_PATH"
 
-run_as_user kpackagetool6 -t Plasma/Applet --upgrade "$PLASMOID_DIR" 2>&1 \
-    || run_as_user kpackagetool6 -t Plasma/Applet --install "$PLASMOID_DIR" 2>&1 \
+upgrade_or_install_plasmoid "$PLASMOID_DIR" "$PLASMOID_PLUGIN_ID" \
     || echo "Note: Plasma widget install/upgrade skipped (may need manual add)"
 
 run_as_user systemctl --user daemon-reload
-run_as_user systemctl --user enable --now "$USER_SERVICE_NAME"
+run_as_user systemctl --user enable "$USER_SERVICE_NAME"
+run_as_user systemctl --user restart "$USER_SERVICE_NAME"
 
 printf 'Installed:\n'
 printf '  %s\n' "$TARGET_LIB_DIR/"
