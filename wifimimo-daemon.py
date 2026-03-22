@@ -17,7 +17,9 @@ from wifimimo_core import IFACE, STATE_PATH, collect, write_state
 ALERT_DIFF_DBM = 15
 ALERT_SIGNAL_DBM = -75
 ALERT_RETRY_PCT = 30
-POLL_INTERVAL_S = 1.0
+POLL_FAST_S = 1.0
+POLL_SLOW_S = 5.0
+TRANSITION_COOLDOWN_S = 30.0
 RETRY_WINDOW_S = 10.0
 ICON_NAME = "network-wireless-hotspot-symbolic"
 DESKTOP_ENTRY = "wifimimo"
@@ -35,6 +37,8 @@ class WifimimoDaemon:
         self.retry_samples: deque[dict] = deque()
         self.prev_connected = False
         self.prev_mimo_healthy: bool | None = None
+        self.last_transition_time = 0.0
+        self.last_state_signature: tuple | None = None
 
     def run(self) -> None:
         signal.signal(signal.SIGINT, self.stop)
@@ -47,10 +51,11 @@ class WifimimoDaemon:
             self.update_retry_window(state, loop_start)
             issues = self.collect_issues(state)
             state["issue_count"] = len(issues)
+            poll_interval = self.poll_interval_for_state(state, loop_start)
             self.handle_notifications(state)
             write_state(self.state_path, state)
             elapsed = time.monotonic() - loop_start
-            time.sleep(max(0.05, POLL_INTERVAL_S - elapsed))
+            time.sleep(max(0.05, poll_interval - elapsed))
 
     def stop(self, *_args) -> None:
         self.running = False
@@ -78,6 +83,42 @@ class WifimimoDaemon:
         rx_nss = int(state.get("rx_nss", 0) or 0)
         values = [value for value in (tx_nss, rx_nss) if value > 0]
         return bool(values) and min(values) >= 2
+
+    def state_signature(self, state: dict) -> tuple:
+        connected = bool(state.get("connected"))
+        tx_nss = int(state.get("tx_nss", 0) or 0)
+        rx_nss = int(state.get("rx_nss", 0) or 0)
+        retry_pct = float(state.get("retry_10s_pct", 0.0) or 0.0)
+        signal_dbm = int(state.get("signal_dbm", 0) or 0)
+        effective_nss = min([value for value in (tx_nss, rx_nss) if value > 0], default=0)
+        return (
+            connected,
+            state.get("bssid", ""),
+            effective_nss,
+            retry_pct > ALERT_RETRY_PCT,
+            signal_dbm < ALERT_SIGNAL_DBM,
+        )
+
+    def poll_interval_for_state(self, state: dict, now: float) -> float:
+        signature = self.state_signature(state)
+        if self.last_state_signature is None:
+            self.last_state_signature = signature
+            self.last_transition_time = now
+        elif signature != self.last_state_signature:
+            self.last_state_signature = signature
+            self.last_transition_time = now
+
+        degraded = (
+            bool(state.get("connected"))
+            and (
+                not self.mimo_healthy(state)
+                or float(state.get("retry_10s_pct", 0.0) or 0.0) > ALERT_RETRY_PCT
+                or int(state.get("signal_dbm", 0) or 0) < ALERT_SIGNAL_DBM
+            )
+        )
+        if degraded or now - self.last_transition_time < TRANSITION_COOLDOWN_S:
+            return POLL_FAST_S
+        return POLL_SLOW_S
 
     def update_retry_window(self, state: dict, now: float) -> None:
         state["retry_10s_pct"] = 0.0

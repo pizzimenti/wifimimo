@@ -23,7 +23,6 @@ This installs:
 |------|---------|
 | `/usr/local/bin/wifimimo-daemon` | Background daemon that polls Wi-Fi station data |
 | `/usr/local/bin/wifimimo-mon` | Terminal monitor launcher |
-| `/usr/local/bin/wifimimo-plasmoid-source` | Data source for the Plasma widget |
 | `~/.config/systemd/user/wifimimo-daemon.service` | User systemd service |
 
 ## Daemon
@@ -63,9 +62,9 @@ kpackagetool6 -t Plasma/Applet --upgrade plasmoid/org.kde.plasma.wifimimo
 
 ## Data Sources
 
-- `iw dev <iface> station dump` — signal, rates, MCS, NSS, retries
-- `iw dev <iface> link` — SSID, BSSID, frequency
-- `iw dev <iface> info` — channel width
+- `iw dev <iface> station dump` — signal, per-antenna levels, rates, MCS, NSS, retries
+- `iw dev <iface> link` — SSID, BSSID, frequency, bandwidth
+- shared runtime state file — plasmoid reads `/run/user/$UID/wifimimo-state` directly
 
 ## License
 

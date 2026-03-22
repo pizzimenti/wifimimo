@@ -98,18 +98,21 @@ def compute_rates(ref_rate: float, ref_mcs: int, mode: str) -> list[float]:
     return [round(ref_rate * entry / eff[ref_mcs]) for entry in eff]
 
 
-def collect(iface: str) -> dict:
-    data = default_state(iface)
+def freq_to_channel(freq_mhz: int) -> int:
+    if freq_mhz == 2484:
+        return 14
+    if 2412 <= freq_mhz <= 2472:
+        return (freq_mhz - 2407) // 5
+    if 5000 <= freq_mhz <= 5895:
+        return (freq_mhz - 5000) // 5
+    if 5955 <= freq_mhz <= 7115:
+        return (freq_mhz - 5950) // 5
+    return 0
 
-    dev_out = _run(["iw", "dev", iface])
-    match = re.search(r"channel\s+(\d+)\s+\(.*?\),\s*width:\s*(\d+)\s*MHz", dev_out)
-    if match:
-        data["chan_num"] = _int(match.group(1))
-        data["bandwidth_mhz"] = _int(match.group(2))
 
-    link = _run(["iw", "dev", iface, "link"])
+def parse_link_metrics(data: dict, link: str) -> None:
     if "Not connected" in link or not link.strip():
-        return data
+        return
 
     data["connected"] = True
 
@@ -123,6 +126,7 @@ def collect(iface: str) -> dict:
     match = re.search(r"freq:\s*(\d+)", link)
     if match:
         data["freq_mhz"] = _int(match.group(1))
+        data["chan_num"] = freq_to_channel(data["freq_mhz"])
     match = re.search(r"signal:\s+([-\d]+)", link)
     if match:
         data["signal_dbm"] = _int(match.group(1))
@@ -159,6 +163,15 @@ def collect(iface: str) -> dict:
         data[f"{direction}_mode"] = "HT"
         data[f"{direction}_mcs"] = raw % 8
         data[f"{direction}_nss"] = raw // 8 + 1
+
+
+def collect(iface: str) -> dict:
+    data = default_state(iface)
+
+    link = _run(["iw", "dev", iface, "link"])
+    parse_link_metrics(data, link)
+    if not data["connected"]:
+        return data
 
     dump = _run(["iw", "dev", iface, "station", "dump"])
     if not dump:

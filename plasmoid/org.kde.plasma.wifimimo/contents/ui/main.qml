@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import QtQuick.Layouts
+import QtCore
 
 import org.kde.kirigami as Kirigami
 import org.kde.plasma.core as PlasmaCore
@@ -15,8 +16,8 @@ PlasmoidItem {
 
     preferredRepresentation: compactRepresentation
 
-    property string liveScript: "wifimimo-plasmoid-source"
-    property string currentCommand: ""
+    readonly property string statePath: StandardPaths.writableLocation(StandardPaths.RuntimeLocation) + "/wifimimo-state"
+    readonly property string currentCommand: "/usr/bin/cat " + statePath
     property int refreshMs: 1000
     property string monospaceFamily: "monospace"
 
@@ -72,16 +73,8 @@ PlasmoidItem {
         return values.length ? Math.min.apply(Math, values) : 0;
     }
 
-    function shellEscape(value) {
-        return value.replace(/'/g, "'\\''");
-    }
-
     function pollNow() {
-        const next = "bash -lc '" + shellEscape(liveScript) + "; echo __poll=" + Date.now() + "'";
-        if (currentCommand) {
-            executableSource.disconnectSource(currentCommand);
-        }
-        currentCommand = next;
+        executableSource.disconnectSource(currentCommand);
         executableSource.connectSource(currentCommand);
     }
 
@@ -846,7 +839,7 @@ PlasmoidItem {
     onExpandedChanged: function() {
         if (root.expanded) {
             root.pollNow();
-        } else if (root.currentCommand) {
+        } else {
             executableSource.disconnectSource(root.currentCommand);
         }
     }
