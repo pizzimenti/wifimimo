@@ -1,0 +1,26 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "X-Plasma-API-Minimum-Version": "6.0",
+    "X-Plasma-UniqueApplet": true,
+    "KPlugin": {
+        "Authors": [
+            {
+                "Email": "bradley@localhost",
+                "Name": "Bradley Pizzimenti"
+            }
+        ],
+        "Category": "Network",
+        "Description": "Shows wifimimo state with a native Plasma popup",
+        "EnabledByDefault": true,
+        "FormFactors": [
+            "horizontal",
+            "vertical"
+        ],
+        "Icon": "network-wireless-hotspot-symbolic",
+        "Id": "org.kde.plasma.wifimimo",
+        "License": "MIT",
+        "Name": "wifimimo",
+        "Version": "0.1.0",
+        "Website": "https://local"
+    }
+}
