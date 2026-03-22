@@ -55,7 +55,26 @@ PlasmoidItem {
         timestamp: 0
     })
 
-    property var history: ({})
+    property real histSigOverallMinValue: 0
+    property real histSigOverallMaxValue: 0
+    property real histSigAvgMinValue: 0
+    property real histSigAvgMaxValue: 0
+    property real histSigAnt0MinValue: 0
+    property real histSigAnt0MaxValue: 0
+    property real histSigAnt1MinValue: 0
+    property real histSigAnt1MaxValue: 0
+    property real histSigSpreadMinValue: 0
+    property real histSigSpreadMaxValue: 0
+    property real histTxRateMinValue: 0
+    property real histTxRateMaxValue: 0
+    property real histRxRateMinValue: 0
+    property real histRxRateMaxValue: 0
+    property real histTxMcsMinValue: -1
+    property real histTxMcsMaxValue: -1
+    property real histRxMcsMinValue: -1
+    property real histRxMcsMaxValue: -1
+    property real histRetryPctMinValue: 0
+    property real histRetryPctMaxValue: 0
 
     readonly property bool isConnected: !!(data && data.connected)
     readonly property var antennaSignals: (data && data.antenna_signals) ? data.antenna_signals : []
@@ -78,25 +97,112 @@ PlasmoidItem {
     }
 
     function updateHistory(key, value) {
-        const current = history[key];
-        if (!current) {
-            history[key] = { min: value, max: value };
-        } else {
-            current.min = Math.min(current.min, value);
-            current.max = Math.max(current.max, value);
+        switch (key) {
+        case "sig_overall":
+            histSigOverallMinValue = Math.min(histSigOverallMinValue, value);
+            histSigOverallMaxValue = Math.max(histSigOverallMaxValue, value);
+            break;
+        case "sig_avg":
+            histSigAvgMinValue = Math.min(histSigAvgMinValue, value);
+            histSigAvgMaxValue = Math.max(histSigAvgMaxValue, value);
+            break;
+        case "sig_ant0":
+            histSigAnt0MinValue = Math.min(histSigAnt0MinValue, value);
+            histSigAnt0MaxValue = Math.max(histSigAnt0MaxValue, value);
+            break;
+        case "sig_ant1":
+            histSigAnt1MinValue = Math.min(histSigAnt1MinValue, value);
+            histSigAnt1MaxValue = Math.max(histSigAnt1MaxValue, value);
+            break;
+        case "sig_spread":
+            histSigSpreadMinValue = Math.min(histSigSpreadMinValue, value);
+            histSigSpreadMaxValue = Math.max(histSigSpreadMaxValue, value);
+            break;
+        case "tx_rate":
+            histTxRateMinValue = Math.min(histTxRateMinValue, value);
+            histTxRateMaxValue = Math.max(histTxRateMaxValue, value);
+            break;
+        case "rx_rate":
+            histRxRateMinValue = Math.min(histRxRateMinValue, value);
+            histRxRateMaxValue = Math.max(histRxRateMaxValue, value);
+            break;
+        case "tx_mcs":
+            if (histTxMcsMinValue < 0) {
+                histTxMcsMinValue = value;
+                histTxMcsMaxValue = value;
+            } else {
+                histTxMcsMinValue = Math.min(histTxMcsMinValue, value);
+                histTxMcsMaxValue = Math.max(histTxMcsMaxValue, value);
+            }
+            break;
+        case "rx_mcs":
+            if (histRxMcsMinValue < 0) {
+                histRxMcsMinValue = value;
+                histRxMcsMaxValue = value;
+            } else {
+                histRxMcsMinValue = Math.min(histRxMcsMinValue, value);
+                histRxMcsMaxValue = Math.max(histRxMcsMaxValue, value);
+            }
+            break;
+        case "retry_pct":
+            histRetryPctMinValue = Math.min(histRetryPctMinValue, value);
+            histRetryPctMaxValue = Math.max(histRetryPctMaxValue, value);
+            break;
         }
     }
 
-    function commitHistory() {
-        history = Object.assign({}, history);
-    }
-
     function histMin(key, fallback) {
-        return history[key] ? history[key].min : fallback;
+        switch (key) {
+        case "sig_overall":
+            return histSigOverallMinValue;
+        case "sig_avg":
+            return histSigAvgMinValue;
+        case "sig_ant0":
+            return histSigAnt0MinValue;
+        case "sig_ant1":
+            return histSigAnt1MinValue;
+        case "sig_spread":
+            return histSigSpreadMinValue;
+        case "tx_rate":
+            return histTxRateMinValue;
+        case "rx_rate":
+            return histRxRateMinValue;
+        case "tx_mcs":
+            return histTxMcsMinValue >= 0 ? histTxMcsMinValue : fallback;
+        case "rx_mcs":
+            return histRxMcsMinValue >= 0 ? histRxMcsMinValue : fallback;
+        case "retry_pct":
+            return histRetryPctMinValue;
+        default:
+            return fallback;
+        }
     }
 
     function histMax(key, fallback) {
-        return history[key] ? history[key].max : fallback;
+        switch (key) {
+        case "sig_overall":
+            return histSigOverallMaxValue;
+        case "sig_avg":
+            return histSigAvgMaxValue;
+        case "sig_ant0":
+            return histSigAnt0MaxValue;
+        case "sig_ant1":
+            return histSigAnt1MaxValue;
+        case "sig_spread":
+            return histSigSpreadMaxValue;
+        case "tx_rate":
+            return histTxRateMaxValue;
+        case "rx_rate":
+            return histRxRateMaxValue;
+        case "tx_mcs":
+            return histTxMcsMaxValue >= 0 ? histTxMcsMaxValue : fallback;
+        case "rx_mcs":
+            return histRxMcsMaxValue >= 0 ? histRxMcsMaxValue : fallback;
+        case "retry_pct":
+            return histRetryPctMaxValue;
+        default:
+            return fallback;
+        }
     }
 
     function parseState(rawText) {
@@ -234,7 +340,6 @@ PlasmoidItem {
         }
         updateHistory("retry_pct", next.retry_10s_pct);
 
-        commitHistory();
     }
 
     function signalFraction(dbm) {
