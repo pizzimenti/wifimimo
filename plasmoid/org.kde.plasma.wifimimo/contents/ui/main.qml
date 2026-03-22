@@ -8,7 +8,6 @@ import org.kde.kirigami as Kirigami
 import org.kde.plasma.core as PlasmaCore
 import org.kde.plasma.extras as PlasmaExtras
 import org.kde.plasma.components as PlasmaComponents3
-import org.kde.plasma.plasma5support as Plasma5Support
 import org.kde.plasma.plasmoid
 
 PlasmoidItem {
@@ -17,7 +16,7 @@ PlasmoidItem {
     preferredRepresentation: compactRepresentation
 
     readonly property string statePath: StandardPaths.writableLocation(StandardPaths.RuntimeLocation) + "/wifimimo-state"
-    readonly property string currentCommand: "/usr/bin/cat " + statePath
+    readonly property string stateUrl: "file://" + statePath
     property int refreshMs: 1000
     property string monospaceFamily: "monospace"
 
@@ -74,8 +73,14 @@ PlasmoidItem {
     }
 
     function pollNow() {
-        executableSource.disconnectSource(currentCommand);
-        executableSource.connectSource(currentCommand);
+        const xhr = new XMLHttpRequest();
+        xhr.open("GET", stateUrl, false);
+        xhr.send();
+        if (xhr.status === 0 || xhr.status === 200) {
+            parseState(xhr.responseText || "");
+        } else {
+            parseState("");
+        }
     }
 
     function updateHistory(key, value) {
@@ -814,19 +819,6 @@ PlasmoidItem {
         }
     }
 
-    Plasma5Support.DataSource {
-        id: executableSource
-        engine: "executable"
-        interval: 0
-        onNewData: (sourceName, sourceData) => {
-            if (sourceName !== root.currentCommand) {
-                return;
-            }
-            root.parseState(sourceData.stdout || "");
-            executableSource.disconnectSource(sourceName);
-        }
-    }
-
     Timer {
         id: pollTimer
         interval: root.expanded ? root.refreshMs : 5000
@@ -839,8 +831,6 @@ PlasmoidItem {
     onExpandedChanged: function() {
         if (root.expanded) {
             root.pollNow();
-        } else {
-            executableSource.disconnectSource(root.currentCommand);
         }
     }
 
