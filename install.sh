@@ -65,8 +65,8 @@ install -Dm755 "$ROOT_DIR/wifimimo-plasmoid-source.py" "$TARGET_LIB_DIR/wifimimo
 install -Dm644 "$ROOT_DIR/requirements.txt"            "$TARGET_LIB_DIR/requirements.txt"
 
 python3 -m venv "$TARGET_VENV_DIR"
-"$TARGET_VENV_DIR/bin/python" -m pip install --upgrade pip >/dev/null
-"$TARGET_VENV_DIR/bin/python" -m pip install -r "$TARGET_LIB_DIR/requirements.txt" >/dev/null
+HOME=/root PIP_CACHE_DIR=/root/.cache/pip "$TARGET_VENV_DIR/bin/python" -m pip install --upgrade pip >/dev/null
+HOME=/root PIP_CACHE_DIR=/root/.cache/pip "$TARGET_VENV_DIR/bin/python" -m pip install -r "$TARGET_LIB_DIR/requirements.txt" >/dev/null
 
 install -Dm755 /dev/stdin "$TARGET_DAEMON" <<'EOF2'
 #!/usr/bin/env bash
