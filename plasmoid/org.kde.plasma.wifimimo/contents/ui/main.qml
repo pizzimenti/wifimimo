@@ -151,6 +151,34 @@ PlasmoidItem {
         }
     }
 
+    function resetHistory(sample) {
+        const next = sample || null;
+        const antennaValues = next ? (next.antenna_signals || []) : [];
+        const hasSpread = antennaValues.length >= 2;
+        const spread = hasSpread ? Math.max.apply(Math, antennaValues) - Math.min.apply(Math, antennaValues) : 0;
+
+        histSigOverallMinValue = next ? next.signal_dbm : 0;
+        histSigOverallMaxValue = next ? next.signal_dbm : 0;
+        histSigAvgMinValue = next ? next.signal_avg_dbm : 0;
+        histSigAvgMaxValue = next ? next.signal_avg_dbm : 0;
+        histSigAnt0MinValue = antennaValues.length >= 1 ? antennaValues[0] : 0;
+        histSigAnt0MaxValue = antennaValues.length >= 1 ? antennaValues[0] : 0;
+        histSigAnt1MinValue = antennaValues.length >= 2 ? antennaValues[1] : 0;
+        histSigAnt1MaxValue = antennaValues.length >= 2 ? antennaValues[1] : 0;
+        histSigSpreadMinValue = spread;
+        histSigSpreadMaxValue = spread;
+        histTxRateMinValue = next ? next.tx_rate_mbps : 0;
+        histTxRateMaxValue = next ? next.tx_rate_mbps : 0;
+        histRxRateMinValue = next ? next.rx_rate_mbps : 0;
+        histRxRateMaxValue = next ? next.rx_rate_mbps : 0;
+        histTxMcsMinValue = next && next.tx_mcs >= 0 ? next.tx_mcs : -1;
+        histTxMcsMaxValue = next && next.tx_mcs >= 0 ? next.tx_mcs : -1;
+        histRxMcsMinValue = next && next.rx_mcs >= 0 ? next.rx_mcs : -1;
+        histRxMcsMaxValue = next && next.rx_mcs >= 0 ? next.rx_mcs : -1;
+        histRetryPctMinValue = next ? next.retry_10s_pct : 0;
+        histRetryPctMaxValue = next ? next.retry_10s_pct : 0;
+    }
+
     function histMin(key, fallback) {
         switch (key) {
         case "sig_overall":
@@ -206,6 +234,8 @@ PlasmoidItem {
     }
 
     function parseState(rawText) {
+        const previousConnected = !!(data && data.connected);
+        const previousBssid = data && data.bssid ? data.bssid : "";
         const next = {
             connected: false,
             iface: "wlp1s0",
@@ -316,9 +346,22 @@ PlasmoidItem {
             }
         }
 
+        const bssidChanged = previousConnected && next.connected
+            && previousBssid.length > 0
+            && next.bssid.length > 0
+            && previousBssid !== next.bssid;
+
         data = next;
 
         if (!next.connected) {
+            if (previousConnected) {
+                resetHistory(null);
+            }
+            return;
+        }
+
+        if (!previousConnected || bssidChanged) {
+            resetHistory(next);
             return;
         }
 
