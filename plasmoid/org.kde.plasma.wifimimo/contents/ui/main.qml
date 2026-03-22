@@ -845,23 +845,6 @@ PlasmoidItem {
         }
     }
 
-    Timer {
-        id: pollTimer
-        interval: root.expanded ? root.refreshMs : 5000
-        repeat: true
-        running: true
-        triggeredOnStart: true
-        onTriggered: root.pollNow()
-    }
-
-    onExpandedChanged: function() {
-        if (root.expanded) {
-            root.pollNow();
-        }
-    }
-
-    Component.onCompleted: pollNow()
-
     Plasmoid.status: !data.connected || stale
         ? PlasmaCore.Types.PassiveStatus
         : (effectiveNss <= 1 ? PlasmaCore.Types.NeedsAttentionStatus : PlasmaCore.Types.ActiveStatus)
