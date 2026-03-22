@@ -10,6 +10,11 @@ import re
 import subprocess
 from pathlib import Path
 
+try:
+    from pyroute2 import IW
+except ImportError:
+    IW = None
+
 
 IFACE = "wlp1s0"
 
@@ -21,6 +26,17 @@ EFFICIENCY: dict[str, list[float]] = {
 }
 
 STATE_PATH = Path(f"/run/user/{os.getuid()}/wifimimo-state")
+
+NL80211_WIDTH_TO_MHZ = {
+    0: 20,
+    1: 20,
+    2: 40,
+    3: 80,
+    4: 160,
+    5: 160,
+    6: 5,
+    7: 10,
+}
 
 
 def default_state(iface: str = IFACE) -> dict:
@@ -67,6 +83,15 @@ def _run(cmd: list[str]) -> str:
         return result.stdout
     except Exception:
         return ""
+
+
+def _attrs_to_dict(message: dict | None) -> dict:
+    if not message:
+        return {}
+    result: dict = {}
+    for key, value in message.get("attrs", []):
+        result[key] = value
+    return result
 
 
 def _int(value, default: int = 0) -> int:
@@ -165,7 +190,102 @@ def parse_link_metrics(data: dict, link: str) -> None:
         data[f"{direction}_nss"] = raw // 8 + 1
 
 
+def _parse_rate_info(data: dict, direction: str, rate_info: dict | None) -> None:
+    attrs = _attrs_to_dict(rate_info)
+    bitrate32 = attrs.get("NL80211_RATE_INFO_BITRATE32")
+    bitrate = attrs.get("NL80211_RATE_INFO_BITRATE")
+    raw_rate = bitrate32 if bitrate32 is not None else bitrate
+    if raw_rate is not None:
+        data[f"{direction}_rate_mbps"] = _float(raw_rate) / 10.0
+
+    if "NL80211_RATE_INFO_HE_MCS" in attrs:
+        data[f"{direction}_mode"] = "HE"
+        data[f"{direction}_mcs"] = _int(attrs.get("NL80211_RATE_INFO_HE_MCS"), -1)
+        data[f"{direction}_nss"] = _int(attrs.get("NL80211_RATE_INFO_HE_NSS"), 0)
+        data[f"{direction}_gi"] = _int(attrs.get("NL80211_RATE_INFO_HE_GI"), -1)
+    elif "NL80211_RATE_INFO_VHT_MCS" in attrs:
+        data[f"{direction}_mode"] = "VHT"
+        data[f"{direction}_mcs"] = _int(attrs.get("NL80211_RATE_INFO_VHT_MCS"), -1)
+        data[f"{direction}_nss"] = _int(attrs.get("NL80211_RATE_INFO_VHT_NSS"), 0)
+    elif "NL80211_RATE_INFO_MCS" in attrs:
+        data[f"{direction}_mode"] = "HT"
+        raw = _int(attrs.get("NL80211_RATE_INFO_MCS"), -1)
+        if raw >= 0:
+            data[f"{direction}_mcs"] = raw % 8
+            data[f"{direction}_nss"] = raw // 8 + 1
+
+
+def _collect_via_netlink(iface: str) -> dict | None:
+    if IW is None:
+        return None
+
+    iw = IW()
+    try:
+        ifindex = None
+        interface_attrs = None
+        for message in iw.list_dev():
+            attrs = _attrs_to_dict(message)
+            if attrs.get("NL80211_ATTR_IFNAME") == iface:
+                ifindex = _int(attrs.get("NL80211_ATTR_IFINDEX"), 0)
+                interface_attrs = attrs
+                break
+        if not ifindex or not interface_attrs:
+            return None
+
+        data = default_state(iface)
+        ssid = interface_attrs.get("NL80211_ATTR_SSID", "")
+        freq_mhz = _int(interface_attrs.get("NL80211_ATTR_WIPHY_FREQ"), 0)
+        chan_width = interface_attrs.get("NL80211_ATTR_CHANNEL_WIDTH")
+        data["iface"] = iface
+        data["ssid"] = ssid
+        data["ssid_display"] = safe_ssid(ssid)
+        data["freq_mhz"] = freq_mhz
+        data["chan_num"] = freq_to_channel(freq_mhz)
+        data["bandwidth_mhz"] = NL80211_WIDTH_TO_MHZ.get(_int(chan_width, -1), 0)
+
+        station_message = None
+        for message in iw.get_stations(ifindex):
+            station_message = message
+            break
+        if station_message is None:
+            return data
+
+        station_attrs = _attrs_to_dict(station_message)
+        station_info = _attrs_to_dict(station_attrs.get("NL80211_ATTR_STA_INFO"))
+        if not station_info:
+            return data
+
+        data["connected"] = True
+        data["bssid"] = station_attrs.get("NL80211_ATTR_MAC", "")
+        data["station_dump_available"] = True
+        data["signal_dbm"] = _int(station_info.get("NL80211_STA_INFO_SIGNAL"), 0)
+        data["signal_avg_dbm"] = _int(station_info.get("NL80211_STA_INFO_SIGNAL_AVG"), 0)
+        data["signal_antennas"] = [
+            _int(value)
+            for value in station_info.get("NL80211_STA_INFO_CHAIN_SIGNAL", []) or []
+        ]
+        data["tx_packets"] = _int(station_info.get("NL80211_STA_INFO_TX_PACKETS"), 0)
+        data["tx_retries"] = _int(station_info.get("NL80211_STA_INFO_TX_RETRIES"), 0)
+        data["tx_failed"] = _int(station_info.get("NL80211_STA_INFO_TX_FAILED"), 0)
+        data["rx_packets"] = _int(station_info.get("NL80211_STA_INFO_RX_PACKETS"), 0)
+        data["connected_time_s"] = _int(
+            station_info.get("NL80211_STA_INFO_CONNECTED_TIME"), 0
+        )
+
+        _parse_rate_info(data, "tx", station_info.get("NL80211_STA_INFO_TX_BITRATE"))
+        _parse_rate_info(data, "rx", station_info.get("NL80211_STA_INFO_RX_BITRATE"))
+        return data
+    except Exception:
+        return None
+    finally:
+        iw.close()
+
+
 def collect(iface: str) -> dict:
+    netlink_data = _collect_via_netlink(iface)
+    if netlink_data is not None:
+        return netlink_data
+
     data = default_state(iface)
 
     link = _run(["iw", "dev", iface, "link"])

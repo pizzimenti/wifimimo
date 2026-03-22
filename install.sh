@@ -7,6 +7,7 @@ SERVICE_DIR="$ROOT_DIR/services"
 PLASMOID_DIR="$ROOT_DIR/plasmoid/org.kde.plasma.wifimimo"
 
 TARGET_LIB_DIR="/usr/local/lib/wifimimo"
+TARGET_VENV_DIR="$TARGET_LIB_DIR/.venv"
 TARGET_DAEMON="/usr/local/bin/wifimimo-daemon"
 TARGET_MON="/usr/local/bin/wifimimo-mon"
 TARGET_PLASMOID_SOURCE="/usr/local/bin/wifimimo-plasmoid-source"
@@ -61,23 +62,28 @@ install -Dm644 "$ROOT_DIR/wifimimo_core.py"            "$TARGET_LIB_DIR/wifimimo
 install -Dm755 "$ROOT_DIR/wifimimo-daemon.py"          "$TARGET_LIB_DIR/wifimimo-daemon.py"
 install -Dm755 "$ROOT_DIR/wifimimo-mon.py"             "$TARGET_LIB_DIR/wifimimo-mon.py"
 install -Dm755 "$ROOT_DIR/wifimimo-plasmoid-source.py" "$TARGET_LIB_DIR/wifimimo-plasmoid-source.py"
+install -Dm644 "$ROOT_DIR/requirements.txt"            "$TARGET_LIB_DIR/requirements.txt"
+
+python3 -m venv "$TARGET_VENV_DIR"
+"$TARGET_VENV_DIR/bin/python" -m pip install --upgrade pip >/dev/null
+"$TARGET_VENV_DIR/bin/python" -m pip install -r "$TARGET_LIB_DIR/requirements.txt" >/dev/null
 
 install -Dm755 /dev/stdin "$TARGET_DAEMON" <<'EOF2'
 #!/usr/bin/env bash
 set -euo pipefail
-exec python3 "/usr/local/lib/wifimimo/wifimimo-daemon.py" "$@"
+exec "/usr/local/lib/wifimimo/.venv/bin/python" "/usr/local/lib/wifimimo/wifimimo-daemon.py" "$@"
 EOF2
 
 install -Dm755 /dev/stdin "$TARGET_MON" <<'EOF2'
 #!/usr/bin/env bash
 set -euo pipefail
-exec python3 "/usr/local/lib/wifimimo/wifimimo-mon.py" "$@"
+exec "/usr/local/lib/wifimimo/.venv/bin/python" "/usr/local/lib/wifimimo/wifimimo-mon.py" "$@"
 EOF2
 
 install -Dm755 /dev/stdin "$TARGET_PLASMOID_SOURCE" <<'EOF2'
 #!/usr/bin/env bash
 set -euo pipefail
-exec python3 "/usr/local/lib/wifimimo/wifimimo-plasmoid-source.py" "$@"
+exec "/usr/local/lib/wifimimo/.venv/bin/python" "/usr/local/lib/wifimimo/wifimimo-plasmoid-source.py" "$@"
 EOF2
 
 install -Dm644 "$ROOT_DIR/wifimimo.desktop" "$TARGET_DESKTOP"

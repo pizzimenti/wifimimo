@@ -6,8 +6,8 @@ Includes a background daemon, a terminal monitor, and a KDE Plasma 6 panel widge
 
 ## Requirements
 
-- Linux with `iw` and `nl80211`-based Wi-Fi driver
-- Python 3
+- Linux with an `nl80211`-based Wi-Fi driver
+- Python 3 with `venv`
 - KDE Plasma 6 (optional, for the panel widget)
 
 ## Install
@@ -27,7 +27,7 @@ This installs:
 
 ## Daemon
 
-The daemon (`wifimimo-daemon.py`) polls `iw` station dump at 1-second intervals and writes parsed state to a shared file. It tracks:
+The daemon (`wifimimo-daemon.py`) polls nl80211 link/station data via `pyroute2` and writes parsed state to a shared file. It tracks:
 
 - Signal strength (overall, average, per-antenna)
 - TX/RX rates, MCS index, NSS (spatial streams), guard interval
@@ -62,9 +62,8 @@ kpackagetool6 -t Plasma/Applet --upgrade plasmoid/org.kde.plasma.wifimimo
 
 ## Data Sources
 
-- `iw dev <iface> station dump` — signal, per-antenna levels, rates, MCS, NSS, retries
-- `iw dev <iface> link` — SSID, BSSID, frequency, bandwidth
-- shared runtime state file — plasmoid reads `/run/user/$UID/wifimimo-state` directly
+- `pyroute2` / nl80211 — SSID, BSSID, frequency, bandwidth, signal, rates, MCS, NSS, retries
+- shared runtime state file — plasmoid reads `/run/user/$UID/wifimimo-state` via the plasmoid helper
 
 ## License
 
