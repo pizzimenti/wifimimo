@@ -381,6 +381,13 @@ PlasmoidItem {
             return;
         }
 
+        if (!root.expanded) {
+            if (!previousConnected || bssidChanged) {
+                resetHistory(next);
+            }
+            return;
+        }
+
         if (!previousConnected || bssidChanged) {
             resetHistory(next);
             return;
@@ -609,6 +616,7 @@ PlasmoidItem {
 
     onExpandedChanged: function() {
         if (root.expanded) {
+            resetHistory(root.data && root.data.connected ? root.data : null);
             root.pollNow();
         }
     }
