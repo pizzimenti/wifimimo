@@ -19,6 +19,8 @@ PlasmoidItem {
     readonly property string currentCommand: "wifimimo-plasmoid-source"
     property int refreshMs: 1000
     property string monospaceFamily: "monospace"
+    property bool pollInFlight: false
+    property bool pollPending: false
 
     property var data: ({
         connected: false,
@@ -91,8 +93,26 @@ PlasmoidItem {
         return values.length ? Math.min.apply(Math, values) : 0;
     }
 
+    function finishPoll(sourceName) {
+        if (sourceName) {
+            executableSource.disconnectSource(sourceName);
+        }
+        pollTimeout.stop();
+        pollInFlight = false;
+        if (pollPending) {
+            pollPending = false;
+            pollNow();
+        }
+    }
+
     function pollNow() {
-        executableSource.disconnectSource(currentCommand);
+        if (pollInFlight) {
+            pollPending = true;
+            return;
+        }
+        pollInFlight = true;
+        pollPending = false;
+        pollTimeout.restart();
         executableSource.connectSource(currentCommand);
     }
 
@@ -561,7 +581,19 @@ PlasmoidItem {
                 return;
             }
             root.parseState(sourceData.stdout || "");
-            executableSource.disconnectSource(sourceName);
+            root.finishPoll(sourceName);
+        }
+    }
+
+    Timer {
+        id: pollTimeout
+        interval: Math.max(root.refreshMs * 3, 4000)
+        repeat: false
+        running: false
+        onTriggered: {
+            root.pollInFlight = false;
+            root.pollPending = false;
+            executableSource.disconnectSource(root.currentCommand);
         }
     }
 
@@ -577,8 +609,6 @@ PlasmoidItem {
     onExpandedChanged: function() {
         if (root.expanded) {
             root.pollNow();
-        } else {
-            executableSource.disconnectSource(root.currentCommand);
         }
     }
 
@@ -919,7 +949,7 @@ PlasmoidItem {
                 Layout.fillWidth: true
                 spacing: 0
 
-                readonly property real retryPct: root.data.retry_10s_pct
+                readonly property real retryPct: Number(root.data && root.data.retry_10s_pct !== undefined ? root.data.retry_10s_pct : 0)
 
                 RowLayout {
                     Layout.fillWidth: true
