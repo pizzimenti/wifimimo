@@ -93,8 +93,8 @@ systemctl daemon-reload
 USER_SYSTEMD_DIR="$HOME/.config/systemd/user"
 USER_SERVICE_PATH="$USER_SYSTEMD_DIR/$USER_SERVICE_NAME"
 
-install -d -m 755 "$USER_SYSTEMD_DIR"
-install -Dm644 "$SERVICE_DIR/wifimimo-daemon.service" "$USER_SERVICE_PATH"
+run_as_user mkdir -p "$USER_SYSTEMD_DIR"
+run_as_user install -Dm644 "$SERVICE_DIR/wifimimo-daemon.service" "$USER_SERVICE_PATH"
 
 upgrade_or_install_plasmoid "$PLASMOID_DIR" "$PLASMOID_PLUGIN_ID" \
     || echo "Note: Plasma widget install/upgrade skipped (may need manual add)"
