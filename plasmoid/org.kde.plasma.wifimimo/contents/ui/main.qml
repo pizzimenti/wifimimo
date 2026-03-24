@@ -18,6 +18,7 @@ PlasmoidItem {
 
     readonly property string currentCommand: "wifimimo-plasmoid-source"
     property int refreshMs: 1000
+    property int compactRefreshMs: 15000
     property string monospaceFamily: "monospace"
     property bool pollInFlight: false
     property bool pollPending: false
@@ -599,7 +600,7 @@ PlasmoidItem {
 
     Timer {
         id: pollTimer
-        interval: root.expanded ? root.refreshMs : 5000
+        interval: root.expanded ? root.refreshMs : root.compactRefreshMs
         repeat: true
         running: true
         triggeredOnStart: true
@@ -611,9 +612,6 @@ PlasmoidItem {
             root.pollNow();
         }
     }
-
-    Component.onCompleted: pollNow()
-
     fullRepresentation: PlasmaExtras.Representation {
         Layout.minimumWidth:  Kirigami.Units.gridUnit * 30
         Layout.minimumHeight: 550
