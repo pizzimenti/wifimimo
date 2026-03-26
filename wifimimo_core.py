@@ -19,6 +19,7 @@ except ImportError:
 
 
 IFACE = "wlp1s0"
+HISTORY_DIR = Path.home() / ".local" / "state" / "wifimimo" / "history"
 
 MCS_MAX: dict[str, int] = {"HE": 11, "VHT": 9, "HT": 7}
 EFFICIENCY: dict[str, list[float]] = {
@@ -28,6 +29,8 @@ EFFICIENCY: dict[str, list[float]] = {
 }
 
 STATE_PATH = Path(f"/run/user/{os.getuid()}/wifimimo-state")
+
+KNOWN_WIFI_DRIVERS = ("iwlwifi", "mt76", "mt79", "ath", "rtw", "brcm", "mwifiex")
 
 NL80211_WIDTH_TO_MHZ = {
     0: 20,
@@ -80,6 +83,90 @@ class _TimeoutContext:
         return False
 
 
+def _find_wifi_hwmon(iface: str) -> Path | None:
+    driver_link = Path(f"/sys/class/net/{iface}/device/driver")
+    driver = ""
+    if driver_link.is_symlink() or driver_link.exists():
+        try:
+            driver = driver_link.resolve().name
+        except OSError:
+            pass
+
+    hwmon_base = Path("/sys/class/hwmon")
+    if not hwmon_base.exists():
+        return None
+    for entry in sorted(hwmon_base.iterdir()):
+        name_file = entry / "name"
+        if not name_file.exists():
+            continue
+        try:
+            name = name_file.read_text().strip()
+        except OSError:
+            continue
+        if driver and driver in name:
+            return entry
+        if any(name.startswith(prefix) for prefix in KNOWN_WIFI_DRIVERS):
+            return entry
+    return None
+
+
+def collect_power(iface: str) -> dict:
+    info: dict = {
+        "card_temp_c": 0.0,
+        "power_save": "",
+        "pci_power_state": "",
+        "runtime_pm": "",
+        "runtime_active_ms": 0,
+        "runtime_suspended_ms": 0,
+    }
+
+    hwmon = _find_wifi_hwmon(iface)
+    if hwmon:
+        temp_file = hwmon / "temp1_input"
+        if temp_file.exists():
+            try:
+                info["card_temp_c"] = int(temp_file.read_text().strip()) / 1000.0
+            except (OSError, ValueError):
+                pass
+
+    dev_power = Path(f"/sys/class/net/{iface}/device/power")
+    for key, filename in [
+        ("runtime_pm", "runtime_status"),
+        ("runtime_active_ms", "runtime_active_time"),
+        ("runtime_suspended_ms", "runtime_suspended_time"),
+    ]:
+        path = dev_power / filename
+        if path.exists():
+            try:
+                raw = path.read_text().strip()
+                if key.endswith("_ms"):
+                    info[key] = _int(raw)
+                else:
+                    info[key] = raw
+            except OSError:
+                pass
+
+    power_state_file = Path(f"/sys/class/net/{iface}/device/power_state")
+    if power_state_file.exists():
+        try:
+            info["pci_power_state"] = power_state_file.read_text().strip()
+        except OSError:
+            pass
+
+    try:
+        result = subprocess.run(
+            ["iw", "dev", iface, "get", "power_save"],
+            capture_output=True, text=True, timeout=2, check=False,
+        )
+        match = re.search(r"Power save:\s*(\S+)", result.stdout)
+        if match:
+            info["power_save"] = match.group(1).lower()
+    except Exception:
+        pass
+
+    return info
+
+
 def default_state(iface: str = IFACE) -> dict:
     return {
         "iface": iface,
@@ -115,6 +202,12 @@ def default_state(iface: str = IFACE) -> dict:
         "retry_10s_failed": 0,
         "issue_count": 0,
         "timestamp": 0,
+        "card_temp_c": 0.0,
+        "power_save": "",
+        "pci_power_state": "",
+        "runtime_pm": "",
+        "runtime_active_ms": 0,
+        "runtime_suspended_ms": 0,
     }
 
 
@@ -302,10 +395,19 @@ def _collect_via_netlink(iface: str) -> dict | None:
             data["station_dump_available"] = True
             data["signal_dbm"] = _int(station_info.get("NL80211_STA_INFO_SIGNAL"), 0)
             data["signal_avg_dbm"] = _int(station_info.get("NL80211_STA_INFO_SIGNAL_AVG"), 0)
-            data["signal_antennas"] = [
+            raw_chain = [
                 _int(value)
                 for value in station_info.get("NL80211_STA_INFO_CHAIN_SIGNAL", []) or []
             ]
+            if any(v > 0 for v in raw_chain):
+                # pyroute2 misreads chain signal on some drivers (e.g. mt7925);
+                # fall back to parsing iw station dump for antenna values
+                dump = _run(["iw", "dev", iface, "station", "dump"])
+                chain_match = re.search(r"signal:\s+([-\d]+)\s+\[([-\d,\s]+)\]", dump)
+                if chain_match:
+                    data["signal_dbm"] = _int(chain_match.group(1))
+                    raw_chain = [_int(v) for v in chain_match.group(2).split(",")]
+            data["signal_antennas"] = raw_chain
             data["tx_packets"] = _int(station_info.get("NL80211_STA_INFO_TX_PACKETS"), 0)
             data["tx_retries"] = _int(station_info.get("NL80211_STA_INFO_TX_RETRIES"), 0)
             data["tx_failed"] = _int(station_info.get("NL80211_STA_INFO_TX_FAILED"), 0)
@@ -399,6 +501,12 @@ def state_to_lines(data: dict) -> list[str]:
         "retry_10s_retries",
         "retry_10s_failed",
         "issue_count",
+        "card_temp_c",
+        "power_save",
+        "pci_power_state",
+        "runtime_pm",
+        "runtime_active_ms",
+        "runtime_suspended_ms",
     ]:
         value = data.get(key)
         if isinstance(value, bool):
@@ -452,10 +560,45 @@ def read_state(path: Path = STATE_PATH) -> dict:
             "timestamp",
         }:
             data[key] = _int(value, data.get(key, 0))
-        elif key in {"tx_rate_mbps", "rx_rate_mbps", "retry_10s_pct"}:
+        elif key in {"tx_rate_mbps", "rx_rate_mbps", "retry_10s_pct", "card_temp_c"}:
             data[key] = _float(value, data.get(key, 0.0))
-        elif key in {"iface", "ssid", "ssid_display", "bssid", "tx_mode", "rx_mode"}:
+        elif key in {"runtime_active_ms", "runtime_suspended_ms"}:
+            data[key] = _int(value, data.get(key, 0))
+        elif key in {
+            "iface", "ssid", "ssid_display", "bssid", "tx_mode", "rx_mode",
+            "power_save", "pci_power_state", "runtime_pm",
+        }:
             data[key] = value
         elif re.fullmatch(r"antenna_\d+", key):
             data["signal_antennas"].append(_int(value))
     return data
+
+
+HISTORY_COLUMNS = [
+    "timestamp", "iface", "ssid", "bssid",
+    "freq_mhz", "bandwidth_mhz", "chan_num",
+    "signal_dbm", "signal_avg_dbm", "antenna_1", "antenna_2",
+    "tx_rate_mbps", "rx_rate_mbps",
+    "tx_mcs", "rx_mcs", "tx_nss", "rx_nss",
+    "tx_mode", "rx_mode", "tx_gi", "rx_gi",
+    "retry_10s_pct", "retry_10s_retries", "retry_10s_failed",
+    "tx_packets", "tx_retries", "tx_failed",
+    "card_temp_c", "power_save", "pci_power_state", "runtime_pm",
+    "connected",
+]
+
+
+def history_row(data: dict) -> list[str]:
+    row: list[str] = []
+    antennas = data.get("signal_antennas", [])
+    for col in HISTORY_COLUMNS:
+        if col == "antenna_1":
+            row.append(str(antennas[0]) if len(antennas) >= 1 else "")
+        elif col == "antenna_2":
+            row.append(str(antennas[1]) if len(antennas) >= 2 else "")
+        elif col == "connected":
+            row.append("1" if data.get("connected") else "0")
+        else:
+            value = data.get(col, "")
+            row.append(str(value))
+    return row

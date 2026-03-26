@@ -3,15 +3,27 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import os
 import signal
 import subprocess
 import sys
 import time
 from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 
-from wifimimo_core import IFACE, STATE_PATH, collect, write_state
+from wifimimo_core import (
+    HISTORY_COLUMNS,
+    HISTORY_DIR,
+    IFACE,
+    STATE_PATH,
+    collect,
+    collect_power,
+    history_row,
+    write_state,
+)
 
 
 ALERT_DIFF_DBM = 15
@@ -31,15 +43,19 @@ def log(message: str) -> None:
 
 
 class WifimimoDaemon:
-    def __init__(self, iface: str, state_path: Path) -> None:
+    def __init__(self, iface: str, state_path: Path, history_dir: Path) -> None:
         self.iface = iface
         self.state_path = state_path
+        self.history_dir = history_dir
         self.running = True
         self.retry_samples: deque[dict] = deque()
         self.prev_connected = False
         self.prev_mimo_healthy: bool | None = None
         self.last_transition_time = 0.0
         self.last_state_signature: tuple | None = None
+        self._history_file = None
+        self._history_writer = None
+        self._history_date: str = ""
 
     def run(self) -> None:
         signal.signal(signal.SIGINT, self.stop)
@@ -49,17 +65,49 @@ class WifimimoDaemon:
             loop_start = time.monotonic()
             state = collect(self.iface)
             state["timestamp"] = int(time.time())
+            state.update(collect_power(self.iface))
             self.update_retry_window(state, loop_start)
             issues = self.collect_issues(state)
             state["issue_count"] = len(issues)
             poll_interval = self.poll_interval_for_state(state, loop_start)
             self.handle_notifications(state)
             write_state(self.state_path, state)
+            self.write_history(state)
             elapsed = time.monotonic() - loop_start
             time.sleep(max(0.05, poll_interval - elapsed))
 
     def stop(self, *_args) -> None:
         self.running = False
+        self._close_history()
+
+    def _open_history(self, date_str: str) -> None:
+        self._close_history()
+        self.history_dir.mkdir(parents=True, exist_ok=True)
+        path = self.history_dir / f"{date_str}.csv"
+        write_header = not path.exists() or path.stat().st_size == 0
+        self._history_file = open(path, "a", newline="", encoding="utf-8")
+        self._history_writer = csv.writer(self._history_file)
+        if write_header:
+            self._history_writer.writerow(HISTORY_COLUMNS)
+            self._history_file.flush()
+        self._history_date = date_str
+
+    def _close_history(self) -> None:
+        if self._history_file:
+            try:
+                self._history_file.close()
+            except OSError:
+                pass
+            self._history_file = None
+            self._history_writer = None
+
+    def write_history(self, state: dict) -> None:
+        today = datetime.now().strftime("%Y-%m-%d")
+        if today != self._history_date:
+            self._open_history(today)
+        if self._history_writer:
+            self._history_writer.writerow(history_row(state))
+            self._history_file.flush()
 
     def reset_retry_window(self) -> None:
         self.retry_samples.clear()
@@ -232,6 +280,7 @@ class WifimimoDaemon:
                 f"--urgency={urgency}",
                 f"--icon={ICON_NAME}",
                 f"--hint=string:desktop-entry:{DESKTOP_ENTRY}",
+                "--hint=int:transient:1",
                 title,
                 body,
             ],
@@ -242,7 +291,7 @@ class WifimimoDaemon:
 
 def main() -> int:
     iface = os.environ.get("WIFI_IFACE", IFACE)
-    daemon = WifimimoDaemon(iface, STATE_PATH)
+    daemon = WifimimoDaemon(iface, STATE_PATH, HISTORY_DIR)
     daemon.run()
     return 0
 
