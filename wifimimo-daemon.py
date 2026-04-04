@@ -33,8 +33,6 @@ POLL_FAST_S = 1.0
 POLL_SLOW_S = 5.0
 TRANSITION_COOLDOWN_S = 30.0
 RETRY_WINDOW_S = 10.0
-ICON_NAME = "network-wireless-hotspot-symbolic"
-DESKTOP_ENTRY = "wifimimo"
 U32_COUNTER_MODULUS = 2 ** 32
 
 
@@ -49,8 +47,6 @@ class WifimimoDaemon:
         self.history_dir = history_dir
         self.running = True
         self.retry_samples: deque[dict] = deque()
-        self.prev_connected = False
-        self.prev_mimo_healthy: bool | None = None
         self.last_transition_time = 0.0
         self.last_state_signature: tuple | None = None
         self._history_file = None
@@ -70,7 +66,6 @@ class WifimimoDaemon:
             issues = self.collect_issues(state)
             state["issue_count"] = len(issues)
             poll_interval = self.poll_interval_for_state(state, loop_start)
-            self.handle_notifications(state)
             write_state(self.state_path, state)
             self.write_history(state)
             elapsed = time.monotonic() - loop_start
@@ -244,50 +239,6 @@ class WifimimoDaemon:
         if retry_pct > ALERT_RETRY_PCT:
             issues.append(("normal", "High Interference", f"10s TX retry rate: {retry_pct:.1f}%  (threshold {ALERT_RETRY_PCT}%)"))
         return issues
-
-    def handle_notifications(self, state: dict) -> None:
-        connected = bool(state.get("connected"))
-        if not connected:
-            self.prev_connected = False
-            return
-
-        mimo_healthy = self.mimo_healthy(state)
-        if self.prev_mimo_healthy is None:
-            self.prev_mimo_healthy = mimo_healthy
-            self.prev_connected = True
-            return
-
-        if mimo_healthy != self.prev_mimo_healthy:
-            if mimo_healthy:
-                self.notify("2x2 MIMO Restored", f"wifimimo returned to 2x2 on {self.iface}", "normal")
-            else:
-                tx_nss = int(state.get("tx_nss", 0) or 0)
-                rx_nss = int(state.get("rx_nss", 0) or 0)
-                self.notify(
-                    "1x1 MIMO Detected",
-                    f"wifimimo dropped to {tx_nss}x{rx_nss} on {self.iface}",
-                    "normal",
-                )
-
-        self.prev_connected = True
-        self.prev_mimo_healthy = mimo_healthy
-
-    def notify(self, title: str, body: str, urgency: str) -> None:
-        subprocess.run(
-            [
-                "notify-send",
-                "--app-name=wifimimo",
-                f"--urgency={urgency}",
-                f"--icon={ICON_NAME}",
-                f"--hint=string:desktop-entry:{DESKTOP_ENTRY}",
-                "--hint=int:transient:1",
-                title,
-                body,
-            ],
-            check=False,
-            timeout=5,
-        )
-
 
 def main() -> int:
     iface = os.environ.get("WIFI_IFACE", IFACE)
