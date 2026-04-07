@@ -8,6 +8,7 @@ import org.kde.kirigami as Kirigami
 import org.kde.plasma.core as PlasmaCore
 import org.kde.plasma.extras as PlasmaExtras
 import org.kde.plasma.components as PlasmaComponents3
+import org.kde.plasma.plasma5support as Plasma5Support
 import org.kde.plasma.plasmoid
 
 PlasmoidItem {
@@ -15,7 +16,13 @@ PlasmoidItem {
 
     preferredRepresentation: compactRepresentation
 
-    readonly property url stateFileUrl: StandardPaths.writableLocation(StandardPaths.RuntimeLocation) + "/wifimimo-state"
+    // Build "cat /run/user/<uid>/wifimimo-state" once at startup. cat is a
+    // few-millisecond fork (no Python interpreter, no venv) so the executable
+    // engine stays cheap. We can't use XMLHttpRequest against file:// URLs in
+    // Qt 6 — it's blocked unless QML_XHR_ALLOW_FILE_READ=1 is set in
+    // plasmashell's environment, which would be a global side effect.
+    readonly property string runtimeDir: StandardPaths.writableLocation(StandardPaths.RuntimeLocation).toString().replace(/^file:\/\//, "")
+    readonly property string currentCommand: "cat " + runtimeDir + "/wifimimo-state"
     property int refreshMs: 1000
     property int compactRefreshMs: 15000
     property string monospaceFamily: "monospace"
@@ -92,17 +99,8 @@ PlasmoidItem {
     }
 
     function pollNow() {
-        const xhr = new XMLHttpRequest();
-        xhr.open("GET", root.stateFileUrl);
-        xhr.onreadystatechange = function() {
-            if (xhr.readyState !== XMLHttpRequest.DONE) {
-                return;
-            }
-            if (xhr.status === 200 || xhr.status === 0) {
-                root.parseState(xhr.responseText || "");
-            }
-        };
-        xhr.send();
+        executableSource.disconnectSource(currentCommand);
+        executableSource.connectSource(currentCommand);
     }
 
     function updateHistory(key, value) {
@@ -565,6 +563,19 @@ PlasmoidItem {
             isMask: false
             color: "transparent"
             active: root.expanded
+        }
+    }
+
+    Plasma5Support.DataSource {
+        id: executableSource
+        engine: "executable"
+        interval: 0
+        onNewData: (sourceName, sourceData) => {
+            if (sourceName !== root.currentCommand) {
+                return;
+            }
+            root.parseState(sourceData.stdout || "");
+            executableSource.disconnectSource(sourceName);
         }
     }
 
