@@ -99,8 +99,20 @@ PlasmoidItem {
     }
 
     function pollNow() {
+        if (!runtimeDir) {
+            // RuntimeLocation was unavailable at startup; warned in
+            // Component.onCompleted, no point in firing cat against /.
+            return;
+        }
         executableSource.disconnectSource(currentCommand);
         executableSource.connectSource(currentCommand);
+    }
+
+    Component.onCompleted: {
+        if (!runtimeDir) {
+            console.warn("wifimimo: StandardPaths.RuntimeLocation is empty;",
+                         "state polling disabled until plasmashell restart");
+        }
     }
 
     function updateHistory(key, value) {
