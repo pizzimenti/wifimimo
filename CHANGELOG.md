@@ -10,15 +10,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- Public-project community files: `CONTRIBUTING.md`, `SUPPORT.md`, `SECURITY.md`, and a repository code of conduct.
-- Structured GitHub issue forms for bug reports, feature requests, and support questions.
-- A pull request template, release notes configuration, Dependabot configuration, and a basic GitHub Actions CI workflow.
-- A top-level `VERSION` file and release-process documentation.
+- Structured GitHub issue forms for bug reports and feature requests.
+- A top-level `VERSION` file and a Keep a Changelog-based release log.
 
 ### Changed
 
 - Standardized the project on Semantic Versioning with `0.2.0` as the first intentional release baseline.
-- Updated project documentation to point contributors at GitHub Issues, Releases, the changelog, and the support/security paths.
+- Simplified the public project surface to versioning, changelog tracking, and GitHub Issues.
 - Updated the Plasma widget metadata to advertise the public GitHub repository and the current release version.
 - Switched the plasmoid state read path away from the heavy Python helper to a lightweight guarded runtime-file read.
 

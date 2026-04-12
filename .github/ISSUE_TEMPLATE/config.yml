@@ -1,8 +1,1 @@
 blank_issues_enabled: false
-contact_links:
-  - name: Support policy
-    url: https://github.com/pizzimenti/wifimimo/blob/main/SUPPORT.md
-    about: Read the support paths and troubleshooting expectations before opening an issue.
-  - name: Security policy
-    url: https://github.com/pizzimenti/wifimimo/security/policy
-    about: Report vulnerabilities privately instead of using public issues.

@@ -6,7 +6,7 @@ Includes a background daemon, a terminal monitor, and a KDE Plasma 6 panel widge
 
 Current version: `0.2.0`
 
-This project uses Semantic Versioning. See [CHANGELOG.md](CHANGELOG.md) for release history, [CONTRIBUTING.md](CONTRIBUTING.md) for contribution rules, [SUPPORT.md](SUPPORT.md) for help paths, and [SECURITY.md](SECURITY.md) for vulnerability reporting.
+This project uses Semantic Versioning. See [CHANGELOG.md](CHANGELOG.md) for release history and use GitHub Issues for bugs and feature requests.
 
 ## Requirements
 
