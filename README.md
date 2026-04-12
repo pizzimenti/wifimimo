@@ -4,6 +4,10 @@ Wi-Fi MIMO antenna and link quality monitor for Linux.
 
 Includes a background daemon, a terminal monitor, and a KDE Plasma 6 panel widget.
 
+Current version: `0.2.0`
+
+This project uses Semantic Versioning. See [CHANGELOG.md](CHANGELOG.md) for release history, [CONTRIBUTING.md](CONTRIBUTING.md) for contribution rules, [SUPPORT.md](SUPPORT.md) for help paths, and [SECURITY.md](SECURITY.md) for vulnerability reporting.
+
 ## Requirements
 
 - Linux with an `nl80211`-based Wi-Fi driver
@@ -63,7 +67,7 @@ kpackagetool6 -t Plasma/Applet --upgrade plasmoid/org.kde.plasma.wifimimo
 ## Data Sources
 
 - `pyroute2` / nl80211 — SSID, BSSID, frequency, bandwidth, signal, rates, MCS, NSS, retries
-- shared runtime state file — plasmoid reads `/run/user/$UID/wifimimo-state` via the plasmoid helper
+- shared runtime state file — plasmoid reads `/run/user/$UID/wifimimo-state` via a lightweight guarded runtime-file read
 
 ## License
 
