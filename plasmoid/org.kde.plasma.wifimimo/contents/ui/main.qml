@@ -22,7 +22,8 @@ PlasmoidItem {
     // Qt 6 — it's blocked unless QML_XHR_ALLOW_FILE_READ=1 is set in
     // plasmashell's environment, which would be a global side effect.
     readonly property string runtimeDir: StandardPaths.writableLocation(StandardPaths.RuntimeLocation).toString().replace(/^file:\/\//, "")
-    readonly property string currentCommand: "cat " + runtimeDir + "/wifimimo-state"
+    readonly property string statePath: runtimeDir ? (runtimeDir + "/wifimimo-state") : ""
+    readonly property string currentCommand: "sh -c 'if [ -f \"$1\" ]; then cat \"$1\"; fi' _ \"" + statePath + "\""
     property int refreshMs: 1000
     property int compactRefreshMs: 15000
     property string monospaceFamily: "monospace"
@@ -595,7 +596,7 @@ PlasmoidItem {
         id: pollTimer
         interval: root.expanded ? root.refreshMs : root.compactRefreshMs
         repeat: true
-        running: true
+        running: !!root.runtimeDir
         triggeredOnStart: true
         onTriggered: root.pollNow()
     }
