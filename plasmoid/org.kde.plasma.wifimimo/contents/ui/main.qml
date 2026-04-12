@@ -16,12 +16,17 @@ PlasmoidItem {
 
     preferredRepresentation: compactRepresentation
 
-    readonly property string currentCommand: "wifimimo-plasmoid-source"
+    // Build "cat /run/user/<uid>/wifimimo-state" once at startup. cat is a
+    // few-millisecond fork (no Python interpreter, no venv) so the executable
+    // engine stays cheap. We can't use XMLHttpRequest against file:// URLs in
+    // Qt 6 — it's blocked unless QML_XHR_ALLOW_FILE_READ=1 is set in
+    // plasmashell's environment, which would be a global side effect.
+    readonly property string runtimeDir: StandardPaths.writableLocation(StandardPaths.RuntimeLocation).toString().replace(/^file:\/\//, "")
+    readonly property string statePath: runtimeDir ? (runtimeDir + "/wifimimo-state") : ""
+    readonly property string currentCommand: "sh -c 'if [ -f \"$1\" ]; then cat \"$1\"; fi' _ \"" + statePath + "\""
     property int refreshMs: 1000
     property int compactRefreshMs: 15000
     property string monospaceFamily: "monospace"
-    property bool pollInFlight: false
-    property bool pollPending: false
 
     property var data: ({
         connected: false,
@@ -94,27 +99,21 @@ PlasmoidItem {
         return values.length ? Math.min.apply(Math, values) : 0;
     }
 
-    function finishPoll(sourceName) {
-        if (sourceName) {
-            executableSource.disconnectSource(sourceName);
-        }
-        pollTimeout.stop();
-        pollInFlight = false;
-        if (pollPending) {
-            pollPending = false;
-            pollNow();
-        }
-    }
-
     function pollNow() {
-        if (pollInFlight) {
-            pollPending = true;
+        if (!runtimeDir) {
+            // RuntimeLocation was unavailable at startup; warned in
+            // Component.onCompleted, no point in firing cat against /.
             return;
         }
-        pollInFlight = true;
-        pollPending = false;
-        pollTimeout.restart();
+        executableSource.disconnectSource(currentCommand);
         executableSource.connectSource(currentCommand);
+    }
+
+    Component.onCompleted: {
+        if (!runtimeDir) {
+            console.warn("wifimimo: StandardPaths.RuntimeLocation is empty;",
+                         "state polling disabled until plasmashell restart");
+        }
     }
 
     function updateHistory(key, value) {
@@ -589,19 +588,7 @@ PlasmoidItem {
                 return;
             }
             root.parseState(sourceData.stdout || "");
-            root.finishPoll(sourceName);
-        }
-    }
-
-    Timer {
-        id: pollTimeout
-        interval: Math.max(root.refreshMs * 3, 4000)
-        repeat: false
-        running: false
-        onTriggered: {
-            root.pollInFlight = false;
-            root.pollPending = false;
-            executableSource.disconnectSource(root.currentCommand);
+            executableSource.disconnectSource(sourceName);
         }
     }
 
@@ -609,7 +596,7 @@ PlasmoidItem {
         id: pollTimer
         interval: root.expanded ? root.refreshMs : root.compactRefreshMs
         repeat: true
-        running: true
+        running: !!root.runtimeDir
         triggeredOnStart: true
         onTriggered: root.pollNow()
     }

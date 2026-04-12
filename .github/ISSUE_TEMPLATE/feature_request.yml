@@ -1,0 +1,40 @@
+name: Feature request
+description: Suggest an improvement to wifimimo
+title: "[feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the user problem first. Feature ideas are much easier to evaluate when the use case is concrete.
+  - type: input
+    id: version
+    attributes:
+      label: Current version
+      description: Which version are you running today?
+      placeholder: 0.2.0
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or limitation
+      description: What are you trying to do, and what blocks you today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: What should the project do instead?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds did you try?
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Mockups, logs, screenshots, or related projects
