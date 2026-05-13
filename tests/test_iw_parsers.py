@@ -177,6 +177,30 @@ def test_primary_link_prefers_bssid_match(monkeypatch):
     assert data["chan_num"] == 36
 
 
+def test_parse_link_metrics_mlo_top_level_signal_from_mld_stats_not_link():
+    # Some iw versions emit per-link `signal:` lines inside Link blocks.
+    # Top-level signal_dbm must bind to the MLD-stats summary (-59 dBm),
+    # not whichever Link block's per-link signal appeared first (-70 dBm
+    # on the 6 GHz link in this fixture).
+    text = (
+        "Connected to 02:00:00:08:55:74 (on wlp1s0)\n"
+        "\tSSID: example-mld-signal\n"
+        "\tLink 2 BSSID 02:00:00:09:55:75\n"
+        "\t\tfreq: 6295.0\n"
+        "\t\tsignal: -70 dBm\n"
+        "\tLink 0 BSSID 02:00:00:0a:55:73\n"
+        "\t\tfreq: 5180.0\n"
+        "\t\tsignal: -65 dBm\n"
+        "MLD 02:00:00:08:55:74 stats:\n"
+        "\tsignal: -59 dBm\n"
+        "\trx bitrate: 2880.0 MBit/s 320MHz EHT-MCS 11 EHT-NSS 2 EHT-GI 0\n"
+        "\ttx bitrate: 1440.0 MBit/s 320MHz EHT-MCS 11 EHT-NSS 1 EHT-GI 0\n"
+    )
+    data = wifimimo_core.default_state("wlp1s0")
+    wifimimo_core.parse_link_metrics(data, text)
+    assert data["signal_dbm"] == -59, "should be MLD-stats signal, not per-link"
+
+
 def test_parse_link_metrics_ssid_containing_link_substring_is_not_mlo():
     # An SSID with the literal text "Link 2 BSSID" inside it must not flip
     # parse_link_metrics into MLO-mode. Without the line-anchored guard,

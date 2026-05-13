@@ -415,22 +415,32 @@ def parse_link_metrics(data: dict, link: str) -> None:
     match = re.search(r"Connected to\s+([0-9a-f:]{17})", link)
     if match:
         data["bssid"] = match.group(1)
+
+    # Strip out per-Link block bodies for the top-level scalar extractions
+    # below — leaves the "before any Link" prefix plus the MLD-stats trailer
+    # (or the whole text on non-MLO outputs). That way `signal:`,
+    # `freq:` (when allowed), and `tx/rx bitrate:` always bind to the
+    # MLD aggregate or the non-MLO top-level, never to a specific Link's
+    # per-link line some iw versions emit. Per-link parsing happens
+    # separately via parse_link_blocks(); this function is for top-level.
+    top_level = _LINK_BLOCK_RE.sub("", link)
+
     # Skip freq extraction when MLO Link blocks are present — those
     # `freq:` lines are per-link and `_promote_primary_link_freq` selects
     # the right one (BSSID-match or highest-freq). Naively grabbing the
     # first `freq:` would lock us onto whichever link iw printed first,
     # which can disagree with the connection BSSID.
     if not _MLO_HEADER_RE.search(link):
-        match = re.search(r"freq:\s*([\d.]+)", link)
+        match = re.search(r"freq:\s*([\d.]+)", top_level)
         if match:
             data["freq_mhz"] = int(float(match.group(1)))
             data["chan_num"] = freq_to_channel(data["freq_mhz"])
-    match = re.search(r"signal:\s+([-\d]+)", link)
+    match = re.search(r"signal:\s+([-\d]+)", top_level)
     if match:
         data["signal_dbm"] = _int(match.group(1))
 
     for direction in ("tx", "rx"):
-        rate = _parse_iw_rate_line(link, direction)
+        rate = _parse_iw_rate_line(top_level, direction)
         if "rate_mbps" in rate:
             data[f"{direction}_rate_mbps"] = rate["rate_mbps"]
         if "mode" in rate:
