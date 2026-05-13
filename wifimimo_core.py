@@ -909,6 +909,10 @@ def _read_state_v1(raw: str) -> dict:
         "iface", "ssid", "ssid_display", "bssid",
         "tx_mode", "rx_mode", "power_save", "pci_power_state", "runtime_pm",
     }
+    # Antennas keyed by numeric index from "antenna_N", filled in by index
+    # rather than push-order so a v1 file with reordered/sparse entries
+    # still produces a correctly-ordered chain list.
+    antennas_by_index: dict[int, int] = {}
     for raw_line in raw.splitlines():
         if "=" not in raw_line:
             continue
@@ -921,8 +925,17 @@ def _read_state_v1(raw: str) -> dict:
             data[key] = _float(value, data.get(key, 0.0))
         elif key in str_keys:
             data[key] = value
-        elif re.fullmatch(r"antenna_\d+", key):
-            data["signal_antennas"].append(_int(value))
+        else:
+            antenna_match = re.fullmatch(r"antenna_(\d+)", key)
+            if antenna_match:
+                antennas_by_index[_int(antenna_match.group(1))] = _int(value)
+    if antennas_by_index:
+        # v1 indexes were 1-based (antenna_1, antenna_2). Drop the index
+        # and emit values sorted by index so the chain order matches the
+        # original NSS chain ordering.
+        data["signal_antennas"] = [
+            v for _, v in sorted(antennas_by_index.items())
+        ]
     return data
 
 

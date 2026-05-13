@@ -94,7 +94,7 @@ class WifimimoDaemon:
         # uses a millisecond suffix to avoid collisions if the daemon flaps.
         if path.exists() and path.stat().st_size > 0:
             try:
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     existing_header = f.readline().rstrip("\n").split(",")
             except OSError:
                 existing_header = []
@@ -283,12 +283,16 @@ class WifimimoDaemon:
 
         tx_nss = int(state.get("tx_nss", 0) or 0)
         rx_nss = int(state.get("rx_nss", 0) or 0)
-        effective_nss = max(tx_nss, rx_nss)
-        if effective_nss and effective_nss < 2:
+        # Require BOTH directions to have reported NSS before flagging
+        # "MIMO Degraded" — otherwise a partial association where only one
+        # direction has rate-info yet (tx=1, rx=0) trips a transient
+        # false-positive alert. With both populated and max<2, every
+        # active stream is single-stream → genuine 1x1 collapse.
+        if tx_nss > 0 and rx_nss > 0 and max(tx_nss, rx_nss) < 2:
             issues.append((
                 "critical",
                 "MIMO Degraded",
-                f"Both directions collapsed to NSS {effective_nss}  (TX {tx_nss}, RX {rx_nss}; expected 2x2)",
+                f"Both directions running NSS 1  (TX {tx_nss}, RX {rx_nss}; expected 2x2)",
             ))
 
         retry_pct = float(state.get("retry_10s_pct", 0.0) or 0.0)

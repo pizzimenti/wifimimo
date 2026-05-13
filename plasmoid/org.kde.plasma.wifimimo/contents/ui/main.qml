@@ -427,7 +427,11 @@ PlasmoidItem {
 
     function parseStateV1Lines(rawText) {
         const obj = {};
-        const antennas = [];
+        // Index antennas by their numeric suffix so a v1 file with
+        // reordered or sparse `antenna_N` keys still produces the right
+        // chain order. push() would silently scramble the chains if iw
+        // emitted them out of order.
+        const antennaByIndex = {};
         const lines = rawText.split(/\r?\n/);
         for (const line of lines) {
             const idx = line.indexOf("=");
@@ -438,18 +442,25 @@ PlasmoidItem {
             const value = line.slice(idx + 1);
             if (key === "connected" || key === "station_dump_available") {
                 obj[key] = value === "true";
-            } else if (/^antenna_\d+$/.test(key)) {
-                antennas.push(Number(value) || 0);
-            } else if (/^(freq_mhz|chan_num|bandwidth_mhz|signal_dbm|signal_avg_dbm|tx_nss|rx_nss|tx_mcs|rx_mcs|tx_gi|rx_gi|tx_packets|tx_retries|tx_failed|rx_packets|connected_time_s|retry_10s_packets|retry_10s_retries|retry_10s_failed|timestamp)$/.test(key)) {
-                obj[key] = Number(value) || 0;
-            } else if (/^(tx_rate_mbps|rx_rate_mbps|retry_10s_pct|card_temp_c)$/.test(key)) {
-                obj[key] = Number(value) || 0;
             } else {
-                obj[key] = value;
+                const antennaMatch = key.match(/^antenna_(\d+)$/);
+                if (antennaMatch) {
+                    antennaByIndex[parseInt(antennaMatch[1], 10)] = Number(value) || 0;
+                } else if (/^(freq_mhz|chan_num|bandwidth_mhz|signal_dbm|signal_avg_dbm|tx_nss|rx_nss|tx_mcs|rx_mcs|tx_gi|rx_gi|tx_packets|tx_retries|tx_failed|rx_packets|connected_time_s|retry_10s_packets|retry_10s_retries|retry_10s_failed|timestamp)$/.test(key)) {
+                    obj[key] = Number(value) || 0;
+                } else if (/^(tx_rate_mbps|rx_rate_mbps|retry_10s_pct|card_temp_c)$/.test(key)) {
+                    obj[key] = Number(value) || 0;
+                } else {
+                    obj[key] = value;
+                }
             }
         }
-        if (antennas.length) {
-            obj.signal_antennas = antennas;
+        const indices = Object.keys(antennaByIndex);
+        if (indices.length) {
+            obj.signal_antennas = indices
+                .map(i => parseInt(i, 10))
+                .sort((a, b) => a - b)
+                .map(i => antennaByIndex[i]);
         }
         return obj;
     }

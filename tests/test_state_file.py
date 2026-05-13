@@ -47,7 +47,7 @@ def test_v1_migration_shim(tmp_path: Path):
         "iface=wlp1s0",
         "ssid=legacy",
         "ssid_display=legacy",
-        "bssid=aa:bb:cc:dd:ee:ff",
+        "bssid=02:00:00:00:00:01",
         "freq_mhz=5180",
         "bandwidth_mhz=80",
         "signal_dbm=-55",
@@ -65,6 +65,22 @@ def test_v1_migration_shim(tmp_path: Path):
     assert loaded["tx_mode"] == "HE"
     assert loaded["tx_mcs"] == 11
     assert loaded["signal_antennas"] == [-54, -56]
+
+
+def test_v1_migration_antennas_sort_by_index(tmp_path: Path):
+    # Pathological v1 file with antenna_2 listed before antenna_1.
+    # Old parser used push() and would scramble chain order; new parser
+    # sorts by numeric index so chain 1 comes out first regardless of
+    # file order.
+    v1 = "\n".join([
+        "connected=true",
+        "antenna_2=-72",
+        "antenna_1=-50",
+    ]) + "\n"
+    path = tmp_path / "state"
+    path.write_text(v1, encoding="utf-8")
+    loaded = wifimimo_core.read_state(path)
+    assert loaded["signal_antennas"] == [-50, -72]
 
 
 def test_unknown_keys_in_v2_are_ignored(tmp_path: Path):

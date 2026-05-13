@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import importlib.util
 import os
+import types
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,7 @@ import pytest
 import wifimimo_core
 
 
-def _load_daemon():
+def _load_daemon() -> types.ModuleType:
     spec = importlib.util.spec_from_file_location(
         "wifimimo_daemon", Path(__file__).parent.parent / "wifimimo-daemon.py"
     )
