@@ -87,6 +87,27 @@ class WifimimoDaemon:
         self._close_history()
         self.history_dir.mkdir(parents=True, exist_ok=True)
         path = self.history_dir / f"{date_str}.csv"
+        # If today's file already exists with a different header (the daemon
+        # restarted mid-day after a schema change — e.g. a new HISTORY_COLUMNS
+        # entry landed in an upgrade), rotate the old file aside so we don't
+        # append new-shape rows under an old-shape header. Same-day rotation
+        # uses a millisecond suffix to avoid collisions if the daemon flaps.
+        if path.exists() and path.stat().st_size > 0:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    existing_header = f.readline().rstrip("\n").split(",")
+            except OSError:
+                existing_header = []
+            if existing_header and existing_header != HISTORY_COLUMNS:
+                stamp = int(time.time() * 1000)
+                rotated = path.with_name(f"{date_str}.pre-{stamp}.csv")
+                try:
+                    path.rename(rotated)
+                    log(
+                        f"history schema changed; rotated {path.name} -> {rotated.name}"
+                    )
+                except OSError:
+                    pass
         write_header = not path.exists() or path.stat().st_size == 0
         self._history_file = open(path, "a", newline="", encoding="utf-8")
         self._history_writer = csv.writer(self._history_file)
