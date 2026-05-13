@@ -139,7 +139,12 @@ PlasmoidItem {
         if (!hasRecentData) {
             return "disabled";
         }
-        if (effectiveNss < 2) {
+        // effectiveNss === 0 is "unknown" (partial payload during association),
+        // not "degraded". Don't flip the icon red just because the rate-info
+        // attrs haven't landed yet — that gives a transient red flash on
+        // every reconnect. Real degradation requires NSS to be reported AND
+        // be < 2.
+        if (effectiveNss > 0 && effectiveNss < 2) {
             return "alert";
         }
         if (mloMultiLink) {
@@ -708,6 +713,13 @@ PlasmoidItem {
                 color: Kirigami.Theme.negativeTextColor
             }
 
+            // Telemetry sections are hidden when there's no recent sample
+            // — otherwise the panel renders default 0 dBm / 0 Mb/s / 0% rows
+            // under "Not connected", which look like real-but-zero readings.
+            ColumnLayout {
+                Layout.fillWidth: true
+                visible: root.hasRecentData
+                spacing: 1
 
             PlasmaComponents3.Label {
                 Layout.fillWidth: true
@@ -1090,6 +1102,8 @@ PlasmoidItem {
                     }
                 }
             }
+
+            }  // end of "telemetry sections visible only when hasRecentData"
         }
     }
 
