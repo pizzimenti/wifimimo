@@ -122,3 +122,24 @@ def test_fallback_via_iw_link_noop_on_disconnected(monkeypatch):
     wifimimo_core._fallback_via_iw_link(data, "wlp1s0")
     assert data["connected"] is False
     assert data["links"] == []
+
+
+def test_augment_with_iw_link_skips_when_freq_and_width_populated(monkeypatch):
+    # Non-MLO: netlink filled freq+width, no need to spawn iw every poll.
+    calls = []
+    monkeypatch.setattr(wifimimo_core, "_run", lambda cmd: (calls.append(cmd), "")[1])
+    data = wifimimo_core.default_state("wlp1s0")
+    data["freq_mhz"] = 5180
+    data["bandwidth_mhz"] = 80
+    wifimimo_core._augment_with_iw_link(data, "wlp1s0")
+    assert calls == [], "iw should not run when freq/width already populated"
+
+
+def test_augment_with_iw_link_runs_when_freq_missing(monkeypatch):
+    monkeypatch.setattr(wifimimo_core, "_run", lambda cmd: _load("iw_link_eht_mlo.txt"))
+    data = wifimimo_core.default_state("wlp1s0")
+    # freq_mhz left at default 0 (MLO MLD signature)
+    wifimimo_core._augment_with_iw_link(data, "wlp1s0")
+    assert data["freq_mhz"] == 6295
+    assert data["bandwidth_mhz"] == 320
+    assert len(data["links"]) == 2

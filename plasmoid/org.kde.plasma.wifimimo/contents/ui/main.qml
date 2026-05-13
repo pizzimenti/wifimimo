@@ -124,7 +124,10 @@ PlasmoidItem {
     }
     readonly property int linkCount: (data && data.links) ? data.links.length : 0
     readonly property bool mloMultiLink: linkCount > 1
-    readonly property bool onSixGhz: data.freq_mhz >= 6000
+    // Read the band tier from the daemon-computed label so the 6 GHz floor
+    // (5955 MHz, the UNII-5 boundary) is defined in one place
+    // (phy_modes.SIX_GHZ_FLOOR_MHZ) — not duplicated as a literal here.
+    readonly property bool onSixGhz: display.band_label === "6 GHz"
 
     // Five-tier icon state:
     //   disabled – no link / wifi off / stale data        (grey, normal SVG @ 45% opacity)

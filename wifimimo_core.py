@@ -22,6 +22,7 @@ except ImportError:
 
 from phy_modes import (
     PHY_MODES,
+    SIX_GHZ_FLOOR_MHZ,
     compute_rates,
     default_phy_mode,
     efficiency_for,
@@ -630,13 +631,15 @@ def _augment_with_iw_link(data: dict, iface: str) -> None:
     """Fill in MLO-specific gaps (freq/width per link) from `iw dev link`.
 
     The MLD parent doesn't carry NL80211_ATTR_WIPHY_FREQ; per-link freq lives
-    only in the iw `Link N` blocks. This is a no-op for non-MLO connections
-    when the netlink path already populated freq/width.
+    only in the iw `Link N` blocks. We gate on freq/width missing because
+    that's the MLO-MLD signature — the netlink path populates both for any
+    legacy non-MLO connection, so probing iw every poll just to confirm
+    `links == []` would burn one subprocess per second for no information
+    gain. When iw IS run (MLO case), we surface its `links` payload too.
     """
     needs_freq = not data.get("freq_mhz")
     needs_width = not data.get("bandwidth_mhz")
-    needs_links = not data.get("links")
-    if not (needs_freq or needs_width or needs_links):
+    if not (needs_freq or needs_width):
         return
     freq, width, links = _parse_mlo_primary_link(iface)
     if needs_freq and freq:
@@ -644,7 +647,7 @@ def _augment_with_iw_link(data: dict, iface: str) -> None:
         data["chan_num"] = freq_to_channel(freq)
     if needs_width and width:
         data["bandwidth_mhz"] = width
-    if needs_links and links:
+    if links:
         data["links"] = links
 
 
@@ -724,7 +727,7 @@ def collect(iface: str) -> dict:
 
 
 def _band_label(freq_mhz: int) -> str:
-    if freq_mhz >= 6000:
+    if freq_mhz >= SIX_GHZ_FLOOR_MHZ:
         return "6 GHz"
     if freq_mhz >= 5000:
         return "5 GHz"
@@ -745,6 +748,12 @@ def _spread_fraction(spread: float) -> float:
 
 
 def _signal_tier(dbm: int) -> str:
+    # dbm == 0 is the dataclass default and a transient association state;
+    # positive dbm only happens with a misreading driver (mt7925-style chain
+    # bug). Either way, classifying as "good" is misleading — flag as crit
+    # so the UI doesn't show a healthy tier on placeholder data.
+    if dbm >= 0:
+        return "crit"
     if dbm >= SIGNAL_GOOD_DBM:
         return "good"
     if dbm >= SIGNAL_WARN_DBM:

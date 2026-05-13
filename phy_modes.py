@@ -89,20 +89,21 @@ def wifi_label(mode_name: str, freq_mhz: int) -> str:
 
     Wi-Fi 6E is HE on 6 GHz specifically; EHT is just "Wi-Fi 7" regardless
     of band, since the band is shown separately in the freq line.
-
-    The 6 GHz UNII-5 band starts at 5955 MHz (channel 1), so the threshold
-    has to bracket that — using >= 6000 mis-labels lower 6 GHz channels as
-    plain Wi-Fi 6.
     """
     mode = phy_mode_by_name(mode_name)
     if mode is None or mode.wifi_generation <= 0:
         return ""
-    if mode.wifi_generation == 6 and freq_mhz >= 5955:
+    if mode.wifi_generation == 6 and freq_mhz >= SIX_GHZ_FLOOR_MHZ:
         return f"Wi-Fi 6E / {mode.iw_token}"
     return f"Wi-Fi {mode.wifi_generation} / {mode.iw_token}"
 
 
 _DEFAULT_MODE = next(m for m in PHY_MODES if m.name == "HE")
+
+# 6 GHz UNII-5 starts at channel 1 = 5955 MHz. Used by both band labelling
+# and the Wi-Fi 6E vs Wi-Fi 6 distinction; living here so the literal
+# doesn't drift between callers.
+SIX_GHZ_FLOOR_MHZ = 5955
 
 
 def phy_mode_by_name(name: str) -> PhyMode | None:

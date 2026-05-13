@@ -58,6 +58,21 @@ def test_signal_tier_thresholds_match_alert():
     assert wifimimo_core.derive_display(_make_state(signal_dbm=-80))["signal_tier"] == "crit"
 
 
+def test_signal_tier_treats_zero_or_positive_as_crit():
+    # 0 dBm is the dataclass default (transient association state); positive
+    # values can show up via mt7925-style chain misreading. Both should fall
+    # to crit so the UI doesn't paint a healthy tier on placeholder data.
+    assert wifimimo_core.derive_display(_make_state(signal_dbm=0))["signal_tier"] == "crit"
+    assert wifimimo_core.derive_display(_make_state(signal_dbm=5))["signal_tier"] == "crit"
+
+
+def test_band_label_lower_6ghz_boundary():
+    # UNII-5 ch1 = 5955 MHz is the 6 GHz floor; the previous >=6000 cutoff
+    # mis-labelled 5955-5995 MHz as 5 GHz.
+    assert wifimimo_core.derive_display(_make_state(freq_mhz=5955))["band_label"] == "6 GHz"
+    assert wifimimo_core.derive_display(_make_state(freq_mhz=5950))["band_label"] == "5 GHz"
+
+
 def test_mcs_negative_yields_empty_rates():
     state = _make_state(
         freq_mhz=5180, signal_dbm=-50,
