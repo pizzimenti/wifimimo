@@ -101,7 +101,10 @@ def test_wifi_label_covers_every_generation():
     assert wifi_label("EHT", 6295) == "Wi-Fi 7 / EHT"
     assert wifi_label("EHT", 5180) == "Wi-Fi 7 / EHT"
     # Wi-Fi 6E is HE on 6 GHz specifically; HE on 5/2.4 GHz is plain Wi-Fi 6.
+    # The 6 GHz band starts at 5955 MHz (UNII-5 ch1), not 6000.
     assert wifi_label("HE", 6295) == "Wi-Fi 6E / HE"
+    assert wifi_label("HE", 5955) == "Wi-Fi 6E / HE"  # lower boundary
+    assert wifi_label("HE", 5950) == "Wi-Fi 6 / HE"   # below 6 GHz band
     assert wifi_label("HE", 5180) == "Wi-Fi 6 / HE"
     assert wifi_label("HE", 2412) == "Wi-Fi 6 / HE"
     assert wifi_label("VHT", 5180) == "Wi-Fi 5 / VHT"

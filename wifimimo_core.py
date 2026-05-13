@@ -580,13 +580,13 @@ def _collect_via_netlink(iface: str) -> dict | None:
                 station_message = message
                 break
             if station_message is None:
-                _augment_with_iw_link(data, iface)
+                _fallback_via_iw_link(data, iface)
                 return data
 
             station_attrs = _attrs_to_dict(station_message)
             station_info = _attrs_to_dict(station_attrs.get("NL80211_ATTR_STA_INFO"))
             if not station_info:
-                _augment_with_iw_link(data, iface)
+                _fallback_via_iw_link(data, iface)
                 return data
 
             data["connected"] = True
@@ -646,6 +646,33 @@ def _augment_with_iw_link(data: dict, iface: str) -> None:
         data["bandwidth_mhz"] = width
     if needs_links and links:
         data["links"] = links
+
+
+def _fallback_via_iw_link(data: dict, iface: str) -> None:
+    """Backfill connection metrics from `iw dev <iface> link` when the
+    netlink station enumeration came back empty.
+
+    Without this the early-return paths in `_collect_via_netlink` leave
+    `connected`, `bssid`, `signal_dbm`, and bitrate fields at their dataclass
+    defaults — surfacing as a false "Not connected" in the UI even when iw
+    plainly shows an active link. Runs iw exactly once and feeds both the
+    flat parser (parse_link_metrics) and the per-link parser (parse_link_blocks).
+    """
+    link_text = _run(["iw", "dev", iface, "link"])
+    if not link_text:
+        return
+    parse_link_metrics(data, link_text)
+    if not data.get("connected"):
+        return
+    if not data.get("links"):
+        data["links"] = parse_link_blocks(link_text)
+    # MLD parents don't carry a top-level freq line; the first Link block does.
+    if not data.get("freq_mhz") and data["links"]:
+        primary = data["links"][0]
+        data["freq_mhz"] = primary["freq_mhz"]
+        data["chan_num"] = primary["chan_num"]
+        if not data.get("bandwidth_mhz") and primary["bandwidth_mhz"]:
+            data["bandwidth_mhz"] = primary["bandwidth_mhz"]
 
 
 def collect(iface: str) -> dict:

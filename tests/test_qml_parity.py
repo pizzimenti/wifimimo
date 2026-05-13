@@ -28,7 +28,7 @@ def test_qml_has_no_phy_mode_literals():
 def test_qml_does_not_redefine_efficiency_table():
     text = QML.read_text(encoding="utf-8")
     # The EFFICIENCY-like table was the original duplication site.
-    assert "efficiencies" not in text or "function computeRates" not in text, (
+    assert "efficiencies" not in text and "function computeRates" not in text, (
         "main.qml has reintroduced a local PHY efficiency table; remove it and "
         "consume data.display.tx_rates_mbps / data.display.rx_rates_mbps."
     )

@@ -71,8 +71,8 @@ def test_parse_link_blocks_eht_mlo():
     text = _load("iw_link_eht_mlo.txt")
     links = wifimimo_core.parse_link_blocks(text)
     assert len(links) == 2
-    assert {l["link_id"] for l in links} == {0, 2}
-    by_id = {l["link_id"]: l for l in links}
+    assert {link["link_id"] for link in links} == {0, 2}
+    by_id = {link["link_id"]: link for link in links}
     assert by_id[2]["freq_mhz"] == 6295
     assert by_id[2]["chan_num"] == 69
     assert by_id[0]["freq_mhz"] == 5180
@@ -97,3 +97,28 @@ def test_mlo_primary_link_empty_on_non_mlo(monkeypatch):
 
 def test_320mhz_width_in_nl80211_table():
     assert wifimimo_core.NL80211_WIDTH_TO_MHZ[8] == 320
+
+
+def test_fallback_via_iw_link_populates_connected_state(monkeypatch):
+    text = _load("iw_link_eht_mlo.txt")
+    monkeypatch.setattr(wifimimo_core, "_run", lambda cmd: text)
+    data = wifimimo_core.default_state("wlp1s0")
+    wifimimo_core._fallback_via_iw_link(data, "wlp1s0")
+    # When netlink station info is missing, iw link must still surface
+    # connected=True and the basic identity fields, not leave defaults.
+    assert data["connected"] is True
+    assert data["ssid"] == "carrierpidgeon-6G"
+    assert data["bssid"] == "36:2f:d0:28:55:74"
+    # MLD parent has no top-level freq; primary Link block fills it in.
+    assert data["freq_mhz"] == 6295
+    assert data["chan_num"] == 69
+    assert data["bandwidth_mhz"] == 320  # from MLD-stats bitrate width
+    assert len(data["links"]) == 2
+
+
+def test_fallback_via_iw_link_noop_on_disconnected(monkeypatch):
+    monkeypatch.setattr(wifimimo_core, "_run", lambda cmd: _load("iw_link_disconnected.txt"))
+    data = wifimimo_core.default_state("wlp1s0")
+    wifimimo_core._fallback_via_iw_link(data, "wlp1s0")
+    assert data["connected"] is False
+    assert data["links"] == []

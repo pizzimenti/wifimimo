@@ -23,14 +23,22 @@ FIXTURES = Path(__file__).parent / "fixtures"
 FIXTURES.mkdir(parents=True, exist_ok=True)
 
 
-def _capture_iw_link(iface: str) -> None:
+def _capture_iw_link(iface: str) -> bool:
     result = subprocess.run(
         ["iw", "dev", iface, "link"],
         capture_output=True, text=True, check=False, timeout=5,
     )
+    if result.returncode != 0:
+        print(
+            f"iw dev {iface} link failed (rc={result.returncode}): "
+            f"{result.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return False
     out = FIXTURES / "iw_link_live.txt"
     out.write_text(result.stdout, encoding="utf-8")
     print(f"wrote {out}")
+    return True
 
 
 def _capture_nl80211(iface: str) -> None:
@@ -66,9 +74,9 @@ def _capture_nl80211(iface: str) -> None:
 
 def main() -> int:
     iface = sys.argv[1] if len(sys.argv) > 1 else "wlp1s0"
-    _capture_iw_link(iface)
+    ok = _capture_iw_link(iface)
     _capture_nl80211(iface)
-    return 0
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
