@@ -1,0 +1,15 @@
+Connected to 02:00:00:03:55:73 (on wlp1s0)
+	SSID: example-mlo
+	Link 2 BSSID 02:00:00:02:55:75
+		freq: 6295.0
+	Link 0 BSSID 02:00:00:03:55:73
+		freq: 5180.0
+MLD 02:00:00:03:55:73 stats:
+	RX: 503884 bytes (3045 packets)
+	TX: 11227147 bytes (8481 packets)
+	signal: -55 dBm
+	rx bitrate: 1441.3 MBit/s 160MHz EHT-MCS 7 EHT-NSS 2 EHT-GI 0
+	tx bitrate: 1441.3 MBit/s 160MHz EHT-MCS 7 EHT-NSS 2 EHT-GI 0
+	bss flags:
+	dtim period: 1
+	beacon int: 100

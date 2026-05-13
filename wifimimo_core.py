@@ -415,10 +415,16 @@ def parse_link_metrics(data: dict, link: str) -> None:
     match = re.search(r"Connected to\s+([0-9a-f:]{17})", link)
     if match:
         data["bssid"] = match.group(1)
-    match = re.search(r"freq:\s*([\d.]+)", link)
-    if match:
-        data["freq_mhz"] = int(float(match.group(1)))
-        data["chan_num"] = freq_to_channel(data["freq_mhz"])
+    # Skip freq extraction when "Link N BSSID" blocks are present — those
+    # `freq:` lines are per-link and `_promote_primary_link_freq` selects
+    # the right one (BSSID-match or highest-freq). Naively grabbing the
+    # first `freq:` would lock us onto whichever link iw printed first,
+    # which can disagree with the connection BSSID.
+    if not re.search(r"Link\s+\d+\s+BSSID", link, re.IGNORECASE):
+        match = re.search(r"freq:\s*([\d.]+)", link)
+        if match:
+            data["freq_mhz"] = int(float(match.group(1)))
+            data["chan_num"] = freq_to_channel(data["freq_mhz"])
     match = re.search(r"signal:\s+([-\d]+)", link)
     if match:
         data["signal_dbm"] = _int(match.group(1))
@@ -496,15 +502,42 @@ def _parse_mlo_primary_link(iface: str) -> tuple[int, int, list[dict]]:
     links = parse_link_blocks(text)
     if not links:
         return 0, 0, []
-    primary = links[0]
+    # Selection order matters: iw lists links in negotiation-order, not
+    # band-order. Picking links[0] could combine one link's BSSID (from
+    # `Connected to`) with another link's freq/chan. Prefer the link
+    # whose BSSID matches the connection BSSID; for an MLD whose
+    # parent MAC is virtual and matches none of the links, fall back
+    # to the highest-freq link so the band label trends toward the best
+    # spectrum (6 GHz over 5 GHz over 2.4 GHz).
+    connected_bssid = ""
+    m = re.search(r"Connected to\s+([0-9a-f:]{17})", text)
+    if m:
+        connected_bssid = m.group(1)
+    primary = _select_primary_link(links, connected_bssid)
     width = primary["bandwidth_mhz"]
     if not width:
         # MLD parent's bitrate line carries the channel width even when the
         # Link block itself only lists freq.
-        m = re.search(r"(?:tx|rx) bitrate:.*?\b(\d+)MHz\b", text)
-        if m:
-            width = _int(m.group(1))
+        bw = re.search(r"(?:tx|rx) bitrate:.*?\b(\d+)MHz\b", text)
+        if bw:
+            width = _int(bw.group(1))
     return primary["freq_mhz"], width, links
+
+
+def _select_primary_link(links: list[dict], connected_bssid: str = "") -> dict:
+    """Pick the canonical link out of an MLO/MLD link list.
+
+    Prefers the link whose BSSID matches the connection's "Connected to"
+    address — the kernel's anchor link. Falls back to the highest-freq
+    link when the MLD MAC is virtual and matches none (the common
+    real-world MLO shape).
+    """
+    bssid = (connected_bssid or "").lower()
+    if bssid:
+        for link in links:
+            if (link.get("bssid") or "").lower() == bssid:
+                return link
+    return max(links, key=lambda link: link.get("freq_mhz", 0) or 0)
 
 
 # ---------------------------------------------------------------------------
@@ -656,16 +689,18 @@ def _augment_with_iw_link(data: dict, iface: str) -> None:
 
 
 def _promote_primary_link_freq(data: dict) -> None:
-    """Promote the first parsed Link block's freq/chan/width to top-level.
+    """Promote the canonical Link block's freq/chan/width to top-level.
 
     MLD parent stanzas in `iw dev <iface> link` don't carry a top-level
     `freq:` — only the per-link blocks do. Both collection paths (netlink
     fallback and pure-iw fallback) hit the same gap; this helper plugs it
-    in one place.
+    in one place using the same BSSID-match / highest-freq selection as
+    `_parse_mlo_primary_link`, so all three call sites agree on which
+    link is "primary".
     """
     if data.get("freq_mhz") or not data.get("links"):
         return
-    primary = data["links"][0]
+    primary = _select_primary_link(data["links"], data.get("bssid", ""))
     data["freq_mhz"] = primary["freq_mhz"]
     data["chan_num"] = primary["chan_num"]
     if not data.get("bandwidth_mhz") and primary["bandwidth_mhz"]:

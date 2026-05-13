@@ -21,8 +21,8 @@ def test_parse_link_metrics_eht_single():
     data = wifimimo_core.default_state()
     wifimimo_core.parse_link_metrics(data, text)
     assert data["connected"] is True
-    assert data["ssid"] == "carrierpidgeon-6G"
-    assert data["bssid"] == "36:2f:d0:28:55:74"
+    assert data["ssid"] == "example-6ghz"
+    assert data["bssid"] == "02:00:00:00:55:74"
     assert data["freq_mhz"] == 6295
     assert data["chan_num"] == 69
     assert data["bandwidth_mhz"] == 160
@@ -107,9 +107,10 @@ def test_fallback_via_iw_link_populates_connected_state(monkeypatch):
     # When netlink station info is missing, iw link must still surface
     # connected=True and the basic identity fields, not leave defaults.
     assert data["connected"] is True
-    assert data["ssid"] == "carrierpidgeon-6G"
-    assert data["bssid"] == "36:2f:d0:28:55:74"
-    # MLD parent has no top-level freq; primary Link block fills it in.
+    assert data["ssid"] == "example-6ghz"
+    # MLD virtual MAC — doesn't match any link's BSSID, so primary
+    # falls back to highest-freq (Link 2, 6 GHz).
+    assert data["bssid"] == "02:00:00:01:55:74"
     assert data["freq_mhz"] == 6295
     assert data["chan_num"] == 69
     assert data["bandwidth_mhz"] == 320  # from MLD-stats bitrate width
@@ -159,3 +160,35 @@ def test_collect_pure_iw_path_promotes_primary_link_freq(monkeypatch):
     assert data["chan_num"] == 69
     assert data["bandwidth_mhz"] == 320
     assert len(data["links"]) == 2
+
+
+def test_primary_link_prefers_bssid_match(monkeypatch):
+    # When the connection BSSID matches one Link's BSSID (kernel's anchor
+    # link), pick *that* link as primary even if iw lists a higher-freq
+    # link first. This keeps state.freq_mhz and state.bssid consistent.
+    monkeypatch.setattr(wifimimo_core, "_collect_via_netlink", lambda iface: None)
+    text = _load("iw_link_eht_mlo_anchor.txt")
+    monkeypatch.setattr(wifimimo_core, "_run", lambda cmd: text if "link" in cmd else "")
+    data = wifimimo_core.collect("wlp1s0")
+    # "Connected to" matches Link 0's BSSID — that link is 5180 MHz / ch36
+    # even though Link 2 (6295 MHz) appears first in the iw output.
+    assert data["bssid"] == "02:00:00:03:55:73"
+    assert data["freq_mhz"] == 5180
+    assert data["chan_num"] == 36
+
+
+def test_select_primary_link_directly():
+    # Direct unit test of the selection helper covers both branches in
+    # isolation from the rest of the iw parsing pipeline.
+    links = [
+        {"link_id": 2, "bssid": "aa:aa:aa:aa:aa:aa", "freq_mhz": 6295},
+        {"link_id": 0, "bssid": "bb:bb:bb:bb:bb:bb", "freq_mhz": 5180},
+    ]
+    # BSSID match wins over freq.
+    assert wifimimo_core._select_primary_link(links, "bb:bb:bb:bb:bb:bb")["link_id"] == 0
+    # Case-insensitive match.
+    assert wifimimo_core._select_primary_link(links, "AA:AA:AA:AA:AA:AA")["link_id"] == 2
+    # No bssid → highest-freq.
+    assert wifimimo_core._select_primary_link(links, "")["link_id"] == 2
+    # Non-matching bssid → highest-freq fallback.
+    assert wifimimo_core._select_primary_link(links, "cc:cc:cc:cc:cc:cc")["link_id"] == 2

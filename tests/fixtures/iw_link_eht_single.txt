@@ -1,5 +1,5 @@
-Connected to 36:2f:d0:28:55:74 (on wlp1s0)
-	SSID: carrierpidgeon-6G
+Connected to 02:00:00:00:55:74 (on wlp1s0)
+	SSID: example-6ghz
 	freq: 6295
 	RX: 788050657 bytes (586345 packets)
 	TX: 82702138 bytes (166609 packets)

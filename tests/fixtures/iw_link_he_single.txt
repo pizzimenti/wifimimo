@@ -1,4 +1,4 @@
-Connected to 8a:1c:2f:33:44:55 (on wlp1s0)
+Connected to 02:00:00:04:33:55 (on wlp1s0)
 	SSID: example-5g
 	freq: 5180
 	RX: 11223344 bytes (45678 packets)
