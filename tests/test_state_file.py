@@ -83,6 +83,31 @@ def test_v1_migration_antennas_sort_by_index(tmp_path: Path):
     assert loaded["signal_antennas"] == [-50, -72]
 
 
+def test_partial_v2_payload_deep_merges_display(tmp_path: Path):
+    # An older daemon that knows fewer display fields, or a half-flushed
+    # write, must not blow away unspecified keys with None — read_state
+    # has to deep-merge `display` against its dataclass default.
+    payload = {
+        "schema_version": 2,
+        "connected": True,
+        "tx_mode": "EHT",
+        "tx_mcs": 9,
+        "display": {
+            "band_label": "6 GHz",
+            # Note: tx_rates_mbps, signal_tier, mcs_grid_count, etc. omitted.
+        },
+    }
+    path = tmp_path / "state"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    loaded = wifimimo_core.read_state(path)
+    # Provided field carries through.
+    assert loaded["display"]["band_label"] == "6 GHz"
+    # Defaults preserved for un-mentioned display keys.
+    assert loaded["display"]["mcs_grid_count"] == 12
+    assert loaded["display"]["tx_rates_mbps"] == []
+    assert loaded["display"]["signal_tier"] == "crit"
+
+
 def test_unknown_keys_in_v2_are_ignored(tmp_path: Path):
     payload = {
         "schema_version": 99,  # forward-compat

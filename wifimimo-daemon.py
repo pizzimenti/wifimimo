@@ -106,8 +106,17 @@ class WifimimoDaemon:
                     log(
                         f"history schema changed; rotated {path.name} -> {rotated.name}"
                     )
-                except OSError:
-                    pass
+                except OSError as exc:
+                    # If we can't rotate, refusing to write keeps the file
+                    # readable. Falling through would append new-shape rows
+                    # under the old-shape header — exactly the schema
+                    # mismatch this guard exists to prevent.
+                    log(
+                        f"history schema mismatch but rotation failed ({exc}); "
+                        f"skipping history writes for {date_str}"
+                    )
+                    self._history_date = date_str
+                    return
         write_header = not path.exists() or path.stat().st_size == 0
         self._history_file = open(path, "a", newline="", encoding="utf-8")
         self._history_writer = csv.writer(self._history_file)

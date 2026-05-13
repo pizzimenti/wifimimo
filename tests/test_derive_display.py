@@ -91,6 +91,17 @@ def test_signal_fraction_within_bounds():
     assert display["signal_avg_fraction"] == 0.0
 
 
+def test_signal_fraction_clamps_invalid_non_negative_dbm():
+    # The (-50 - -90) / 70 math would map +5 dBm to a near-full bar
+    # (~1.36, clamped to 1.0). _signal_fraction must reject dbm >= 0
+    # so the bar matches the "crit" tier classification.
+    assert wifimimo_core._signal_fraction(0) == 0.0
+    assert wifimimo_core._signal_fraction(5) == 0.0
+    assert wifimimo_core._signal_fraction(99) == 0.0
+    # Real negative readings still scale.
+    assert wifimimo_core._signal_fraction(-50) > 0.5
+
+
 def test_antenna_fractions_match_count():
     display = wifimimo_core.derive_display(
         _make_state(signal_dbm=-50, signal_antennas=[-58, -60, -62])

@@ -802,7 +802,11 @@ def _band_label(freq_mhz: int) -> str:
 
 
 def _signal_fraction(dbm: float) -> float:
-    if not dbm:
+    # dbm >= 0 is invalid (default 0 or chain-misreading positive value);
+    # collapse to 0.0 so the bar matches what _signal_tier returns ("crit")
+    # — otherwise +5 dBm would map to a near-full bar through the
+    # `(dbm - FLOOR) / span` math, contradicting the tier badge.
+    if dbm >= 0:
         return 0.0
     span = SIGNAL_CEIL_DBM - SIGNAL_FLOOR_DBM
     return max(0.0, min(1.0, (dbm - SIGNAL_FLOOR_DBM) / span))
@@ -970,7 +974,16 @@ def read_state(path: Path = STATE_PATH) -> dict:
         merged = dict(defaults)
         # Only carry over fields we recognise; tolerate forward-compat additions.
         for key, value in loaded.items():
-            if key in _KNOWN_FIELDS:
+            if key not in _KNOWN_FIELDS:
+                continue
+            # Deep-merge `display` so a partial v2 payload (older daemon
+            # that hasn't learned a new display field yet, or a half-flushed
+            # write) doesn't blow away the unspecified keys with None/zero.
+            if key == "display" and isinstance(value, dict):
+                deep = dict(defaults["display"])
+                deep.update(value)
+                merged[key] = deep
+            else:
                 merged[key] = value
         return merged
 

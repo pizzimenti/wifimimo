@@ -587,10 +587,14 @@ PlasmoidItem {
         // chain-signal list. mt7925 in MLO mode aggregates to MLD-level and
         // leaves NL80211_STA_INFO_CHAIN_SIGNAL empty; rendering "0 dBm" rows
         // for absent antennas is more misleading than just omitting them.
+        // Same logic for "Avg" — if signal_avg_dbm is 0 it's a default /
+        // pre-association placeholder, not a real -0 dBm reading.
         const rows = [
-            { label: "Overall", value: root.data.signal_dbm, hist: "sig_overall", kind: "signal" },
-            { label: "Avg", value: root.data.signal_avg_dbm, hist: "sig_avg", kind: "signal" }
+            { label: "Overall", value: root.data.signal_dbm, hist: "sig_overall", kind: "signal" }
         ];
+        if (root.data.signal_avg_dbm) {
+            rows.push({ label: "Avg", value: root.data.signal_avg_dbm, hist: "sig_avg", kind: "signal" });
+        }
         for (let i = 0; i < antennaSignals.length; ++i) {
             rows.push({ label: "Antenna " + (i + 1), value: antennaSignals[i], hist: "sig_ant" + i, kind: "signal" });
         }

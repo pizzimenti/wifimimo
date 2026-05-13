@@ -52,6 +52,41 @@ def test_history_rotates_on_header_mismatch(tmp_path):
     assert new_header == wifimimo_core.HISTORY_COLUMNS
 
 
+def test_history_skips_writes_when_rotation_fails(tmp_path, monkeypatch):
+    # If path.rename raises (e.g. permission error in the history dir)
+    # while the schema is mismatched, the daemon must NOT fall through
+    # and append new-shape rows under the old-shape header — that would
+    # recreate the corruption this guard exists to prevent.
+    daemon_module = _load_daemon()
+    history_dir = tmp_path / "history"
+    history_dir.mkdir()
+    today = "2026-05-13"
+    existing = history_dir / f"{today}.csv"
+    old_header = wifimimo_core.HISTORY_COLUMNS[:-1]
+    existing.write_text(",".join(old_header) + "\nrow1\n", encoding="utf-8")
+    original_size = existing.stat().st_size
+
+    # Force the rename to fail.
+    monkeypatch.setattr(
+        Path, "rename",
+        lambda self, _target: (_ for _ in ()).throw(OSError("simulated")),
+    )
+
+    daemon = daemon_module.WifimimoDaemon(
+        "wlp1s0", tmp_path / "state", history_dir
+    )
+    daemon._open_history(today)
+    # write_history is a safe no-op when the writer is None.
+    daemon.write_history({"connected": True, "iface": "wlp1s0"})
+    daemon._close_history()
+
+    # File untouched (no append, no header rewrite).
+    assert existing.stat().st_size == original_size
+    with existing.open(encoding="utf-8") as f:
+        first = f.readline().rstrip("\n").split(",")
+    assert first == old_header
+
+
 def test_history_keeps_file_when_header_matches(tmp_path):
     daemon_module = _load_daemon()
     history_dir = tmp_path / "history"
