@@ -148,7 +148,7 @@ def mcs_color(mcs: int) -> int:
 def fmt_uptime(secs: int) -> str:
     h, rem = divmod(secs, 3600)
     m, s = divmod(rem, 60)
-    return f"{h}h{m:02}m" if h else f"{m}m{s:02}s"
+    return f"{h}h {m:02}m {s:02}s" if h else f"{m}m {s:02}s"
 
 
 def draw_mcs_ruler(stdscr, row: int, indent: int,

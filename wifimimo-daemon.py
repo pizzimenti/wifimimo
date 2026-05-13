@@ -19,6 +19,7 @@ from wifimimo_core import (
     HISTORY_DIR,
     IFACE,
     STATE_PATH,
+    UI_ACTIVE_PATH,
     collect,
     collect_power,
     derive_display,
@@ -35,6 +36,11 @@ POLL_SLOW_S = 5.0
 TRANSITION_COOLDOWN_S = 30.0
 RETRY_WINDOW_S = 10.0
 U32_COUNTER_MODULUS = 2 ** 32
+# How recently the plasmoid must have touched UI_ACTIVE_PATH for the daemon
+# to consider the popup expanded. Has to be > plasmoid's 1s expanded poll
+# (so a slow tick doesn't expire it) but short enough to drop back to slow
+# poll quickly after the popup closes.
+UI_ACTIVE_TTL_S = 3.0
 
 
 def log(message: str) -> None:
@@ -154,6 +160,19 @@ class WifimimoDaemon:
             signal_dbm < ALERT_SIGNAL_DBM,
         )
 
+    def ui_expanded(self) -> bool:
+        """True when the plasmoid touched UI_ACTIVE_PATH recently.
+
+        The plasmoid's expanded-state polling shells out to update the
+        file's mtime on every refresh; this is the daemon's signal to drop
+        into fast-poll for a live view. No DBus, no IPC — just a file.
+        """
+        try:
+            mtime = UI_ACTIVE_PATH.stat().st_mtime
+        except OSError:
+            return False
+        return (time.time() - mtime) <= UI_ACTIVE_TTL_S
+
     def poll_interval_for_state(self, state: dict, now: float) -> float:
         signature = self.state_signature(state)
         if self.last_state_signature is None:
@@ -171,7 +190,11 @@ class WifimimoDaemon:
                 or int(state.get("signal_dbm", 0) or 0) < ALERT_SIGNAL_DBM
             )
         )
-        if degraded or now - self.last_transition_time < TRANSITION_COOLDOWN_S:
+        if (
+            degraded
+            or now - self.last_transition_time < TRANSITION_COOLDOWN_S
+            or self.ui_expanded()
+        ):
             return POLL_FAST_S
         return POLL_SLOW_S
 

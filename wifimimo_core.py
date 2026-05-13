@@ -48,6 +48,10 @@ SIGNAL_CEIL_DBM = -20
 SPREAD_FRACTION_FLOOR = 30.0  # dBm spread that maps to a full bar
 
 STATE_PATH = Path(f"/run/user/{os.getuid()}/wifimimo-state")
+# Plasmoid touches this marker each poll while the popup is expanded.
+# The daemon uses its mtime to drop into fast-poll mode without needing
+# a DBus channel — purely filesystem-mediated.
+UI_ACTIVE_PATH = Path(f"/run/user/{os.getuid()}/wifimimo-ui-active")
 SCHEMA_VERSION = 2
 
 KNOWN_WIFI_DRIVERS = ("iwlwifi", "mt76", "mt79", "ath", "rtw", "brcm", "mwifiex")

@@ -23,7 +23,14 @@ PlasmoidItem {
     // plasmashell's environment, which would be a global side effect.
     readonly property string runtimeDir: StandardPaths.writableLocation(StandardPaths.RuntimeLocation).toString().replace(/^file:\/\//, "")
     readonly property string statePath: runtimeDir ? (runtimeDir + "/wifimimo-state") : ""
-    readonly property string currentCommand: "sh -c 'if [ -f \"$1\" ]; then cat \"$1\"; fi' _ \"" + statePath + "\""
+    readonly property string uiActivePath: runtimeDir ? (runtimeDir + "/wifimimo-ui-active") : ""
+    // When the popup is expanded, the poll command also touches the
+    // ui-active marker so the daemon knows to drop into fast-poll (1 s)
+    // mode. Collapsed polls only read the state file — the marker ages
+    // out and the daemon returns to slow-poll (5 s) on its own.
+    readonly property string currentCommand: root.expanded
+        ? "sh -c 'touch \"$1\"; if [ -f \"$2\" ]; then cat \"$2\"; fi' _ \"" + uiActivePath + "\" \"" + statePath + "\""
+        : "sh -c 'if [ -f \"$1\" ]; then cat \"$1\"; fi' _ \"" + statePath + "\""
     property int refreshMs: 1000
     property int compactRefreshMs: 15000
     property string monospaceFamily: "monospace"
@@ -505,9 +512,9 @@ PlasmoidItem {
         const m = Math.floor((secs % 3600) / 60);
         const s = secs % 60;
         if (h > 0) {
-            return h + "h" + String(m).padStart(2, "0") + "m";
+            return h + "h " + String(m).padStart(2, "0") + "m " + String(s).padStart(2, "0") + "s";
         }
-        return m + "m" + String(s).padStart(2, "0") + "s";
+        return m + "m " + String(s).padStart(2, "0") + "s";
     }
 
     function fmtClock(ts) {
@@ -646,10 +653,11 @@ PlasmoidItem {
     }
 
     fullRepresentation: PlasmaExtras.Representation {
+        // No fixed height — the panel sizes to its content so we get
+        // uniform spacing between every section instead of a single
+        // fillHeight-driven slack pocket above SIGNAL.
         Layout.minimumWidth:  Kirigami.Units.gridUnit * 30
-        Layout.minimumHeight: 550
         Layout.maximumWidth:  Kirigami.Units.gridUnit * 30
-        Layout.maximumHeight: 550
         collapseMarginsHint: true
 
         ColumnLayout {
@@ -658,19 +666,45 @@ PlasmoidItem {
                 fill: parent
                 margins: Kirigami.Units.smallSpacing
             }
-            spacing: 1
+            spacing: 3
 
-            PlasmaComponents3.Label {
+            // Title row: "wifimimo v0.2.0      link uptime: 7h 09m 23s"
+            // All one font size; "wifimimo" bold, version regular, uptime dim.
+            // Version is pulled from the plasmoid's metadata.json so the
+            // string moves in lockstep with `Version` there.
+            RowLayout {
                 Layout.fillWidth: true
-                text: "wifimimo"
-                font.bold: true
-                font.family: root.monospaceFamily
-                horizontalAlignment: Text.AlignHCenter
+                spacing: 0
+
+                PlasmaComponents3.Label {
+                    text: "wifimimo"
+                    font.bold: true
+                    font.pixelSize: Math.round(Kirigami.Theme.defaultFont.pixelSize * 1.5)
+                    font.family: root.monospaceFamily
+                }
+
+                PlasmaComponents3.Label {
+                    text: "  v" + (Plasmoid.metaData && Plasmoid.metaData.version ? Plasmoid.metaData.version : "")
+                    font.pixelSize: Math.round(Kirigami.Theme.defaultFont.pixelSize * 1.5)
+                    font.family: root.monospaceFamily
+                }
+
+                Item {
+                    Layout.fillWidth: true
+                }
+
+                PlasmaComponents3.Label {
+                    visible: root.hasRecentData
+                    text: "link uptime: " + (root.data.connected_time_s > 0 ? root.fmtUptime(root.data.connected_time_s) : "?")
+                    font.pixelSize: Math.round(Kirigami.Theme.defaultFont.pixelSize * 1.5)
+                    font.family: root.monospaceFamily
+                    color: Kirigami.Theme.disabledTextColor
+                }
             }
 
             ColumnLayout {
                 Layout.fillWidth: true
-                spacing: 0
+                spacing: 1
                 visible: root.hasRecentData
 
                 PlasmaComponents3.Label {
@@ -678,6 +712,7 @@ PlasmoidItem {
                     text: (root.data.ssid_display || root.data.ssid || root.data.bssid) + "  (" + root.data.bssid + ")"
                     elide: Text.ElideRight
                     font.bold: true
+                    font.pixelSize: Math.round(Kirigami.Theme.defaultFont.pixelSize * 1.20)
                     font.family: root.monospaceFamily
                     color: Kirigami.Theme.positiveTextColor
                 }
@@ -685,6 +720,7 @@ PlasmoidItem {
                 PlasmaComponents3.Label {
                     Layout.fillWidth: true
                     text: root.freqLine()
+                    font.pixelSize: Math.round(Kirigami.Theme.defaultFont.pixelSize * 1.10)
                     font.family: root.monospaceFamily
                     color: Kirigami.Theme.textColor
                 }
@@ -692,15 +728,9 @@ PlasmoidItem {
                 PlasmaComponents3.Label {
                     Layout.fillWidth: true
                     text: root.linkStatusLine()
+                    font.pixelSize: Math.round(Kirigami.Theme.defaultFont.pixelSize * 1.10)
                     font.family: root.monospaceFamily
                     color: Kirigami.Theme.textColor
-                }
-
-                PlasmaComponents3.Label {
-                    Layout.fillWidth: true
-                    text: "up " + (root.data.connected_time_s > 0 ? root.fmtUptime(root.data.connected_time_s) : "?")
-                    font.family: root.monospaceFamily
-                    color: Kirigami.Theme.disabledTextColor
                 }
             }
 
@@ -719,7 +749,7 @@ PlasmoidItem {
             ColumnLayout {
                 Layout.fillWidth: true
                 visible: root.hasRecentData
-                spacing: 1
+                spacing: 3
 
             PlasmaComponents3.Label {
                 Layout.fillWidth: true
@@ -792,9 +822,9 @@ PlasmoidItem {
 
                     Item {
                         Layout.fillWidth: true
-                        Layout.preferredHeight: 8
-                        Layout.minimumHeight: 8
-                        Layout.maximumHeight: 8
+                        Layout.preferredHeight: 12
+                        Layout.minimumHeight: 12
+                        Layout.maximumHeight: 12
 
                         Rectangle {
                             anchors.fill: parent
@@ -879,9 +909,9 @@ PlasmoidItem {
                     Item {
                         id: rateBar
                         Layout.fillWidth: true
-                        Layout.preferredHeight: 8
-                        Layout.minimumHeight: 8
-                        Layout.maximumHeight: 8
+                        Layout.preferredHeight: 12
+                        Layout.minimumHeight: 12
+                        Layout.maximumHeight: 12
 
                         readonly property real ceiling: {
                             const rates = rateBlock.modelData.rates;
@@ -985,7 +1015,7 @@ PlasmoidItem {
                             delegate: Rectangle {
                                 required property int index
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: Kirigami.Units.gridUnit * 1.1
+                                Layout.preferredHeight: Kirigami.Units.gridUnit * 1.4
                                 radius: 3
                                 color: root.mcsColor(
                                     index,
@@ -1013,14 +1043,25 @@ PlasmoidItem {
                         Repeater {
                             model: mcsBlock.gridCount
 
-                            delegate: PlasmaComponents3.Label {
+                            // Wrap each rate label in an Item so the row's
+                            // Layout.fillWidth distributes equal widths (Item
+                            // has implicitWidth 0) — using a bare Label gave
+                            // proportional widths based on text content, so
+                            // "144" claimed less width than "2882" and the
+                            // rate centers drifted off the MCS cell centers.
+                            delegate: Item {
                                 required property int index
                                 Layout.fillWidth: true
-                                horizontalAlignment: Text.AlignHCenter
-                                text: index < mcsBlock.rates.length ? mcsBlock.rates[index] : "-"
-                                color: Kirigami.Theme.disabledTextColor
-                                font.family: root.monospaceFamily
-                                font.pixelSize: Math.max(9, Kirigami.Theme.defaultFont.pixelSize - 2)
+                                Layout.preferredHeight: rateLabel.implicitHeight
+
+                                PlasmaComponents3.Label {
+                                    id: rateLabel
+                                    anchors.centerIn: parent
+                                    text: parent.index < mcsBlock.rates.length ? mcsBlock.rates[parent.index] : "-"
+                                    color: Kirigami.Theme.disabledTextColor
+                                    font.family: root.monospaceFamily
+                                    font.pixelSize: Math.max(9, Kirigami.Theme.defaultFont.pixelSize - 2)
+                                }
                             }
                         }
                     }
@@ -1072,9 +1113,9 @@ PlasmoidItem {
 
                 Item {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 8
-                    Layout.minimumHeight: 8
-                    Layout.maximumHeight: 8
+                    Layout.preferredHeight: 12
+                    Layout.minimumHeight: 12
+                    Layout.maximumHeight: 12
 
                     Rectangle {
                         anchors.fill: parent
