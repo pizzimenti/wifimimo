@@ -651,6 +651,23 @@ def _augment_with_iw_link(data: dict, iface: str) -> None:
         data["links"] = links
 
 
+def _promote_primary_link_freq(data: dict) -> None:
+    """Promote the first parsed Link block's freq/chan/width to top-level.
+
+    MLD parent stanzas in `iw dev <iface> link` don't carry a top-level
+    `freq:` — only the per-link blocks do. Both collection paths (netlink
+    fallback and pure-iw fallback) hit the same gap; this helper plugs it
+    in one place.
+    """
+    if data.get("freq_mhz") or not data.get("links"):
+        return
+    primary = data["links"][0]
+    data["freq_mhz"] = primary["freq_mhz"]
+    data["chan_num"] = primary["chan_num"]
+    if not data.get("bandwidth_mhz") and primary["bandwidth_mhz"]:
+        data["bandwidth_mhz"] = primary["bandwidth_mhz"]
+
+
 def _fallback_via_iw_link(data: dict, iface: str) -> None:
     """Backfill connection metrics from `iw dev <iface> link` when the
     netlink station enumeration came back empty.
@@ -669,13 +686,7 @@ def _fallback_via_iw_link(data: dict, iface: str) -> None:
         return
     if not data.get("links"):
         data["links"] = parse_link_blocks(link_text)
-    # MLD parents don't carry a top-level freq line; the first Link block does.
-    if not data.get("freq_mhz") and data["links"]:
-        primary = data["links"][0]
-        data["freq_mhz"] = primary["freq_mhz"]
-        data["chan_num"] = primary["chan_num"]
-        if not data.get("bandwidth_mhz") and primary["bandwidth_mhz"]:
-            data["bandwidth_mhz"] = primary["bandwidth_mhz"]
+    _promote_primary_link_freq(data)
 
 
 def collect(iface: str) -> dict:
@@ -691,6 +702,7 @@ def collect(iface: str) -> dict:
         return data
 
     data["links"] = parse_link_blocks(link)
+    _promote_primary_link_freq(data)
 
     dump = _run(["iw", "dev", iface, "station", "dump"])
     if not dump:

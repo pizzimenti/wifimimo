@@ -143,3 +143,19 @@ def test_augment_with_iw_link_runs_when_freq_missing(monkeypatch):
     assert data["freq_mhz"] == 6295
     assert data["bandwidth_mhz"] == 320
     assert len(data["links"]) == 2
+
+
+def test_collect_pure_iw_path_promotes_primary_link_freq(monkeypatch):
+    # When pyroute2 is unavailable or netlink collection fails, collect()
+    # falls through to the iw-only path. MLO outputs without a top-level
+    # freq must still surface primary freq/chan from the Link block —
+    # otherwise derived band/Wi-Fi-N labels render against freq=0.
+    monkeypatch.setattr(wifimimo_core, "_collect_via_netlink", lambda iface: None)
+    mlo_text = _load("iw_link_eht_mlo.txt")
+    monkeypatch.setattr(wifimimo_core, "_run", lambda cmd: mlo_text if "link" in cmd else "")
+    data = wifimimo_core.collect("wlp1s0")
+    assert data["connected"] is True
+    assert data["freq_mhz"] == 6295
+    assert data["chan_num"] == 69
+    assert data["bandwidth_mhz"] == 320
+    assert len(data["links"]) == 2
