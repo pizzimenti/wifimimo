@@ -465,6 +465,12 @@ PlasmoidItem {
     function signalColorForDbm(dbm) {
         // Used for historical-low markers where we only have the raw dBm value;
         // mirrors the canonical tier thresholds from wifimimo_core.SIGNAL_*_DBM.
+        // dbm >= 0 is the dataclass default or a chain-misreading driver bug —
+        // either way it's not a healthy reading, so flag negative (matches the
+        // Python _signal_tier short-circuit).
+        if (dbm >= 0) {
+            return Kirigami.Theme.negativeTextColor;
+        }
         if (dbm < -75) {
             return Kirigami.Theme.negativeTextColor;
         }
@@ -477,8 +483,9 @@ PlasmoidItem {
     function signalFractionForDbm(dbm) {
         // Mirror of wifimimo_core._signal_fraction so historical markers (min/max)
         // can be positioned on the bar. The *current* value's fraction comes from
-        // display.signal_fraction.
-        if (!dbm) {
+        // display.signal_fraction. dbm >= 0 collapses to 0 so the misreading
+        // doesn't paint a deceptively full bar.
+        if (dbm >= 0) {
             return 0;
         }
         return Math.max(0, Math.min(1, (dbm + 90) / 70));
