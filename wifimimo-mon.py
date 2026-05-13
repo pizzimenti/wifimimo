@@ -424,8 +424,11 @@ def draw(stdscr, data: dict, hist: History, interval: float) -> None:
 def _signal_fraction(dbm: float) -> float:
     # Local copy of the canonical formula in wifimimo_core; mon's annotated
     # bars need a fraction for the historical-low marker, which never lands
-    # in display.* (only the *current* fraction does).
-    if not dbm:
+    # in display.* (only the *current* fraction does). dbm >= 0 is the
+    # default 0 or chain-misreading positive value — collapse to 0 so
+    # the mon bar matches signal_color()'s "crit" treatment, mirroring
+    # the wifimimo_core._signal_fraction guard.
+    if dbm >= 0:
         return 0.0
     return max(0.0, min(1.0, (dbm + 90) / 70))
 
