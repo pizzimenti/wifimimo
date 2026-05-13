@@ -21,6 +21,7 @@ from wifimimo_core import (
     STATE_PATH,
     collect,
     collect_power,
+    derive_display,
     history_row,
     write_state,
 )
@@ -65,6 +66,7 @@ class WifimimoDaemon:
             self.update_retry_window(state, loop_start)
             issues = self.collect_issues(state)
             state["issue_count"] = len(issues)
+            state["display"] = derive_display(state)
             poll_interval = self.poll_interval_for_state(state, loop_start)
             write_state(self.state_path, state)
             self.write_history(state)
@@ -127,12 +129,15 @@ class WifimimoDaemon:
         )
 
     def mimo_healthy(self, state: dict) -> bool:
+        # "Healthy" = at least one direction is using 2+ spatial streams,
+        # i.e. the chip's antenna chains are demonstrably working. Asymmetric
+        # NSS (tx=1, rx=2) is normal on MLO/EHT client links; flagging it as
+        # degraded was producing constant noise on the user's healthy link.
         if not state.get("connected"):
             return False
         tx_nss = int(state.get("tx_nss", 0) or 0)
         rx_nss = int(state.get("rx_nss", 0) or 0)
-        values = [value for value in (tx_nss, rx_nss) if value > 0]
-        return bool(values) and min(values) >= 2
+        return max(tx_nss, rx_nss) >= 2
 
     def state_signature(self, state: dict) -> tuple:
         connected = bool(state.get("connected"))
@@ -140,7 +145,7 @@ class WifimimoDaemon:
         rx_nss = int(state.get("rx_nss", 0) or 0)
         retry_pct = float(state.get("retry_10s_pct", 0.0) or 0.0)
         signal_dbm = int(state.get("signal_dbm", 0) or 0)
-        effective_nss = min([value for value in (tx_nss, rx_nss) if value > 0], default=0)
+        effective_nss = max(tx_nss, rx_nss)
         return (
             connected,
             state.get("bssid", ""),
@@ -218,7 +223,11 @@ class WifimimoDaemon:
 
         antennas = [int(value) for value in state.get("signal_antennas", [])]
         antenna_count = len(antennas)
-        if antenna_count < 2:
+        # Empty antenna list means the driver doesn't expose chain signal at
+        # all (mt7925 in MLO mode aggregates everything to MLD level). That's
+        # a telemetry gap, not a degraded MIMO state — only alert when the
+        # list is present but short (= an antenna actually dropped offline).
+        if 0 < antenna_count < 2:
             issues.append(("normal", "MIMO Offline", f"Only {antenna_count}/2 antennas reporting"))
         for index, dbm in enumerate(antennas, start=1):
             if dbm < ALERT_SIGNAL_DBM:
@@ -230,10 +239,13 @@ class WifimimoDaemon:
 
         tx_nss = int(state.get("tx_nss", 0) or 0)
         rx_nss = int(state.get("rx_nss", 0) or 0)
-        if tx_nss and tx_nss != 2:
-            issues.append(("critical", "MIMO Degraded — TX", f"Dropped to {tx_nss}x1 SISO  (expected 2x2)"))
-        if rx_nss and rx_nss != 2:
-            issues.append(("critical", "MIMO Degraded — RX", f"Dropped to {rx_nss}x1 SISO  (expected 2x2)"))
+        effective_nss = max(tx_nss, rx_nss)
+        if effective_nss and effective_nss < 2:
+            issues.append((
+                "critical",
+                "MIMO Degraded",
+                f"Both directions collapsed to NSS {effective_nss}  (TX {tx_nss}, RX {rx_nss}; expected 2x2)",
+            ))
 
         retry_pct = float(state.get("retry_10s_pct", 0.0) or 0.0)
         if retry_pct > ALERT_RETRY_PCT:

@@ -1,0 +1,11 @@
+Connected to aa:bb:cc:dd:ee:ff (on wlp1s0)
+	SSID: legacy-5g
+	freq: 5180
+	RX: 1234567 bytes (4567 packets)
+	TX: 7654321 bytes (8765 packets)
+	signal: -55 dBm
+	rx bitrate: 866.7 MBit/s VHT-MCS 9 80MHz VHT-NSS 2
+	tx bitrate: 866.7 MBit/s VHT-MCS 9 80MHz VHT-NSS 2
+	bss flags:	short-slot-time
+	dtim period: 1
+	beacon int: 100
