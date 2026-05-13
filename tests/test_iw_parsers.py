@@ -177,6 +177,25 @@ def test_primary_link_prefers_bssid_match(monkeypatch):
     assert data["chan_num"] == 36
 
 
+def test_parse_link_metrics_ssid_containing_link_substring_is_not_mlo():
+    # An SSID with the literal text "Link 2 BSSID" inside it must not flip
+    # parse_link_metrics into MLO-mode. Without the line-anchored guard,
+    # the freq extraction would be skipped and freq_mhz/chan_num would
+    # stay zero on a perfectly normal 5 GHz single-link connection.
+    text = (
+        "Connected to 02:00:00:06:11:22 (on wlp1s0)\n"
+        "\tSSID: My Link 2 BSSID lounge\n"
+        "\tfreq: 5180\n"
+        "\tsignal: -55 dBm\n"
+        "\ttx bitrate: 866.7 MBit/s 80MHz VHT-MCS 9 VHT-NSS 2\n"
+    )
+    data = wifimimo_core.default_state("wlp1s0")
+    wifimimo_core.parse_link_metrics(data, text)
+    assert data["ssid"] == "My Link 2 BSSID lounge"
+    assert data["freq_mhz"] == 5180
+    assert data["chan_num"] == 36
+
+
 def test_select_primary_link_directly():
     # Direct unit test of the selection helper covers both branches in
     # isolation from the rest of the iw parsing pipeline.

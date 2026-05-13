@@ -415,12 +415,12 @@ def parse_link_metrics(data: dict, link: str) -> None:
     match = re.search(r"Connected to\s+([0-9a-f:]{17})", link)
     if match:
         data["bssid"] = match.group(1)
-    # Skip freq extraction when "Link N BSSID" blocks are present — those
+    # Skip freq extraction when MLO Link blocks are present — those
     # `freq:` lines are per-link and `_promote_primary_link_freq` selects
     # the right one (BSSID-match or highest-freq). Naively grabbing the
     # first `freq:` would lock us onto whichever link iw printed first,
     # which can disagree with the connection BSSID.
-    if not re.search(r"Link\s+\d+\s+BSSID", link, re.IGNORECASE):
+    if not _MLO_HEADER_RE.search(link):
         match = re.search(r"freq:\s*([\d.]+)", link)
         if match:
             data["freq_mhz"] = int(float(match.group(1)))
@@ -446,10 +446,14 @@ def parse_link_metrics(data: dict, link: str) -> None:
 
 
 _LINK_BLOCK_RE = re.compile(
-    r"Link\s+(?P<id>\d+)\s+BSSID:?\s*(?P<bssid>[0-9a-f:]{17})(?P<body>.*?)"
-    r"(?=Link\s+\d+\s+BSSID|MLD\s|\Z)",
-    re.IGNORECASE | re.DOTALL,
+    r"^\s*Link\s+(?P<id>\d+)\s+BSSID:?\s*(?P<bssid>[0-9a-f:]{17})(?P<body>.*?)"
+    r"(?=^\s*Link\s+\d+\s+BSSID|^\s*MLD\s|\Z)",
+    re.IGNORECASE | re.DOTALL | re.MULTILINE,
 )
+# Whether the iw output is the MLD-shape (one or more "Link N BSSID …"
+# header lines). Anchored on line-start so an SSID that literally
+# contains the substring "Link N BSSID" doesn't trip the detection.
+_MLO_HEADER_RE = re.compile(r"^\s*Link\s+\d+\s+BSSID", re.IGNORECASE | re.MULTILINE)
 
 
 def parse_link_blocks(text: str) -> list[dict]:
