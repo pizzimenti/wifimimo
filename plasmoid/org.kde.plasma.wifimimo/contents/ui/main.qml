@@ -1099,6 +1099,25 @@ PlasmoidItem {
                 color: Kirigami.Theme.textColor
             }
 
+            PlasmaComponents3.Label {
+                Layout.fillWidth: true
+                // Visible when an MLD link is active. mt7925 (and likely
+                // other current Mediatek MLO firmware) doesn't surface
+                // tx_retries / tx_failed at any kernel level when the
+                // station is MLD-aggregated — confirmed empty across
+                // iw, nl80211, sysfs netdev, debugfs phy, and the mt76
+                // driver-private debugfs nodes. A persistent 0% on a
+                // visibly degraded link is honest reporting of the gap,
+                // not a wifimimo bug.
+                visible: root.linkCount > 0
+                text: "Counter unreliable on MLD link (driver/firmware gap)"
+                wrapMode: Text.Wrap
+                color: Kirigami.Theme.disabledTextColor
+                font.family: root.monospaceFamily
+                font.italic: true
+                font.pixelSize: Math.max(9, Kirigami.Theme.defaultFont.pixelSize - 2)
+            }
+
             ColumnLayout {
                 id: retryBlock
                 Layout.fillWidth: true
