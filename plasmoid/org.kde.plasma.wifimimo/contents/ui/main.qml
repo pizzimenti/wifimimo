@@ -757,10 +757,15 @@ PlasmoidItem {
             // Telemetry sections are hidden when there's no recent sample
             // — otherwise the panel renders default 0 dBm / 0 Mb/s / 0% rows
             // under "Not connected", which look like real-but-zero readings.
+            // Negative top-margin tightens the gap between the link header
+            // and the first section (SIGNAL); per-section topMargin on
+            // RATES / MCS INDEX / TX RETRIES adds breathing room between
+            // the four telemetry blocks.
             ColumnLayout {
                 Layout.fillWidth: true
+                Layout.topMargin: -2
                 visible: root.hasRecentData
-                spacing: 3
+                spacing: 2
 
             PlasmaComponents3.Label {
                 Layout.fillWidth: true
@@ -869,6 +874,7 @@ PlasmoidItem {
 
             PlasmaComponents3.Label {
                 Layout.fillWidth: true
+                Layout.topMargin: 10
                 text: "RATES"
                 font.bold: true
                 font.family: root.monospaceFamily
@@ -962,6 +968,7 @@ PlasmoidItem {
 
             PlasmaComponents3.Label {
                 Layout.fillWidth: true
+                Layout.topMargin: 10
                 text: "MCS INDEX"
                 font.bold: true
                 font.family: root.monospaceFamily
@@ -1081,6 +1088,7 @@ PlasmoidItem {
 
             PlasmaComponents3.Label {
                 Layout.fillWidth: true
+                Layout.topMargin: 10
                 text: "TX RETRIES"
                 font.bold: true
                 font.family: root.monospaceFamily
