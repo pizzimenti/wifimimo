@@ -21,10 +21,37 @@ fi
 
 run_as_user() {
     if [[ -n "${PKEXEC_UID:-}" ]]; then
-        sudo -u "#${PKEXEC_UID}" XDG_RUNTIME_DIR="/run/user/${PKEXEC_UID}" HOME="$HOME" "$@"
+        sudo -u "#${PKEXEC_UID}" \
+            XDG_RUNTIME_DIR="/run/user/${PKEXEC_UID}" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${PKEXEC_UID}/bus" \
+            HOME="$HOME" \
+            "$@"
     else
         "$@"
     fi
+}
+
+reload_plasmashell() {
+    # kpackagetool6 --upgrade writes new QML to disk but does NOT re-import the
+    # plasmoid into a running plasmashell — the running instance keeps the old
+    # compiled QML in process memory, so the schema-v2 JSON state file gets
+    # parsed by the v1 plasmoid as garbage and the panel reads "Not connected".
+    #
+    # On systemd-managed Plasma 6 sessions (Manjaro, Arch, openSUSE TW, …)
+    # plasmashell is run as the user unit plasma-plasmashell.service. Restart
+    # it via systemctl so the session keeps a consistent DBus/XDG environment.
+    # Do NOT use `kquitapp6 plasmashell && kstart plasmashell` from a sudo
+    # context — kstart detaches but the new plasmashell inherits a broken
+    # environment and frequently dies, leaving the user with no panel.
+    local uid="${PKEXEC_UID:-$UID}"
+    if ! run_as_user systemctl --user --quiet is-active plasma-plasmashell.service 2>/dev/null; then
+        echo "plasma-plasmashell.service not active; skipping plasmashell reload."
+        echo "  If your panel needs a refresh, run: systemctl --user restart plasma-plasmashell.service"
+        return 0
+    fi
+    echo "Reloading plasmashell so the upgraded plasmoid takes effect..."
+    run_as_user systemctl --user restart plasma-plasmashell.service || \
+        echo "  Note: systemctl --user restart plasma-plasmashell.service failed; reload manually."
 }
 
 upgrade_or_install_plasmoid() {
@@ -67,6 +94,7 @@ if [[ -n "${PKEXEC_UID:-}" ]]; then
 fi
 
 install -d -m755 "$TARGET_LIB_DIR"
+install -Dm644 "$ROOT_DIR/phy_modes.py"                "$TARGET_LIB_DIR/phy_modes.py"
 install -Dm644 "$ROOT_DIR/wifimimo_core.py"            "$TARGET_LIB_DIR/wifimimo_core.py"
 install -Dm755 "$ROOT_DIR/wifimimo-daemon.py"          "$TARGET_LIB_DIR/wifimimo-daemon.py"
 install -Dm755 "$ROOT_DIR/wifimimo-mon.py"             "$TARGET_LIB_DIR/wifimimo-mon.py"
@@ -112,6 +140,8 @@ run_as_user systemctl --user daemon-reload
 run_as_user systemctl --user enable "$USER_SERVICE_NAME"
 run_as_user systemctl --user restart "$USER_SERVICE_NAME"
 
+reload_plasmashell
+
 printf 'Installed:\n'
 printf '  %s\n' "$TARGET_LIB_DIR/"
 printf '  %s\n' "$TARGET_DAEMON"
@@ -124,3 +154,5 @@ run_as_user systemctl --user status "$USER_SERVICE_NAME" --no-pager
 printf '\nRun monitor:  wifimimo-mon\n'
 printf 'Panel applet: org.kde.plasma.wifimimo\n'
 printf 'View logs:    journalctl --user -u %s -f\n' "$USER_SERVICE_NAME"
+printf '\nState file is JSON (schema_version 2). plasmashell was reloaded so the\n'
+printf 'new plasmoid QML is active; the panel will reappear within ~1s.\n'

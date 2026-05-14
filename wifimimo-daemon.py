@@ -19,8 +19,10 @@ from wifimimo_core import (
     HISTORY_DIR,
     IFACE,
     STATE_PATH,
+    UI_ACTIVE_PATH,
     collect,
     collect_power,
+    derive_display,
     history_row,
     write_state,
 )
@@ -34,6 +36,11 @@ POLL_SLOW_S = 5.0
 TRANSITION_COOLDOWN_S = 30.0
 RETRY_WINDOW_S = 10.0
 U32_COUNTER_MODULUS = 2 ** 32
+# How recently the plasmoid must have touched UI_ACTIVE_PATH for the daemon
+# to consider the popup expanded. Has to be > plasmoid's 1s expanded poll
+# (so a slow tick doesn't expire it) but short enough to drop back to slow
+# poll quickly after the popup closes.
+UI_ACTIVE_TTL_S = 3.0
 
 
 def log(message: str) -> None:
@@ -65,6 +72,7 @@ class WifimimoDaemon:
             self.update_retry_window(state, loop_start)
             issues = self.collect_issues(state)
             state["issue_count"] = len(issues)
+            state["display"] = derive_display(state)
             poll_interval = self.poll_interval_for_state(state, loop_start)
             write_state(self.state_path, state)
             self.write_history(state)
@@ -79,6 +87,36 @@ class WifimimoDaemon:
         self._close_history()
         self.history_dir.mkdir(parents=True, exist_ok=True)
         path = self.history_dir / f"{date_str}.csv"
+        # If today's file already exists with a different header (the daemon
+        # restarted mid-day after a schema change — e.g. a new HISTORY_COLUMNS
+        # entry landed in an upgrade), rotate the old file aside so we don't
+        # append new-shape rows under an old-shape header. Same-day rotation
+        # uses a millisecond suffix to avoid collisions if the daemon flaps.
+        if path.exists() and path.stat().st_size > 0:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    existing_header = f.readline().rstrip("\n").split(",")
+            except OSError:
+                existing_header = []
+            if existing_header and existing_header != HISTORY_COLUMNS:
+                stamp = int(time.time() * 1000)
+                rotated = path.with_name(f"{date_str}.pre-{stamp}.csv")
+                try:
+                    path.rename(rotated)
+                    log(
+                        f"history schema changed; rotated {path.name} -> {rotated.name}"
+                    )
+                except OSError as exc:
+                    # If we can't rotate, refusing to write keeps the file
+                    # readable. Falling through would append new-shape rows
+                    # under the old-shape header — exactly the schema
+                    # mismatch this guard exists to prevent.
+                    log(
+                        f"history schema mismatch but rotation failed ({exc}); "
+                        f"skipping history writes for {date_str}"
+                    )
+                    self._history_date = date_str
+                    return
         write_header = not path.exists() or path.stat().st_size == 0
         self._history_file = open(path, "a", newline="", encoding="utf-8")
         self._history_writer = csv.writer(self._history_file)
@@ -127,12 +165,15 @@ class WifimimoDaemon:
         )
 
     def mimo_healthy(self, state: dict) -> bool:
+        # "Healthy" = at least one direction is using 2+ spatial streams,
+        # i.e. the chip's antenna chains are demonstrably working. Asymmetric
+        # NSS (tx=1, rx=2) is normal on MLO/EHT client links; flagging it as
+        # degraded was producing constant noise on the user's healthy link.
         if not state.get("connected"):
             return False
         tx_nss = int(state.get("tx_nss", 0) or 0)
         rx_nss = int(state.get("rx_nss", 0) or 0)
-        values = [value for value in (tx_nss, rx_nss) if value > 0]
-        return bool(values) and min(values) >= 2
+        return max(tx_nss, rx_nss) >= 2
 
     def state_signature(self, state: dict) -> tuple:
         connected = bool(state.get("connected"))
@@ -140,7 +181,7 @@ class WifimimoDaemon:
         rx_nss = int(state.get("rx_nss", 0) or 0)
         retry_pct = float(state.get("retry_10s_pct", 0.0) or 0.0)
         signal_dbm = int(state.get("signal_dbm", 0) or 0)
-        effective_nss = min([value for value in (tx_nss, rx_nss) if value > 0], default=0)
+        effective_nss = max(tx_nss, rx_nss)
         return (
             connected,
             state.get("bssid", ""),
@@ -148,6 +189,19 @@ class WifimimoDaemon:
             retry_pct > ALERT_RETRY_PCT,
             signal_dbm < ALERT_SIGNAL_DBM,
         )
+
+    def ui_expanded(self) -> bool:
+        """True when the plasmoid touched UI_ACTIVE_PATH recently.
+
+        The plasmoid's expanded-state polling shells out to update the
+        file's mtime on every refresh; this is the daemon's signal to drop
+        into fast-poll for a live view. No DBus, no IPC — just a file.
+        """
+        try:
+            mtime = UI_ACTIVE_PATH.stat().st_mtime
+        except OSError:
+            return False
+        return (time.time() - mtime) <= UI_ACTIVE_TTL_S
 
     def poll_interval_for_state(self, state: dict, now: float) -> float:
         signature = self.state_signature(state)
@@ -166,7 +220,11 @@ class WifimimoDaemon:
                 or int(state.get("signal_dbm", 0) or 0) < ALERT_SIGNAL_DBM
             )
         )
-        if degraded or now - self.last_transition_time < TRANSITION_COOLDOWN_S:
+        if (
+            degraded
+            or now - self.last_transition_time < TRANSITION_COOLDOWN_S
+            or self.ui_expanded()
+        ):
             return POLL_FAST_S
         return POLL_SLOW_S
 
@@ -218,7 +276,11 @@ class WifimimoDaemon:
 
         antennas = [int(value) for value in state.get("signal_antennas", [])]
         antenna_count = len(antennas)
-        if antenna_count < 2:
+        # Empty antenna list means the driver doesn't expose chain signal at
+        # all (mt7925 in MLO mode aggregates everything to MLD level). That's
+        # a telemetry gap, not a degraded MIMO state — only alert when the
+        # list is present but short (= an antenna actually dropped offline).
+        if 0 < antenna_count < 2:
             issues.append(("normal", "MIMO Offline", f"Only {antenna_count}/2 antennas reporting"))
         for index, dbm in enumerate(antennas, start=1):
             if dbm < ALERT_SIGNAL_DBM:
@@ -230,10 +292,17 @@ class WifimimoDaemon:
 
         tx_nss = int(state.get("tx_nss", 0) or 0)
         rx_nss = int(state.get("rx_nss", 0) or 0)
-        if tx_nss and tx_nss != 2:
-            issues.append(("critical", "MIMO Degraded — TX", f"Dropped to {tx_nss}x1 SISO  (expected 2x2)"))
-        if rx_nss and rx_nss != 2:
-            issues.append(("critical", "MIMO Degraded — RX", f"Dropped to {rx_nss}x1 SISO  (expected 2x2)"))
+        # Require BOTH directions to have reported NSS before flagging
+        # "MIMO Degraded" — otherwise a partial association where only one
+        # direction has rate-info yet (tx=1, rx=0) trips a transient
+        # false-positive alert. With both populated and max<2, every
+        # active stream is single-stream → genuine 1x1 collapse.
+        if tx_nss > 0 and rx_nss > 0 and max(tx_nss, rx_nss) < 2:
+            issues.append((
+                "critical",
+                "MIMO Degraded",
+                f"Both directions running NSS 1  (TX {tx_nss}, RX {rx_nss}; expected 2x2)",
+            ))
 
         retry_pct = float(state.get("retry_10s_pct", 0.0) or 0.0)
         if retry_pct > ALERT_RETRY_PCT:

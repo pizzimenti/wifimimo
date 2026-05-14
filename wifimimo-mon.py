@@ -13,14 +13,12 @@ import locale
 import sys
 import time
 
-from wifimimo_core import IFACE, MCS_MAX, compute_rates, read_state, safe_ssid
+from wifimimo_core import IFACE, read_state, safe_ssid
 
 
 ALERT_DIFF_DBM = 15
 ALERT_SIGNAL_DBM = -75
 ALERT_RETRY_PCT = 30
-SIGNAL_FLOOR = -90
-SIGNAL_CEIL = -20
 
 COLOR_HEADER = 1
 COLOR_GOOD = 2
@@ -123,8 +121,12 @@ def draw_bar_annotated(
                 pass
 
 
-def signal_fraction(dbm: int) -> float:
-    return (dbm - SIGNAL_FLOOR) / (SIGNAL_CEIL - SIGNAL_FLOOR)
+def tier_color(tier: str) -> int:
+    if tier == "crit":
+        return curses.color_pair(COLOR_HOT) | curses.A_BOLD
+    if tier == "warn":
+        return curses.color_pair(COLOR_WARN)
+    return curses.color_pair(COLOR_GOOD)
 
 
 def signal_color(dbm: int) -> int:
@@ -143,14 +145,10 @@ def mcs_color(mcs: int) -> int:
     return curses.color_pair(COLOR_HOT)
 
 
-def nss_dots(nss: int) -> str:
-    return "●" * nss + "○" * max(0, 2 - nss)
-
-
 def fmt_uptime(secs: int) -> str:
     h, rem = divmod(secs, 3600)
     m, s = divmod(rem, 60)
-    return f"{h}h{m:02}m" if h else f"{m}m{s:02}s"
+    return f"{h}h {m:02}m {s:02}s" if h else f"{m}m {s:02}s"
 
 
 def draw_mcs_ruler(stdscr, row: int, indent: int,
@@ -187,7 +185,7 @@ def draw_mcs_ruler(stdscr, row: int, indent: int,
         row += 1
 
     if row < max_y - 1:
-        mbps_row = "".join(f"{rate:>{cell_w - 1}} " for rate in rates)
+        mbps_row = "".join(f"{r:>{cell_w - 1}} " for r in rates[:n])
         safe_addstr(stdscr, row, indent, mbps_row + "Mb/s", curses.color_pair(COLOR_DIM))
         row += 1
 
@@ -202,6 +200,8 @@ def draw(stdscr, data: dict, hist: History, interval: float) -> None:
     bar_w = max(10, min(28, max_x - 54))
     val_col = 22
     bar_col = 33
+
+    display = data.get("display") or {}
 
     def section(title: str) -> bool:
         nonlocal row
@@ -252,7 +252,7 @@ def draw(stdscr, data: dict, hist: History, interval: float) -> None:
         row += 2
 
     freq = data["freq_mhz"]
-    band = "6 GHz" if freq >= 6000 else "5 GHz" if freq >= 5000 else "2.4 GHz" if freq else "?"
+    band = display.get("band_label", "?")
     uptime = fmt_uptime(data["connected_time_s"]) if data["connected_time_s"] else "?"
     ssid = data.get("ssid_display") or safe_ssid(data["ssid"]) or data["bssid"]
     chan_str = f"  ch{data['chan_num']}" if data.get("chan_num") else ""
@@ -276,10 +276,10 @@ def draw(stdscr, data: dict, hist: History, interval: float) -> None:
                 label,
                 f"{dbm:4} dBm",
                 col,
-                signal_fraction(dbm),
+                _signal_fraction(dbm),
                 col,
-                min_frac=signal_fraction(lo),
-                max_frac=signal_fraction(hi),
+                min_frac=_signal_fraction(lo),
+                max_frac=_signal_fraction(hi),
                 min_str=f"{lo}",
                 max_str=f"{hi}",
             )
@@ -308,26 +308,31 @@ def draw(stdscr, data: dict, hist: History, interval: float) -> None:
         row += 1
 
     if section("RATES"):
-        gi_labels = {0: "0.8µs", 1: "1.6µs", 2: "3.2µs"}
-        for label, rate_key, nss_key, mcs_key, mode_key, gi_key in [
-            ("TX", "tx_rate_mbps", "tx_nss", "tx_mcs", "tx_mode", "tx_gi"),
-            ("RX", "rx_rate_mbps", "rx_nss", "rx_mcs", "rx_mode", "rx_gi"),
+        for label, rate_key, nss_key, mcs_key, gi_label_key in [
+            ("TX", "tx_rate_mbps", "tx_nss", "tx_mcs", "tx_gi_label"),
+            ("RX", "rx_rate_mbps", "rx_nss", "rx_mcs", "rx_gi_label"),
         ]:
             rate = data[rate_key]
             nss = data[nss_key]
             mcs = data[mcs_key]
-            mode = data.get(mode_key, "HE")
-            gi = data.get(gi_key, -1)
             hist.update(rate_key, rate)
             lo = hist.min(rate_key, rate)
             hi = hist.max(rate_key, rate)
-            computed = compute_rates(rate, mcs, mode) if mcs >= 0 else []
+            computed = (
+                display.get("tx_rates_mbps", []) if label == "TX"
+                else display.get("rx_rates_mbps", [])
+            )
             max_rate = float(computed[-1]) if computed else (rate or 1.0)
+            nss_dots = (
+                display.get("tx_nss_dots", "") if label == "TX"
+                else display.get("rx_nss_dots", "")
+            )
             parts = []
             if nss:
-                parts.append(f"NSS {nss} {nss_dots(nss)}")
-            if gi >= 0:
-                parts.append(f"GI {gi_labels.get(gi, str(gi))}")
+                parts.append(f"NSS {nss} {nss_dots}")
+            gi_label = display.get(gi_label_key, "")
+            if gi_label:
+                parts.append(f"GI {gi_label}")
             metric(
                 label,
                 f"{rate:6.1f} Mb/s",
@@ -343,22 +348,50 @@ def draw(stdscr, data: dict, hist: History, interval: float) -> None:
         row += 1
 
     if data["tx_mcs"] >= 0 and section("MCS INDEX"):
-        for label, mcs_key, rate_key, mode_key in [
-            ("TX", "tx_mcs", "tx_rate_mbps", "tx_mode"),
-            ("RX", "rx_mcs", "rx_rate_mbps", "rx_mode"),
+        for label, mcs_key, rate_key, rates_key in [
+            ("TX", "tx_mcs", "tx_rate_mbps", "tx_rates_mbps"),
+            ("RX", "rx_mcs", "rx_rate_mbps", "rx_rates_mbps"),
         ]:
             mcs = data[mcs_key]
             rate = data[rate_key]
-            mode = data.get(mode_key, "HE")
             if mcs < 0:
                 continue
             hist.update(mcs_key, mcs)
             lo = int(hist.min(mcs_key, mcs))
             hi = int(hist.max(mcs_key, mcs))
-            computed = compute_rates(rate, mcs, mode)
-            mcs_max = MCS_MAX.get(mode, 11)
+            computed = display.get(rates_key, []) or []
+            mcs_max = max(len(computed) - 1, mcs)
             row = draw_mcs_ruler(stdscr, row, 4, mcs, lo, hi, label, rate, computed, mcs_max, max_y)
             row += 1
+
+    links = data.get("links") or []
+    if len(links) > 1 and section("LINKS"):
+        for link in links:
+            if row >= max_y - 3:
+                break
+            freq = link.get("freq_mhz", 0)
+            width = link.get("bandwidth_mhz", 0)
+            sig = link.get("signal_dbm", 0)
+            tx_rate = link.get("tx_rate_mbps", 0.0)
+            rx_rate = link.get("rx_rate_mbps", 0.0)
+            tx_mode = link.get("tx_mode") or link.get("rx_mode") or ""
+            suffix = []
+            if width:
+                suffix.append(f"{width} MHz")
+            if tx_mode:
+                suffix.append(tx_mode)
+            if sig:
+                suffix.append(f"{sig} dBm")
+            line = (
+                f"Link {link.get('link_id', 0)}  {link.get('bssid','')}  "
+                f"{freq} MHz  "
+                f"TX {tx_rate:.0f}/RX {rx_rate:.0f} Mb/s"
+            )
+            if suffix:
+                line += "  " + "  ".join(suffix)
+            safe_addstr(stdscr, row, 4, line, curses.color_pair(COLOR_GOOD))
+            row += 1
+        row += 1
 
     if section("TX RETRIES"):
         retry_pct = float(data.get("retry_10s_pct", 0.0) or 0.0)
@@ -386,6 +419,18 @@ def draw(stdscr, data: dict, hist: History, interval: float) -> None:
     safe_addstr(stdscr, max_y - 2, 2, " source: wifimimo-daemon shared state ", curses.color_pair(COLOR_DIM))
     safe_addstr(stdscr, max_y - 1, 0, " q quit | +/- interval | r refresh ".ljust(max_x - 1), curses.color_pair(COLOR_TITLE))
     stdscr.refresh()
+
+
+def _signal_fraction(dbm: float) -> float:
+    # Local copy of the canonical formula in wifimimo_core; mon's annotated
+    # bars need a fraction for the historical-low marker, which never lands
+    # in display.* (only the *current* fraction does). dbm >= 0 is the
+    # default 0 or chain-misreading positive value — collapse to 0 so
+    # the mon bar matches signal_color()'s "crit" treatment, mirroring
+    # the wifimimo_core._signal_fraction guard.
+    if dbm >= 0:
+        return 0.0
+    return max(0.0, min(1.0, (dbm + 90) / 70))
 
 
 def main(stdscr) -> None:

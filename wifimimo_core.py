@@ -5,11 +5,14 @@ Shared wifimimo data collection and state-file helpers.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import re
 import signal
 import subprocess
 import threading
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 try:
@@ -17,18 +20,39 @@ try:
 except ImportError:
     IW = None
 
+from phy_modes import (
+    PHY_MODES,
+    SIX_GHZ_FLOOR_MHZ,
+    compute_rates,
+    default_phy_mode,
+    efficiency_for,
+    iw_token_alternation,
+    mcs_max_for,
+    phy_mode_by_name,
+    wifi_label,
+)
+
+
+logger = logging.getLogger("wifimimo")
+
 
 IFACE = "wlp1s0"
 HISTORY_DIR = Path.home() / ".local" / "state" / "wifimimo" / "history"
 
-MCS_MAX: dict[str, int] = {"HE": 11, "VHT": 9, "HT": 7}
-EFFICIENCY: dict[str, list[float]] = {
-    "HE": [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 4.5, 5.0, 6.0, 20 / 3, 7.5, 25 / 3],
-    "VHT": [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 4.5, 5.0, 6.0, 20 / 3],
-    "HT": [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 4.5, 5.0],
-}
+# Canonical signal thresholds. Used by daemon alerts AND derived display tier
+# so curses mon, plasmoid, and journal alerts agree.
+SIGNAL_GOOD_DBM = -65
+SIGNAL_WARN_DBM = -75
+SIGNAL_FLOOR_DBM = -90
+SIGNAL_CEIL_DBM = -20
+SPREAD_FRACTION_FLOOR = 30.0  # dBm spread that maps to a full bar
 
 STATE_PATH = Path(f"/run/user/{os.getuid()}/wifimimo-state")
+# Plasmoid touches this marker each poll while the popup is expanded.
+# The daemon uses its mtime to drop into fast-poll mode without needing
+# a DBus channel — purely filesystem-mediated.
+UI_ACTIVE_PATH = Path(f"/run/user/{os.getuid()}/wifimimo-ui-active")
+SCHEMA_VERSION = 2
 
 KNOWN_WIFI_DRIVERS = ("iwlwifi", "mt76", "mt79", "ath", "rtw", "brcm", "mwifiex")
 
@@ -41,6 +65,7 @@ NL80211_WIDTH_TO_MHZ = {
     5: 160,
     6: 5,
     7: 10,
+    8: 320,
 }
 NL80211_CALL_TIMEOUT_S = 1.0
 
@@ -81,6 +106,100 @@ class _TimeoutContext:
             if self.previous_handler is not None:
                 signal.signal(signal.SIGALRM, self.previous_handler)
         return False
+
+
+# ---------------------------------------------------------------------------
+# Schema
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class LinkInfo:
+    link_id: int = 0
+    bssid: str = ""
+    freq_mhz: int = 0
+    chan_num: int = 0
+    bandwidth_mhz: int = 0
+    signal_dbm: int = 0
+    tx_rate_mbps: float = 0.0
+    tx_mcs: int = -1
+    tx_nss: int = 0
+    tx_mode: str = ""
+    tx_gi: int = -1
+    rx_rate_mbps: float = 0.0
+    rx_mcs: int = -1
+    rx_nss: int = 0
+    rx_mode: str = ""
+    rx_gi: int = -1
+
+
+@dataclass
+class DisplayState:
+    band_label: str = "?"
+    wifi_label: str = ""  # e.g. "Wi-Fi 7 / EHT", "Wi-Fi 6E / HE"
+    signal_tier: str = "crit"
+    signal_fraction: float = 0.0
+    signal_avg_fraction: float = 0.0
+    spread_fraction: float = 0.0
+    antenna_fractions: list[float] = field(default_factory=list)
+    tx_nss_dots: str = "○○"
+    rx_nss_dots: str = "○○"
+    tx_gi_label: str = ""
+    rx_gi_label: str = ""
+    tx_rates_mbps: list[float] = field(default_factory=list)
+    rx_rates_mbps: list[float] = field(default_factory=list)
+    mcs_grid_count: int = 12
+
+
+@dataclass
+class WifiState:
+    schema_version: int = SCHEMA_VERSION
+    iface: str = IFACE
+    connected: bool = False
+    ssid: str = ""
+    ssid_display: str = ""
+    bssid: str = ""
+    freq_mhz: int = 0
+    chan_num: int = 0
+    bandwidth_mhz: int = 0
+    signal_dbm: int = 0
+    signal_avg_dbm: int = 0
+    signal_antennas: list[int] = field(default_factory=list)
+    tx_rate_mbps: float = 0.0
+    tx_mcs: int = -1
+    tx_nss: int = 0
+    tx_mode: str = ""
+    tx_gi: int = -1
+    rx_rate_mbps: float = 0.0
+    rx_mcs: int = -1
+    rx_nss: int = 0
+    rx_mode: str = ""
+    rx_gi: int = -1
+    tx_packets: int = 0
+    tx_retries: int = 0
+    tx_failed: int = 0
+    rx_packets: int = 0
+    connected_time_s: int = 0
+    station_dump_available: bool = False
+    retry_10s_pct: float = 0.0
+    retry_10s_packets: int = 0
+    retry_10s_retries: int = 0
+    retry_10s_failed: int = 0
+    issue_count: int = 0
+    timestamp: int = 0
+    card_temp_c: float = 0.0
+    power_save: str = ""
+    pci_power_state: str = ""
+    runtime_pm: str = ""
+    runtime_active_ms: int = 0
+    runtime_suspended_ms: int = 0
+    links: list[dict] = field(default_factory=list)
+    display: dict = field(default_factory=lambda: asdict(DisplayState()))
+
+
+# ---------------------------------------------------------------------------
+# Power / hwmon
+# ---------------------------------------------------------------------------
 
 
 def _find_wifi_hwmon(iface: str) -> Path | None:
@@ -167,48 +286,19 @@ def collect_power(iface: str) -> dict:
     return info
 
 
+# ---------------------------------------------------------------------------
+# Defaults
+# ---------------------------------------------------------------------------
+
+
 def default_state(iface: str = IFACE) -> dict:
-    return {
-        "iface": iface,
-        "connected": False,
-        "ssid": "",
-        "ssid_display": "",
-        "bssid": "",
-        "freq_mhz": 0,
-        "chan_num": 0,
-        "bandwidth_mhz": 0,
-        "signal_dbm": 0,
-        "signal_avg_dbm": 0,
-        "signal_antennas": [],
-        "tx_rate_mbps": 0.0,
-        "tx_mcs": -1,
-        "tx_nss": 0,
-        "tx_mode": "HE",
-        "tx_gi": -1,
-        "rx_rate_mbps": 0.0,
-        "rx_mcs": -1,
-        "rx_nss": 0,
-        "rx_mode": "HE",
-        "rx_gi": -1,
-        "tx_packets": 0,
-        "tx_retries": 0,
-        "tx_failed": 0,
-        "rx_packets": 0,
-        "connected_time_s": 0,
-        "station_dump_available": False,
-        "retry_10s_pct": 0.0,
-        "retry_10s_packets": 0,
-        "retry_10s_retries": 0,
-        "retry_10s_failed": 0,
-        "issue_count": 0,
-        "timestamp": 0,
-        "card_temp_c": 0.0,
-        "power_save": "",
-        "pci_power_state": "",
-        "runtime_pm": "",
-        "runtime_active_ms": 0,
-        "runtime_suspended_ms": 0,
-    }
+    """Return the WifiState dict shape with defaults, parameterized on iface."""
+    return asdict(WifiState(iface=iface))
+
+
+# ---------------------------------------------------------------------------
+# Parse helpers
+# ---------------------------------------------------------------------------
 
 
 def _run(cmd: list[str]) -> str:
@@ -250,13 +340,6 @@ def safe_ssid(ssid: str) -> str:
         return re.sub(r"\\x[0-9a-fA-F]{2}", "?", ssid)
 
 
-def compute_rates(ref_rate: float, ref_mcs: int, mode: str) -> list[float]:
-    eff = EFFICIENCY.get(mode, EFFICIENCY["HE"])
-    if ref_mcs < 0 or ref_mcs >= len(eff) or eff[ref_mcs] == 0:
-        return [0.0] * len(eff)
-    return [round(ref_rate * entry / eff[ref_mcs]) for entry in eff]
-
-
 def freq_to_channel(freq_mhz: int) -> int:
     if freq_mhz == 2484:
         return 14
@@ -267,6 +350,56 @@ def freq_to_channel(freq_mhz: int) -> int:
     if 5955 <= freq_mhz <= 7115:
         return (freq_mhz - 5950) // 5
     return 0
+
+
+# ---------------------------------------------------------------------------
+# iw output parsing
+# ---------------------------------------------------------------------------
+
+
+_HE_VHT_EHT_TOKENS = iw_token_alternation(exclude=("HT",))
+_GI_TOKENS = "|".join(m.iw_token for m in PHY_MODES if m.has_gi)
+
+
+def _parse_iw_rate_line(body: str, direction: str) -> dict:
+    """Extract one direction's rate fields from iw `tx/rx bitrate:` line."""
+    result: dict = {}
+    rate_re = (
+        rf"{direction} bitrate:\s+([\d.]+)\s+MBit/s"
+        rf"(?:.*?({_HE_VHT_EHT_TOKENS})-MCS\s+(\d+))?"
+        rf"(?:.*?(?:{_HE_VHT_EHT_TOKENS})-NSS\s+(\d+))?"
+    )
+    match = re.search(rate_re, body)
+    if not match:
+        return result
+    result["rate_mbps"] = _float(match.group(1))
+    width_match = re.search(rf"{direction} bitrate:.*?\b(\d+)MHz\b", body)
+    if width_match:
+        result["bandwidth_mhz"] = _int(width_match.group(1))
+    if match.group(2):
+        result["mode"] = match.group(2)
+        if match.group(3) is not None:
+            result["mcs"] = _int(match.group(3), -1)
+        if match.group(4) is not None:
+            result["nss"] = _int(match.group(4), 0)
+        if _GI_TOKENS:
+            gi_match = re.search(
+                rf"{direction} bitrate:.*?(?:{_GI_TOKENS})-GI\s+(\d+)", body
+            )
+            if gi_match:
+                result["gi"] = _int(gi_match.group(1), -1)
+        return result
+    # HT fallback: iw prints "MCS N" without a mode prefix. N encodes both
+    # mcs (low 3 bits) and stream count (high bits).
+    ht_match = re.search(
+        rf"{direction} bitrate:\s+[\d.]+\s+MBit/s.*?\bMCS\s+(\d+)", body
+    )
+    if ht_match:
+        raw = _int(ht_match.group(1))
+        result["mode"] = "HT"
+        result["mcs"] = raw % 8
+        result["nss"] = raw // 8 + 1
+    return result
 
 
 def parse_link_metrics(data: dict, link: str) -> None:
@@ -282,46 +415,148 @@ def parse_link_metrics(data: dict, link: str) -> None:
     match = re.search(r"Connected to\s+([0-9a-f:]{17})", link)
     if match:
         data["bssid"] = match.group(1)
-    match = re.search(r"freq:\s*(\d+)", link)
-    if match:
-        data["freq_mhz"] = _int(match.group(1))
-        data["chan_num"] = freq_to_channel(data["freq_mhz"])
-    match = re.search(r"signal:\s+([-\d]+)", link)
+
+    # Strip out per-Link block bodies for the top-level scalar extractions
+    # below — leaves the "before any Link" prefix plus the MLD-stats trailer
+    # (or the whole text on non-MLO outputs). That way `signal:`,
+    # `freq:` (when allowed), and `tx/rx bitrate:` always bind to the
+    # MLD aggregate or the non-MLO top-level, never to a specific Link's
+    # per-link line some iw versions emit. Per-link parsing happens
+    # separately via parse_link_blocks(); this function is for top-level.
+    top_level = _LINK_BLOCK_RE.sub("", link)
+
+    # Skip freq extraction when MLO Link blocks are present — those
+    # `freq:` lines are per-link and `_promote_primary_link_freq` selects
+    # the right one (BSSID-match or highest-freq). Naively grabbing the
+    # first `freq:` would lock us onto whichever link iw printed first,
+    # which can disagree with the connection BSSID.
+    if not _MLO_HEADER_RE.search(link):
+        match = re.search(r"freq:\s*([\d.]+)", top_level)
+        if match:
+            data["freq_mhz"] = int(float(match.group(1)))
+            data["chan_num"] = freq_to_channel(data["freq_mhz"])
+    match = re.search(r"signal:\s+([-\d]+)", top_level)
     if match:
         data["signal_dbm"] = _int(match.group(1))
 
     for direction in ("tx", "rx"):
-        match = re.search(
-            rf"{direction} bitrate:\s+([\d.]+)\s+MBit/s"
-            r"(?:.*?(HE|VHT)-MCS\s+(\d+))?"
-            r"(?:.*?(?:HE|VHT)-NSS\s+(\d+))?",
-            link,
-        )
-        if not match:
-            continue
-        data[f"{direction}_rate_mbps"] = _float(match.group(1))
-        if match.group(2):
-            data[f"{direction}_mode"] = match.group(2)
-        if match.group(3):
-            data[f"{direction}_mcs"] = _int(match.group(3))
-        if match.group(4):
-            data[f"{direction}_nss"] = _int(match.group(4))
-        if not data["bandwidth_mhz"]:
-            width_match = re.search(rf"{direction} bitrate:.*?\b(\d+)MHz\b", link)
-            if width_match:
-                data["bandwidth_mhz"] = _int(width_match.group(1))
-        gi_match = re.search(rf"{direction} bitrate:.*?HE-GI\s+(\d+)", link)
-        if gi_match:
-            data[f"{direction}_gi"] = _int(gi_match.group(1))
-        if match.group(2):
-            continue
-        ht_match = re.search(rf"{direction} bitrate:\s+[\d.]+\s+MBit/s.*?\bMCS\s+(\d+)", link)
-        if not ht_match:
-            continue
-        raw = _int(ht_match.group(1))
-        data[f"{direction}_mode"] = "HT"
-        data[f"{direction}_mcs"] = raw % 8
-        data[f"{direction}_nss"] = raw // 8 + 1
+        rate = _parse_iw_rate_line(top_level, direction)
+        if "rate_mbps" in rate:
+            data[f"{direction}_rate_mbps"] = rate["rate_mbps"]
+        if "mode" in rate:
+            data[f"{direction}_mode"] = rate["mode"]
+        if "mcs" in rate:
+            data[f"{direction}_mcs"] = rate["mcs"]
+        if "nss" in rate:
+            data[f"{direction}_nss"] = rate["nss"]
+        if "gi" in rate:
+            data[f"{direction}_gi"] = rate["gi"]
+        if rate.get("bandwidth_mhz") and not data.get("bandwidth_mhz"):
+            data["bandwidth_mhz"] = rate["bandwidth_mhz"]
+
+
+_LINK_BLOCK_RE = re.compile(
+    r"^\s*Link\s+(?P<id>\d+)\s+BSSID:?\s*(?P<bssid>[0-9a-f:]{17})(?P<body>.*?)"
+    r"(?=^\s*Link\s+\d+\s+BSSID|^\s*MLD\s|\Z)",
+    re.IGNORECASE | re.DOTALL | re.MULTILINE,
+)
+# Whether the iw output is the MLD-shape (one or more "Link N BSSID …"
+# header lines). Anchored on line-start so an SSID that literally
+# contains the substring "Link N BSSID" doesn't trip the detection.
+_MLO_HEADER_RE = re.compile(r"^\s*Link\s+\d+\s+BSSID", re.IGNORECASE | re.MULTILINE)
+
+
+def parse_link_blocks(text: str) -> list[dict]:
+    """Parse 'Link N BSSID ...' MLO blocks from `iw dev <iface> link`."""
+    links: list[dict] = []
+    for match in _LINK_BLOCK_RE.finditer(text):
+        link = asdict(LinkInfo())
+        link["link_id"] = _int(match.group("id"))
+        link["bssid"] = match.group("bssid").lower()
+        body = match.group("body")
+        m = re.search(r"freq:\s*([\d.]+)", body)
+        if m:
+            link["freq_mhz"] = int(float(m.group(1)))
+            link["chan_num"] = freq_to_channel(link["freq_mhz"])
+        m = re.search(r"width:\s*(\d+)\s*MHz", body)
+        if m:
+            link["bandwidth_mhz"] = _int(m.group(1))
+        m = re.search(r"signal:\s+([-\d]+)", body)
+        if m:
+            link["signal_dbm"] = _int(m.group(1))
+        for direction in ("tx", "rx"):
+            rate = _parse_iw_rate_line(body, direction)
+            if "rate_mbps" in rate:
+                link[f"{direction}_rate_mbps"] = rate["rate_mbps"]
+            if "mode" in rate:
+                link[f"{direction}_mode"] = rate["mode"]
+            if "mcs" in rate:
+                link[f"{direction}_mcs"] = rate["mcs"]
+            if "nss" in rate:
+                link[f"{direction}_nss"] = rate["nss"]
+            if "gi" in rate:
+                link[f"{direction}_gi"] = rate["gi"]
+            if rate.get("bandwidth_mhz") and not link["bandwidth_mhz"]:
+                link["bandwidth_mhz"] = rate["bandwidth_mhz"]
+        links.append(link)
+    return links
+
+
+def _parse_mlo_primary_link(iface: str) -> tuple[int, int, list[dict]]:
+    """Return (freq_mhz, bandwidth_mhz, links) from `iw dev <iface> link`.
+
+    For an MLD interface the parent frame doesn't carry freq/width — those
+    live under per-link blocks (freq) and the MLD-stats bitrate line (width,
+    encoded as ``160MHz`` next to the rate). Returned tuple is ``(0, 0, [])``
+    when the output has no Link blocks (non-MLO connection or iw missing).
+    """
+    text = _run(["iw", "dev", iface, "link"])
+    if not text:
+        return 0, 0, []
+    links = parse_link_blocks(text)
+    if not links:
+        return 0, 0, []
+    # Selection order matters: iw lists links in negotiation-order, not
+    # band-order. Picking links[0] could combine one link's BSSID (from
+    # `Connected to`) with another link's freq/chan. Prefer the link
+    # whose BSSID matches the connection BSSID; for an MLD whose
+    # parent MAC is virtual and matches none of the links, fall back
+    # to the highest-freq link so the band label trends toward the best
+    # spectrum (6 GHz over 5 GHz over 2.4 GHz).
+    connected_bssid = ""
+    m = re.search(r"Connected to\s+([0-9a-f:]{17})", text)
+    if m:
+        connected_bssid = m.group(1)
+    primary = _select_primary_link(links, connected_bssid)
+    width = primary["bandwidth_mhz"]
+    if not width:
+        # MLD parent's bitrate line carries the channel width even when the
+        # Link block itself only lists freq.
+        bw = re.search(r"(?:tx|rx) bitrate:.*?\b(\d+)MHz\b", text)
+        if bw:
+            width = _int(bw.group(1))
+    return primary["freq_mhz"], width, links
+
+
+def _select_primary_link(links: list[dict], connected_bssid: str = "") -> dict:
+    """Pick the canonical link out of an MLO/MLD link list.
+
+    Prefers the link whose BSSID matches the connection's "Connected to"
+    address — the kernel's anchor link. Falls back to the highest-freq
+    link when the MLD MAC is virtual and matches none (the common
+    real-world MLO shape).
+    """
+    bssid = (connected_bssid or "").lower()
+    if bssid:
+        for link in links:
+            if (link.get("bssid") or "").lower() == bssid:
+                return link
+    return max(links, key=lambda link: link.get("freq_mhz", 0) or 0)
+
+
+# ---------------------------------------------------------------------------
+# Netlink rate-info parsing
+# ---------------------------------------------------------------------------
 
 
 def _parse_rate_info(data: dict, direction: str, rate_info: dict | None) -> None:
@@ -332,21 +567,35 @@ def _parse_rate_info(data: dict, direction: str, rate_info: dict | None) -> None
     if raw_rate is not None:
         data[f"{direction}_rate_mbps"] = _float(raw_rate) / 10.0
 
-    if "NL80211_RATE_INFO_HE_MCS" in attrs:
-        data[f"{direction}_mode"] = "HE"
-        data[f"{direction}_mcs"] = _int(attrs.get("NL80211_RATE_INFO_HE_MCS"), -1)
-        data[f"{direction}_nss"] = _int(attrs.get("NL80211_RATE_INFO_HE_NSS"), 0)
-        data[f"{direction}_gi"] = _int(attrs.get("NL80211_RATE_INFO_HE_GI"), -1)
-    elif "NL80211_RATE_INFO_VHT_MCS" in attrs:
-        data[f"{direction}_mode"] = "VHT"
-        data[f"{direction}_mcs"] = _int(attrs.get("NL80211_RATE_INFO_VHT_MCS"), -1)
-        data[f"{direction}_nss"] = _int(attrs.get("NL80211_RATE_INFO_VHT_NSS"), 0)
-    elif "NL80211_RATE_INFO_MCS" in attrs:
-        data[f"{direction}_mode"] = "HT"
-        raw = _int(attrs.get("NL80211_RATE_INFO_MCS"), -1)
-        if raw >= 0:
-            data[f"{direction}_mcs"] = raw % 8
-            data[f"{direction}_nss"] = raw // 8 + 1
+    for mode in PHY_MODES:
+        if mode.nl_mcs_attr not in attrs:
+            continue
+        data[f"{direction}_mode"] = mode.name
+        if mode.name == "HT":
+            raw = _int(attrs.get(mode.nl_mcs_attr), -1)
+            if raw >= 0:
+                data[f"{direction}_mcs"] = raw % 8
+                data[f"{direction}_nss"] = raw // 8 + 1
+        else:
+            data[f"{direction}_mcs"] = _int(attrs.get(mode.nl_mcs_attr), -1)
+            data[f"{direction}_nss"] = _int(attrs.get(mode.nl_nss_attr), 0)
+            if mode.has_gi:
+                data[f"{direction}_gi"] = _int(attrs.get(mode.nl_gi_attr), -1)
+        return
+
+    # No mode matched. If there are MCS-shaped attrs, the kernel has surfaced
+    # a PHY mode we don't recognise yet; warn so the fixture suite can be
+    # updated alongside phy_modes.PHY_MODES.
+    unknown_mcs = sorted(
+        k for k in attrs if k.startswith("NL80211_RATE_INFO_") and "MCS" in k
+    )
+    if unknown_mcs:
+        logger.warning("unknown rate-info MCS attrs for %s: %s", direction, unknown_mcs)
+
+
+# ---------------------------------------------------------------------------
+# Collection
+# ---------------------------------------------------------------------------
 
 
 def _collect_via_netlink(iface: str) -> dict | None:
@@ -383,11 +632,13 @@ def _collect_via_netlink(iface: str) -> dict | None:
                 station_message = message
                 break
             if station_message is None:
+                _fallback_via_iw_link(data, iface)
                 return data
 
             station_attrs = _attrs_to_dict(station_message)
             station_info = _attrs_to_dict(station_attrs.get("NL80211_ATTR_STA_INFO"))
             if not station_info:
+                _fallback_via_iw_link(data, iface)
                 return data
 
             data["connected"] = True
@@ -418,11 +669,77 @@ def _collect_via_netlink(iface: str) -> dict | None:
 
             _parse_rate_info(data, "tx", station_info.get("NL80211_STA_INFO_TX_BITRATE"))
             _parse_rate_info(data, "rx", station_info.get("NL80211_STA_INFO_RX_BITRATE"))
+
+            _augment_with_iw_link(data, iface)
             return data
     except Exception:
         return None
     finally:
         iw.close()
+
+
+def _augment_with_iw_link(data: dict, iface: str) -> None:
+    """Fill in MLO-specific gaps (freq/width per link) from `iw dev link`.
+
+    The MLD parent doesn't carry NL80211_ATTR_WIPHY_FREQ; per-link freq lives
+    only in the iw `Link N` blocks. We gate on freq/width missing because
+    that's the MLO-MLD signature — the netlink path populates both for any
+    legacy non-MLO connection, so probing iw every poll just to confirm
+    `links == []` would burn one subprocess per second for no information
+    gain. When iw IS run (MLO case), we surface its `links` payload too.
+    """
+    needs_freq = not data.get("freq_mhz")
+    needs_width = not data.get("bandwidth_mhz")
+    if not (needs_freq or needs_width):
+        return
+    freq, width, links = _parse_mlo_primary_link(iface)
+    if needs_freq and freq:
+        data["freq_mhz"] = freq
+        data["chan_num"] = freq_to_channel(freq)
+    if needs_width and width:
+        data["bandwidth_mhz"] = width
+    if links:
+        data["links"] = links
+
+
+def _promote_primary_link_freq(data: dict) -> None:
+    """Promote the canonical Link block's freq/chan/width to top-level.
+
+    MLD parent stanzas in `iw dev <iface> link` don't carry a top-level
+    `freq:` — only the per-link blocks do. Both collection paths (netlink
+    fallback and pure-iw fallback) hit the same gap; this helper plugs it
+    in one place using the same BSSID-match / highest-freq selection as
+    `_parse_mlo_primary_link`, so all three call sites agree on which
+    link is "primary".
+    """
+    if data.get("freq_mhz") or not data.get("links"):
+        return
+    primary = _select_primary_link(data["links"], data.get("bssid", ""))
+    data["freq_mhz"] = primary["freq_mhz"]
+    data["chan_num"] = primary["chan_num"]
+    if not data.get("bandwidth_mhz") and primary["bandwidth_mhz"]:
+        data["bandwidth_mhz"] = primary["bandwidth_mhz"]
+
+
+def _fallback_via_iw_link(data: dict, iface: str) -> None:
+    """Backfill connection metrics from `iw dev <iface> link` when the
+    netlink station enumeration came back empty.
+
+    Without this the early-return paths in `_collect_via_netlink` leave
+    `connected`, `bssid`, `signal_dbm`, and bitrate fields at their dataclass
+    defaults — surfacing as a false "Not connected" in the UI even when iw
+    plainly shows an active link. Runs iw exactly once and feeds both the
+    flat parser (parse_link_metrics) and the per-link parser (parse_link_blocks).
+    """
+    link_text = _run(["iw", "dev", iface, "link"])
+    if not link_text:
+        return
+    parse_link_metrics(data, link_text)
+    if not data.get("connected"):
+        return
+    if not data.get("links"):
+        data["links"] = parse_link_blocks(link_text)
+    _promote_primary_link_freq(data)
 
 
 def collect(iface: str) -> dict:
@@ -436,6 +753,9 @@ def collect(iface: str) -> dict:
     parse_link_metrics(data, link)
     if not data["connected"]:
         return data
+
+    data["links"] = parse_link_blocks(link)
+    _promote_primary_link_freq(data)
 
     dump = _run(["iw", "dev", iface, "station", "dump"])
     if not dump:
@@ -466,112 +786,215 @@ def collect(iface: str) -> dict:
     return data
 
 
-def state_to_lines(data: dict) -> list[str]:
-    lines = []
-    for key in [
-        "timestamp",
-        "connected",
-        "iface",
-        "ssid",
-        "ssid_display",
-        "bssid",
-        "freq_mhz",
-        "chan_num",
-        "bandwidth_mhz",
-        "signal_dbm",
-        "signal_avg_dbm",
-        "tx_nss",
-        "rx_nss",
-        "tx_rate_mbps",
-        "rx_rate_mbps",
-        "tx_mcs",
-        "rx_mcs",
-        "tx_mode",
-        "rx_mode",
-        "tx_gi",
-        "rx_gi",
-        "tx_packets",
-        "tx_retries",
-        "tx_failed",
-        "rx_packets",
-        "connected_time_s",
-        "station_dump_available",
-        "retry_10s_pct",
-        "retry_10s_packets",
-        "retry_10s_retries",
-        "retry_10s_failed",
-        "issue_count",
-        "card_temp_c",
-        "power_save",
-        "pci_power_state",
-        "runtime_pm",
-        "runtime_active_ms",
-        "runtime_suspended_ms",
-    ]:
-        value = data.get(key)
-        if isinstance(value, bool):
-            encoded = "true" if value else "false"
-        else:
-            encoded = str(value)
-        lines.append(f"{key}={encoded}")
-    for index, value in enumerate(data.get("signal_antennas", []), start=1):
-        lines.append(f"antenna_{index}={int(value)}")
-    return lines
+# ---------------------------------------------------------------------------
+# Derived display
+# ---------------------------------------------------------------------------
+
+
+def _band_label(freq_mhz: int) -> str:
+    if freq_mhz >= SIX_GHZ_FLOOR_MHZ:
+        return "6 GHz"
+    if freq_mhz >= 5000:
+        return "5 GHz"
+    if freq_mhz > 0:
+        return "2.4 GHz"
+    return "?"
+
+
+def _signal_fraction(dbm: float) -> float:
+    # dbm >= 0 is invalid (default 0 or chain-misreading positive value);
+    # collapse to 0.0 so the bar matches what _signal_tier returns ("crit")
+    # — otherwise +5 dBm would map to a near-full bar through the
+    # `(dbm - FLOOR) / span` math, contradicting the tier badge.
+    if dbm >= 0:
+        return 0.0
+    span = SIGNAL_CEIL_DBM - SIGNAL_FLOOR_DBM
+    return max(0.0, min(1.0, (dbm - SIGNAL_FLOOR_DBM) / span))
+
+
+def _spread_fraction(spread: float) -> float:
+    return max(0.0, min(1.0, spread / SPREAD_FRACTION_FLOOR))
+
+
+def _signal_tier(dbm: int) -> str:
+    # dbm == 0 is the dataclass default and a transient association state;
+    # positive dbm only happens with a misreading driver (mt7925-style chain
+    # bug). Either way, classifying as "good" is misleading — flag as crit
+    # so the UI doesn't show a healthy tier on placeholder data.
+    if dbm >= 0:
+        return "crit"
+    if dbm >= SIGNAL_GOOD_DBM:
+        return "good"
+    if dbm >= SIGNAL_WARN_DBM:
+        return "warn"
+    return "crit"
+
+
+def _nss_dots(nss: int) -> str:
+    nss = max(0, int(nss or 0))
+    return "●" * nss + "○" * max(0, 2 - nss)
+
+
+_GI_LABELS = {0: "0.8us", 1: "1.6us", 2: "3.2us"}
+
+
+def _gi_label(gi: int) -> str:
+    return _GI_LABELS.get(int(gi), "") if isinstance(gi, (int, float)) and gi >= 0 else ""
+
+
+def derive_display(state: dict) -> dict:
+    """Compute display-only fields derived from raw state. UIs render this."""
+    band_label = _band_label(_int(state.get("freq_mhz"), 0))
+    if not state.get("connected"):
+        return asdict(DisplayState(band_label=band_label))
+
+    signal_dbm = _int(state.get("signal_dbm"), 0)
+    signal_avg = _int(state.get("signal_avg_dbm"), 0)
+    antennas = [_int(v) for v in state.get("signal_antennas", []) or []]
+    spread = max(antennas) - min(antennas) if len(antennas) >= 2 else 0
+
+    tx_mode_name = state.get("tx_mode") or ""
+    rx_mode_name = state.get("rx_mode") or ""
+    tx_mode = phy_mode_by_name(tx_mode_name) or default_phy_mode()
+    rx_mode = phy_mode_by_name(rx_mode_name) or default_phy_mode()
+
+    tx_mcs = _int(state.get("tx_mcs"), -1)
+    rx_mcs = _int(state.get("rx_mcs"), -1)
+    tx_rates: list[float] = []
+    rx_rates: list[float] = []
+    if tx_mcs >= 0:
+        tx_rates = compute_rates(_float(state.get("tx_rate_mbps")), tx_mcs, tx_mode_name)
+    if rx_mcs >= 0:
+        rx_rates = compute_rates(_float(state.get("rx_rate_mbps")), rx_mcs, rx_mode_name)
+
+    # Wi-Fi N label keys off whichever direction first reports a PHY mode —
+    # tx is usually first but rx may surface during association.
+    label_mode = tx_mode_name or rx_mode_name
+    freq_mhz = _int(state.get("freq_mhz"), 0)
+
+    return asdict(DisplayState(
+        band_label=band_label,
+        wifi_label=wifi_label(label_mode, freq_mhz),
+        signal_tier=_signal_tier(signal_dbm),
+        signal_fraction=_signal_fraction(signal_dbm),
+        signal_avg_fraction=_signal_fraction(signal_avg),
+        spread_fraction=_spread_fraction(spread),
+        antenna_fractions=[_signal_fraction(v) for v in antennas],
+        tx_nss_dots=_nss_dots(_int(state.get("tx_nss"), 0)),
+        rx_nss_dots=_nss_dots(_int(state.get("rx_nss"), 0)),
+        tx_gi_label=_gi_label(_int(state.get("tx_gi"), -1)),
+        rx_gi_label=_gi_label(_int(state.get("rx_gi"), -1)),
+        tx_rates_mbps=tx_rates,
+        rx_rates_mbps=rx_rates,
+        mcs_grid_count=max(len(tx_mode.efficiency), len(rx_mode.efficiency)),
+    ))
+
+
+# ---------------------------------------------------------------------------
+# State file I/O
+# ---------------------------------------------------------------------------
+
+
+_KNOWN_FIELDS = {f.name for f in fields(WifiState)}
 
 
 def write_state(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(data, indent=2, sort_keys=False)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text("\n".join(state_to_lines(data)) + "\n", encoding="utf-8")
+    tmp.write_text(payload + "\n", encoding="utf-8")
     tmp.replace(path)
 
 
-def read_state(path: Path = STATE_PATH) -> dict:
+def _read_state_v1(raw: str) -> dict:
+    """Best-effort migration of the legacy key=value state file."""
     data = default_state()
-    if not path.exists():
-        return data
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+    int_keys = {
+        "freq_mhz", "chan_num", "bandwidth_mhz", "signal_dbm", "signal_avg_dbm",
+        "tx_nss", "rx_nss", "tx_mcs", "rx_mcs", "tx_gi", "rx_gi",
+        "tx_packets", "tx_retries", "tx_failed", "rx_packets",
+        "connected_time_s", "retry_10s_packets", "retry_10s_retries",
+        "retry_10s_failed", "issue_count", "timestamp",
+        "runtime_active_ms", "runtime_suspended_ms",
+    }
+    float_keys = {"tx_rate_mbps", "rx_rate_mbps", "retry_10s_pct", "card_temp_c"}
+    bool_keys = {"connected", "station_dump_available"}
+    str_keys = {
+        "iface", "ssid", "ssid_display", "bssid",
+        "tx_mode", "rx_mode", "power_save", "pci_power_state", "runtime_pm",
+    }
+    # Antennas keyed by numeric index from "antenna_N", filled in by index
+    # rather than push-order so a v1 file with reordered/sparse entries
+    # still produces a correctly-ordered chain list.
+    antennas_by_index: dict[int, int] = {}
+    for raw_line in raw.splitlines():
         if "=" not in raw_line:
             continue
         key, value = raw_line.split("=", 1)
-        if key in {"connected", "station_dump_available"}:
+        if key in bool_keys:
             data[key] = value == "true"
-        elif key in {
-            "freq_mhz",
-            "chan_num",
-            "bandwidth_mhz",
-            "signal_dbm",
-            "signal_avg_dbm",
-            "tx_nss",
-            "rx_nss",
-            "tx_mcs",
-            "rx_mcs",
-            "tx_gi",
-            "rx_gi",
-            "tx_packets",
-            "tx_retries",
-            "tx_failed",
-            "rx_packets",
-            "connected_time_s",
-            "retry_10s_packets",
-            "retry_10s_retries",
-            "retry_10s_failed",
-            "issue_count",
-            "timestamp",
-        }:
+        elif key in int_keys:
             data[key] = _int(value, data.get(key, 0))
-        elif key in {"tx_rate_mbps", "rx_rate_mbps", "retry_10s_pct", "card_temp_c"}:
+        elif key in float_keys:
             data[key] = _float(value, data.get(key, 0.0))
-        elif key in {"runtime_active_ms", "runtime_suspended_ms"}:
-            data[key] = _int(value, data.get(key, 0))
-        elif key in {
-            "iface", "ssid", "ssid_display", "bssid", "tx_mode", "rx_mode",
-            "power_save", "pci_power_state", "runtime_pm",
-        }:
+        elif key in str_keys:
             data[key] = value
-        elif re.fullmatch(r"antenna_\d+", key):
-            data["signal_antennas"].append(_int(value))
+        else:
+            antenna_match = re.fullmatch(r"antenna_(\d+)", key)
+            if antenna_match:
+                antennas_by_index[_int(antenna_match.group(1))] = _int(value)
+    if antennas_by_index:
+        # v1 indexes were 1-based (antenna_1, antenna_2). Drop the index
+        # and emit values sorted by index so the chain order matches the
+        # original NSS chain ordering.
+        data["signal_antennas"] = [
+            v for _, v in sorted(antennas_by_index.items())
+        ]
     return data
+
+
+def read_state(path: Path = STATE_PATH) -> dict:
+    defaults = default_state()
+    if not path.exists():
+        return defaults
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return defaults
+    if not raw:
+        return defaults
+
+    if raw.startswith("{"):
+        try:
+            loaded = json.loads(raw)
+        except json.JSONDecodeError:
+            return defaults
+        if not isinstance(loaded, dict):
+            return defaults
+        merged = dict(defaults)
+        # Only carry over fields we recognise; tolerate forward-compat additions.
+        for key, value in loaded.items():
+            if key not in _KNOWN_FIELDS:
+                continue
+            # Deep-merge `display` so a partial v2 payload (older daemon
+            # that hasn't learned a new display field yet, or a half-flushed
+            # write) doesn't blow away the unspecified keys with None/zero.
+            if key == "display" and isinstance(value, dict):
+                deep = dict(defaults["display"])
+                deep.update(value)
+                merged[key] = deep
+            else:
+                merged[key] = value
+        return merged
+
+    # Legacy v1 (key=value) — the daemon and plasmoid migrate to JSON, this
+    # branch survives only the brief upgrade window before a daemon restart.
+    return _read_state_v1(raw)
+
+
+# ---------------------------------------------------------------------------
+# History CSV
+# ---------------------------------------------------------------------------
 
 
 HISTORY_COLUMNS = [
@@ -584,7 +1007,7 @@ HISTORY_COLUMNS = [
     "retry_10s_pct", "retry_10s_retries", "retry_10s_failed",
     "tx_packets", "tx_retries", "tx_failed",
     "card_temp_c", "power_save", "pci_power_state", "runtime_pm",
-    "connected",
+    "connected", "link_count",
 ]
 
 
@@ -598,6 +1021,8 @@ def history_row(data: dict) -> list[str]:
             row.append(str(antennas[1]) if len(antennas) >= 2 else "")
         elif col == "connected":
             row.append("1" if data.get("connected") else "0")
+        elif col == "link_count":
+            row.append(str(len(data.get("links", []))))
         else:
             value = data.get(col, "")
             row.append(str(value))

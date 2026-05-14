@@ -1,0 +1,11 @@
+Connected to 02:00:00:00:55:74 (on wlp1s0)
+	SSID: example-6ghz
+	freq: 6295
+	RX: 788050657 bytes (586345 packets)
+	TX: 82702138 bytes (166609 packets)
+	signal: -59 dBm
+	rx bitrate: 1297.1 MBit/s 160MHz EHT-MCS 6 EHT-NSS 2 EHT-GI 0
+	tx bitrate: 648.5 MBit/s 160MHz EHT-MCS 6 EHT-NSS 1 EHT-GI 0
+	bss flags:
+	dtim period: 1
+	beacon int: 100
