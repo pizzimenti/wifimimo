@@ -154,5 +154,5 @@ run_as_user systemctl --user status "$USER_SERVICE_NAME" --no-pager
 printf '\nRun monitor:  wifimimo-mon\n'
 printf 'Panel applet: org.kde.plasma.wifimimo\n'
 printf 'View logs:    journalctl --user -u %s -f\n' "$USER_SERVICE_NAME"
-printf '\nState file is JSON (schema_version 2). plasmashell was reloaded so the\n'
+printf '\nState file is JSON (schema_version 3, multi-card). plasmashell was reloaded so the\n'
 printf 'new plasmoid QML is active; the panel will reappear within ~1s.\n'

@@ -13,7 +13,7 @@ import locale
 import sys
 import time
 
-from wifimimo_core import IFACE, read_state, safe_ssid
+from wifimimo_core import read_state, safe_ssid
 
 
 ALERT_DIFF_DBM = 15
@@ -244,11 +244,12 @@ def draw(stdscr, data: dict, hist: History, interval: float) -> None:
 
     stale = (time.time() - float(data.get("timestamp", 0) or 0)) > 5
     if not data.get("connected"):
-        safe_addstr(stdscr, row, 4, f"Not connected on {data['iface']}", curses.color_pair(COLOR_WARN) | curses.A_BOLD)
+        label = data.get("iface") or "any wifi interface"
+        safe_addstr(stdscr, row, 4, f"Not connected on {label}", curses.color_pair(COLOR_WARN) | curses.A_BOLD)
         stdscr.refresh()
         return
     if stale:
-        safe_addstr(stdscr, row, 4, f"No recent data from wifimimo-daemon on {data['iface']}", curses.color_pair(COLOR_WARN) | curses.A_BOLD)
+        safe_addstr(stdscr, row, 4, f"No recent data from wifimimo-daemon on {data.get('iface') or 'any wifi interface'}", curses.color_pair(COLOR_WARN) | curses.A_BOLD)
         row += 2
 
     freq = data["freq_mhz"]
@@ -433,6 +434,24 @@ def _signal_fraction(dbm: float) -> float:
     return max(0.0, min(1.0, (dbm + 90) / 70))
 
 
+def pick_iface_state(doc: dict, iface: str) -> dict:
+    """Resolve one card's state from the schema-v3 document.
+
+    No argument (or an unknown iface) falls back to the top-level primary
+    state; a known iface renders that card's `interfaces` sub-state.
+    """
+    if iface:
+        sub = (doc.get("interfaces") or {}).get(iface)
+        if isinstance(sub, dict):
+            return sub
+        # Requested card not in the document — keep the label honest so
+        # "Not connected on X" names what the user asked for.
+        doc = dict(doc)
+        doc["iface"] = iface
+        doc["connected"] = False
+    return doc
+
+
 def main(stdscr) -> None:
     curses.curs_set(0)
     stdscr.nodelay(True)
@@ -441,16 +460,14 @@ def main(stdscr) -> None:
 
     interval = 2.0
     last_update = 0.0
-    data: dict = read_state()
-    iface = sys.argv[1] if len(sys.argv) > 1 else IFACE
+    iface = sys.argv[1] if len(sys.argv) > 1 else ""
+    data: dict = pick_iface_state(read_state(), iface)
     hist = History()
 
     while True:
         now = time.monotonic()
         if now - last_update >= interval:
-            data = read_state()
-            if iface and data.get("iface"):
-                data["iface"] = iface
+            data = pick_iface_state(read_state(), iface)
             last_update = now
 
         if data:

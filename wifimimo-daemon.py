@@ -17,12 +17,13 @@ from pathlib import Path
 from wifimimo_core import (
     HISTORY_COLUMNS,
     HISTORY_DIR,
-    IFACE,
     STATE_PATH,
     UI_ACTIVE_PATH,
+    build_multi_state,
     collect,
     collect_power,
     derive_display,
+    discover_wifi_ifaces,
     history_row,
     write_state,
 )
@@ -48,34 +49,60 @@ def log(message: str) -> None:
 
 
 class WifimimoDaemon:
-    def __init__(self, iface: str, state_path: Path, history_dir: Path) -> None:
-        self.iface = iface
+    def __init__(self, pinned_iface: str, state_path: Path, history_dir: Path) -> None:
+        # Empty pinned_iface means auto-discover every poll, so a USB card
+        # hotplugged mid-run shows up without a daemon restart.
+        self.pinned_iface = pinned_iface
         self.state_path = state_path
         self.history_dir = history_dir
         self.running = True
-        self.retry_samples: deque[dict] = deque()
-        self.last_transition_time = 0.0
-        self.last_state_signature: tuple | None = None
+        self.retry_samples: dict[str, deque[dict]] = {}
+        self.last_transition_time: dict[str, float] = {}
+        self.last_state_signature: dict[str, tuple] = {}
+        self.known_ifaces: list[str] = []
         self._history_file = None
         self._history_writer = None
         self._history_date: str = ""
 
+    def current_ifaces(self) -> list[str]:
+        ifaces = [self.pinned_iface] if self.pinned_iface else discover_wifi_ifaces()
+        if ifaces != self.known_ifaces:
+            log(f"wifi interfaces: {', '.join(ifaces) if ifaces else '(none)'}")
+            for stale in set(self.known_ifaces) - set(ifaces):
+                self.retry_samples.pop(stale, None)
+                self.last_transition_time.pop(stale, None)
+                self.last_state_signature.pop(stale, None)
+            self.known_ifaces = ifaces
+        return ifaces
+
     def run(self) -> None:
         signal.signal(signal.SIGINT, self.stop)
         signal.signal(signal.SIGTERM, self.stop)
-        log(f"wifimimo-daemon starting on {self.iface}")
+        log(
+            "wifimimo-daemon starting "
+            + (f"pinned to {self.pinned_iface}" if self.pinned_iface
+               else "(auto-discovering wifi interfaces)")
+        )
         while self.running:
             loop_start = time.monotonic()
-            state = collect(self.iface)
-            state["timestamp"] = int(time.time())
-            state.update(collect_power(self.iface))
-            self.update_retry_window(state, loop_start)
-            issues = self.collect_issues(state)
-            state["issue_count"] = len(issues)
-            state["display"] = derive_display(state)
-            poll_interval = self.poll_interval_for_state(state, loop_start)
-            write_state(self.state_path, state)
-            self.write_history(state)
+            states: dict[str, dict] = {}
+            for iface in self.current_ifaces():
+                state = collect(iface)
+                state["timestamp"] = int(time.time())
+                state.update(collect_power(iface))
+                self.update_retry_window(iface, state, loop_start)
+                issues = self.collect_issues(state)
+                state["issue_count"] = len(issues)
+                state["display"] = derive_display(state)
+                states[iface] = state
+            doc = build_multi_state(states)
+            # With zero cards the primary defaults carry timestamp 0; stamp
+            # the document anyway so consumers can tell the daemon is alive.
+            doc["timestamp"] = int(time.time())
+            poll_interval = self.poll_interval_for_states(states, loop_start)
+            write_state(self.state_path, doc)
+            for state in states.values():
+                self.write_history(state)
             elapsed = time.monotonic() - loop_start
             time.sleep(max(0.05, poll_interval - elapsed))
 
@@ -142,8 +169,8 @@ class WifimimoDaemon:
             self._history_writer.writerow(history_row(state))
             self._history_file.flush()
 
-    def reset_retry_window(self) -> None:
-        self.retry_samples.clear()
+    def reset_retry_window(self, iface: str) -> None:
+        self.retry_samples.pop(iface, None)
 
     @staticmethod
     def counter_delta(current: int, previous: int) -> int:
@@ -151,10 +178,11 @@ class WifimimoDaemon:
             return current - previous
         return U32_COUNTER_MODULUS - previous + current
 
-    def session_changed(self, state: dict) -> bool:
-        if not self.retry_samples:
+    def session_changed(self, iface: str, state: dict) -> bool:
+        samples = self.retry_samples.get(iface)
+        if not samples:
             return False
-        last = self.retry_samples[-1]
+        last = samples[-1]
         return (
             last["connected"] != state.get("connected")
             or last["bssid"] != state.get("bssid")
@@ -203,43 +231,38 @@ class WifimimoDaemon:
             return False
         return (time.time() - mtime) <= UI_ACTIVE_TTL_S
 
-    def poll_interval_for_state(self, state: dict, now: float) -> float:
-        signature = self.state_signature(state)
-        if self.last_state_signature is None:
-            self.last_state_signature = signature
-            self.last_transition_time = now
-        elif signature != self.last_state_signature:
-            self.last_state_signature = signature
-            self.last_transition_time = now
+    def poll_interval_for_states(self, states: dict[str, dict], now: float) -> float:
+        fast = self.ui_expanded()
+        for iface, state in states.items():
+            signature = self.state_signature(state)
+            if self.last_state_signature.get(iface) != signature:
+                self.last_state_signature[iface] = signature
+                self.last_transition_time[iface] = now
 
-        degraded = (
-            bool(state.get("connected"))
-            and (
-                not self.mimo_healthy(state)
-                or float(state.get("retry_10s_pct", 0.0) or 0.0) > ALERT_RETRY_PCT
-                or int(state.get("signal_dbm", 0) or 0) < ALERT_SIGNAL_DBM
+            degraded = (
+                bool(state.get("connected"))
+                and (
+                    not self.mimo_healthy(state)
+                    or float(state.get("retry_10s_pct", 0.0) or 0.0) > ALERT_RETRY_PCT
+                    or int(state.get("signal_dbm", 0) or 0) < ALERT_SIGNAL_DBM
+                )
             )
-        )
-        if (
-            degraded
-            or now - self.last_transition_time < TRANSITION_COOLDOWN_S
-            or self.ui_expanded()
-        ):
-            return POLL_FAST_S
-        return POLL_SLOW_S
+            if degraded or now - self.last_transition_time.get(iface, now) < TRANSITION_COOLDOWN_S:
+                fast = True
+        return POLL_FAST_S if fast else POLL_SLOW_S
 
-    def update_retry_window(self, state: dict, now: float) -> None:
+    def update_retry_window(self, iface: str, state: dict, now: float) -> None:
         state["retry_10s_pct"] = 0.0
         state["retry_10s_packets"] = 0
         state["retry_10s_retries"] = 0
         state["retry_10s_failed"] = 0
 
         if not state.get("connected"):
-            self.reset_retry_window()
+            self.reset_retry_window(iface)
             return
 
-        if self.session_changed(state):
-            self.reset_retry_window()
+        if self.session_changed(iface, state):
+            self.reset_retry_window(iface)
 
         sample = {
             "connected": True,
@@ -250,15 +273,16 @@ class WifimimoDaemon:
             "tx_failed": int(state.get("tx_failed", 0) or 0),
             "monotonic": now,
         }
-        self.retry_samples.append(sample)
+        samples = self.retry_samples.setdefault(iface, deque())
+        samples.append(sample)
 
-        while self.retry_samples and now - self.retry_samples[0]["monotonic"] > RETRY_WINDOW_S:
-            self.retry_samples.popleft()
+        while samples and now - samples[0]["monotonic"] > RETRY_WINDOW_S:
+            samples.popleft()
 
-        if not self.retry_samples:
+        if not samples:
             return
 
-        base = self.retry_samples[0]
+        base = samples[0]
         packet_delta = self.counter_delta(sample["tx_packets"], base["tx_packets"])
         retry_delta = self.counter_delta(sample["tx_retries"], base["tx_retries"])
         failed_delta = self.counter_delta(sample["tx_failed"], base["tx_failed"])
@@ -310,7 +334,9 @@ class WifimimoDaemon:
         return issues
 
 def main() -> int:
-    iface = os.environ.get("WIFI_IFACE", IFACE)
+    # WIFI_IFACE pins the daemon to one card; unset/empty auto-discovers
+    # all wifi netdevs each poll (hotplug-friendly).
+    iface = os.environ.get("WIFI_IFACE", "").strip()
     daemon = WifimimoDaemon(iface, STATE_PATH, HISTORY_DIR)
     daemon.run()
     return 0
