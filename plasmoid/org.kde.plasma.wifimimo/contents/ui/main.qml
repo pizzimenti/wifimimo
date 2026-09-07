@@ -765,6 +765,22 @@ PlasmoidItem {
                 spacing: Kirigami.Units.smallSpacing
                 visible: root.ifaceList.length > 1
 
+                // Restores daemon-primary behavior after a manual pick. In
+                // auto mode both this and the followed card light up:
+                // "auto, currently following <card>".
+                PlasmaComponents3.Button {
+                    text: "auto"
+                    font.family: root.monospaceFamily
+                    highlighted: root.selectedIface === ""
+                    onClicked: {
+                        if (root.selectedIface !== "") {
+                            root.selectedIface = "";
+                            root.resetHistory(null);
+                            root.pollNow();
+                        }
+                    }
+                }
+
                 Repeater {
                     model: root.ifaceList
 

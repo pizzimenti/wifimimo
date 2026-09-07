@@ -213,6 +213,31 @@ class WifiState:
 
 
 def _find_wifi_hwmon(iface: str) -> Path | None:
+    hwmon_base = Path("/sys/class/hwmon")
+    if not hwmon_base.exists():
+        return None
+    try:
+        entries = sorted(hwmon_base.iterdir())
+    except OSError:
+        return None
+
+    # Path-based match first: a hwmon node whose realpath lives under this
+    # iface's own device tree is unambiguously *this* adapter's sensor.
+    # That's the only resolution that stays correct with two wifi cards —
+    # the name-based scans below can only say "some wifi sensor exists".
+    try:
+        iface_dev = Path(f"/sys/class/net/{iface}/device").resolve()
+    except OSError:
+        iface_dev = None
+    if iface_dev is not None and iface_dev.is_absolute():
+        for entry in entries:
+            try:
+                real = entry.resolve()
+            except OSError:
+                continue
+            if real == iface_dev or real.is_relative_to(iface_dev):
+                return entry
+
     driver_link = Path(f"/sys/class/net/{iface}/device/driver")
     driver = ""
     if driver_link.is_symlink() or driver_link.exists():
@@ -221,19 +246,21 @@ def _find_wifi_hwmon(iface: str) -> Path | None:
         except OSError:
             pass
 
-    hwmon_base = Path("/sys/class/hwmon")
-    if not hwmon_base.exists():
-        return None
-    for entry in sorted(hwmon_base.iterdir()):
-        name_file = entry / "name"
-        if not name_file.exists():
-            continue
+    def _entry_name(entry: Path) -> str:
         try:
-            name = name_file.read_text().strip()
+            return (entry / "name").read_text().strip()
         except OSError:
-            continue
-        if driver and driver in name:
-            return entry
+            return ""
+
+    # Exact-driver match across ALL entries before the generic-prefix
+    # fallback — otherwise an earlier-sorted generic wifi sensor shadows a
+    # later entry that actually names this iface's driver.
+    if driver:
+        for entry in entries:
+            if driver in _entry_name(entry):
+                return entry
+    for entry in entries:
+        name = _entry_name(entry)
         if any(name.startswith(prefix) for prefix in KNOWN_WIFI_DRIVERS):
             return entry
     return None
@@ -311,22 +338,65 @@ def default_state(iface: str = IFACE) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def discover_wifi_ifaces(base: Path = SYS_NET_BASE) -> list[str]:
-    """Enumerate 802.11 netdevs (sorted by name).
+NL80211_IFTYPE_STATION = 2
+
+
+def _nl80211_iftypes() -> dict:
+    """Map netdev name -> NL80211_ATTR_IFTYPE for every nl80211 dev.
+
+    Empty when pyroute2 is unavailable or the dump fails; callers treat
+    an unknown name as a station so WEXT-only legacy drivers (which never
+    appear in an nl80211 dump) stay discoverable.
+    """
+    if IW is None:
+        return {}
+    iw = IW()
+    try:
+        with _TimeoutContext(NL80211_CALL_TIMEOUT_S):
+            result: dict = {}
+            for message in iw.list_dev():
+                attrs = _attrs_to_dict(message)
+                name = attrs.get("NL80211_ATTR_IFNAME")
+                if name:
+                    result[name] = _int(attrs.get("NL80211_ATTR_IFTYPE"), -1)
+            return result
+    except Exception:
+        return {}
+    finally:
+        iw.close()
+
+
+def discover_wifi_ifaces(base: Path = SYS_NET_BASE, iftypes: dict | None = None) -> list[str]:
+    """Enumerate 802.11 *station* netdevs (sorted by name).
 
     A netdev is wifi iff its sysfs node carries a `phy80211` link
     (all cfg80211/mac80211 drivers) or a `wireless/` subdir (legacy
     WEXT-only drivers). P2P-device wdevs have no netdev, so they never
     show up here — matching what `iw dev` calls "Unnamed/non-netdev".
+
+    One physical radio can also expose AP / monitor / mesh netdevs that
+    all share the phy80211 marker; polling those as if they were uplinks
+    would surface a random associated *client* as our connection. Filter
+    to managed (station) mode via nl80211 iftype, keeping names the dump
+    doesn't know about (legacy drivers, test fixtures).
     """
     try:
         entries = sorted(base.iterdir())
     except OSError:
         return []
-    return [
+    candidates = [
         entry.name
         for entry in entries
         if (entry / "phy80211").exists() or (entry / "wireless").exists()
+    ]
+    if not candidates:
+        return []
+    if iftypes is None:
+        iftypes = _nl80211_iftypes()
+    return [
+        name
+        for name in candidates
+        if iftypes.get(name, NL80211_IFTYPE_STATION) == NL80211_IFTYPE_STATION
     ]
 
 
@@ -974,15 +1044,23 @@ def _merge_known(loaded: dict, defaults: dict) -> dict:
     for key, value in loaded.items():
         if key not in _KNOWN_FIELDS:
             continue
-        if key == "display" and isinstance(value, dict):
-            deep = dict(defaults["display"])
-            deep.update(value)
-            merged[key] = deep
-        elif key == "interfaces" and isinstance(value, dict):
-            merged[key] = {
-                name: _merge_known(sub, defaults) if isinstance(sub, dict) else sub
-                for name, sub in value.items()
-            }
+        # Structured fields keep their defaults when the loaded value has
+        # the wrong shape — assigning e.g. a stray string to `interfaces`
+        # would crash every consumer that calls .get() on it.
+        if key == "display":
+            if isinstance(value, dict):
+                deep = dict(defaults["display"])
+                deep.update(value)
+                merged[key] = deep
+        elif key == "interfaces":
+            if isinstance(value, dict):
+                merged[key] = {
+                    name: _merge_known(sub, defaults) if isinstance(sub, dict) else sub
+                    for name, sub in value.items()
+                }
+        elif key == "ifaces":
+            if isinstance(value, list):
+                merged[key] = value
         else:
             merged[key] = value
     return merged

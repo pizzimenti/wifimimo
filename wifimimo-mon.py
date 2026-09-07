@@ -462,12 +462,19 @@ def main(stdscr) -> None:
     last_update = 0.0
     iface = sys.argv[1] if len(sys.argv) > 1 else ""
     data: dict = pick_iface_state(read_state(), iface)
+    shown_iface = data.get("iface", "")
     hist = History()
 
     while True:
         now = time.monotonic()
         if now - last_update >= interval:
             data = pick_iface_state(read_state(), iface)
+            # In no-argument mode the primary can fail over to another
+            # card; min/max history from the old card would silently blend
+            # into the new one's bars, so start fresh on any switch.
+            if data.get("iface", "") != shown_iface:
+                shown_iface = data.get("iface", "")
+                hist = History()
             last_update = now
 
         if data:

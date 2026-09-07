@@ -42,18 +42,42 @@ def _state(iface: str, connected: bool) -> dict:
 
 def test_discovery_finds_only_wifi_netdevs(tmp_path: Path):
     base = _fake_sysfs(tmp_path, wifi=["wlp3s0f3u2", "wlp1s0"], wired=["lo", "enp2s0"])
-    assert wifimimo_core.discover_wifi_ifaces(base) == ["wlp1s0", "wlp3s0f3u2"]
+    assert wifimimo_core.discover_wifi_ifaces(base, iftypes={}) == [
+        "wlp1s0", "wlp3s0f3u2",
+    ]
 
 
 def test_discovery_accepts_legacy_wireless_dir(tmp_path: Path):
     base = tmp_path / "net"
     (base / "wlan0" / "wireless").mkdir(parents=True)
     (base / "eth0").mkdir()
-    assert wifimimo_core.discover_wifi_ifaces(base) == ["wlan0"]
+    assert wifimimo_core.discover_wifi_ifaces(base, iftypes={}) == ["wlan0"]
 
 
 def test_discovery_missing_base_yields_empty(tmp_path: Path):
-    assert wifimimo_core.discover_wifi_ifaces(tmp_path / "absent") == []
+    assert wifimimo_core.discover_wifi_ifaces(tmp_path / "absent", iftypes={}) == []
+
+
+def test_discovery_excludes_non_station_iftypes(tmp_path: Path):
+    # One radio exposing AP + monitor + managed netdevs: all three carry
+    # phy80211, but only the station may be polled — an AP netdev would
+    # surface a random associated client as "our" uplink.
+    base = _fake_sysfs(
+        tmp_path, wifi=["wlan0", "wlan0-ap", "mon0"], wired=["eth0"]
+    )
+    iftypes = {
+        "wlan0": wifimimo_core.NL80211_IFTYPE_STATION,
+        "wlan0-ap": 3,  # NL80211_IFTYPE_AP
+        "mon0": 6,      # NL80211_IFTYPE_MONITOR
+    }
+    assert wifimimo_core.discover_wifi_ifaces(base, iftypes=iftypes) == ["wlan0"]
+
+
+def test_discovery_keeps_ifaces_unknown_to_nl80211(tmp_path: Path):
+    # Legacy WEXT-only drivers never appear in the nl80211 dump; absence
+    # must not exclude them.
+    base = _fake_sysfs(tmp_path, wifi=["wlan9"], wired=[])
+    assert wifimimo_core.discover_wifi_ifaces(base, iftypes={"other0": 3}) == ["wlan9"]
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +158,23 @@ def test_partial_interface_substate_deep_merges(tmp_path: Path):
     assert sub["tx_mcs"] == 7
     assert sub["display"]["mcs_grid_count"] == 12
     assert sub["signal_antennas"] == []
+
+
+def test_malformed_structured_fields_keep_defaults(tmp_path: Path):
+    # A truthy non-dict `interfaces` (or non-list `ifaces`, non-dict
+    # `display`) must not survive the merge — consumers call .get() on
+    # interfaces and would crash on a stray string.
+    path = tmp_path / "state"
+    path.write_text(
+        '{"schema_version": 3, "connected": true,'
+        ' "interfaces": "garbage", "ifaces": "also-garbage", "display": 7}',
+        encoding="utf-8",
+    )
+    loaded = wifimimo_core.read_state(path)
+    assert loaded["connected"] is True
+    assert loaded["interfaces"] == {}
+    assert loaded["ifaces"] == []
+    assert loaded["display"]["signal_tier"] == "crit"
 
 
 # ---------------------------------------------------------------------------

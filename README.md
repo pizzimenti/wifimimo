@@ -67,7 +67,8 @@ JSON state file to `/run/user/$UID/wifimimo-state` (`schema_version: 3`). It als
 appends a daily CSV history row per card to
 `~/.local/state/wifimimo/history/<date>.csv` so you can plot link quality over
 time later. Set `WIFI_IFACE=<name>` in the service environment to pin the
-daemon to one card instead.
+daemon to one card instead — the state document (including `ifaces` and
+`interfaces`) then carries only that card.
 
 Polling cadence is adaptive:
 
