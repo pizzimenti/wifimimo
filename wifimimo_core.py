@@ -36,7 +36,11 @@ from phy_modes import (
 logger = logging.getLogger("wifimimo")
 
 
-IFACE = "wlp1s0"
+# No hardwired interface: the daemon discovers wifi netdevs at runtime
+# (discover_wifi_ifaces) and WIFI_IFACE pins one explicitly. Empty means
+# "no card known yet"; consumers must treat it as such.
+IFACE = ""
+SYS_NET_BASE = Path("/sys/class/net")
 HISTORY_DIR = Path.home() / ".local" / "state" / "wifimimo" / "history"
 
 # Canonical signal thresholds. Used by daemon alerts AND derived display tier
@@ -52,7 +56,7 @@ STATE_PATH = Path(f"/run/user/{os.getuid()}/wifimimo-state")
 # The daemon uses its mtime to drop into fast-poll mode without needing
 # a DBus channel — purely filesystem-mediated.
 UI_ACTIVE_PATH = Path(f"/run/user/{os.getuid()}/wifimimo-ui-active")
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 KNOWN_WIFI_DRIVERS = ("iwlwifi", "mt76", "mt79", "ath", "rtw", "brcm", "mwifiex")
 
@@ -195,6 +199,12 @@ class WifiState:
     runtime_suspended_ms: int = 0
     links: list[dict] = field(default_factory=list)
     display: dict = field(default_factory=lambda: asdict(DisplayState()))
+    # Schema v3 multi-card additions. The top level of the state document
+    # mirrors the *primary* interface (back-compat for schema-v2 readers);
+    # `ifaces` lists every discovered wifi netdev and `interfaces` maps each
+    # to its own full per-iface state (same shape, minus these two keys).
+    ifaces: list[str] = field(default_factory=list)
+    interfaces: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +213,31 @@ class WifiState:
 
 
 def _find_wifi_hwmon(iface: str) -> Path | None:
+    hwmon_base = Path("/sys/class/hwmon")
+    if not hwmon_base.exists():
+        return None
+    try:
+        entries = sorted(hwmon_base.iterdir())
+    except OSError:
+        return None
+
+    # Path-based match first: a hwmon node whose realpath lives under this
+    # iface's own device tree is unambiguously *this* adapter's sensor.
+    # That's the only resolution that stays correct with two wifi cards —
+    # the name-based scans below can only say "some wifi sensor exists".
+    try:
+        iface_dev = Path(f"/sys/class/net/{iface}/device").resolve()
+    except OSError:
+        iface_dev = None
+    if iface_dev is not None and iface_dev.is_absolute():
+        for entry in entries:
+            try:
+                real = entry.resolve()
+            except OSError:
+                continue
+            if real == iface_dev or real.is_relative_to(iface_dev):
+                return entry
+
     driver_link = Path(f"/sys/class/net/{iface}/device/driver")
     driver = ""
     if driver_link.is_symlink() or driver_link.exists():
@@ -211,19 +246,21 @@ def _find_wifi_hwmon(iface: str) -> Path | None:
         except OSError:
             pass
 
-    hwmon_base = Path("/sys/class/hwmon")
-    if not hwmon_base.exists():
-        return None
-    for entry in sorted(hwmon_base.iterdir()):
-        name_file = entry / "name"
-        if not name_file.exists():
-            continue
+    def _entry_name(entry: Path) -> str:
         try:
-            name = name_file.read_text().strip()
+            return (entry / "name").read_text().strip()
         except OSError:
-            continue
-        if driver and driver in name:
-            return entry
+            return ""
+
+    # Exact-driver match across ALL entries before the generic-prefix
+    # fallback — otherwise an earlier-sorted generic wifi sensor shadows a
+    # later entry that actually names this iface's driver.
+    if driver:
+        for entry in entries:
+            if driver in _entry_name(entry):
+                return entry
+    for entry in entries:
+        name = _entry_name(entry)
         if any(name.startswith(prefix) for prefix in KNOWN_WIFI_DRIVERS):
             return entry
     return None
@@ -294,6 +331,104 @@ def collect_power(iface: str) -> dict:
 def default_state(iface: str = IFACE) -> dict:
     """Return the WifiState dict shape with defaults, parameterized on iface."""
     return asdict(WifiState(iface=iface))
+
+
+# ---------------------------------------------------------------------------
+# Interface discovery / multi-card document
+# ---------------------------------------------------------------------------
+
+
+NL80211_IFTYPE_STATION = 2
+
+
+def _nl80211_iftypes() -> dict:
+    """Map netdev name -> NL80211_ATTR_IFTYPE for every nl80211 dev.
+
+    Empty when pyroute2 is unavailable or the dump fails; callers treat
+    an unknown name as a station so WEXT-only legacy drivers (which never
+    appear in an nl80211 dump) stay discoverable.
+    """
+    if IW is None:
+        return {}
+    iw = IW()
+    try:
+        with _TimeoutContext(NL80211_CALL_TIMEOUT_S):
+            result: dict = {}
+            for message in iw.list_dev():
+                attrs = _attrs_to_dict(message)
+                name = attrs.get("NL80211_ATTR_IFNAME")
+                if name:
+                    result[name] = _int(attrs.get("NL80211_ATTR_IFTYPE"), -1)
+            return result
+    except Exception:
+        return {}
+    finally:
+        iw.close()
+
+
+def discover_wifi_ifaces(base: Path = SYS_NET_BASE, iftypes: dict | None = None) -> list[str]:
+    """Enumerate 802.11 *station* netdevs (sorted by name).
+
+    A netdev is wifi iff its sysfs node carries a `phy80211` link
+    (all cfg80211/mac80211 drivers) or a `wireless/` subdir (legacy
+    WEXT-only drivers). P2P-device wdevs have no netdev, so they never
+    show up here — matching what `iw dev` calls "Unnamed/non-netdev".
+
+    One physical radio can also expose AP / monitor / mesh netdevs that
+    all share the phy80211 marker; polling those as if they were uplinks
+    would surface a random associated *client* as our connection. Filter
+    to managed (station) mode via nl80211 iftype, keeping names the dump
+    doesn't know about (legacy drivers, test fixtures).
+    """
+    try:
+        entries = sorted(base.iterdir())
+    except OSError:
+        return []
+    candidates = [
+        entry.name
+        for entry in entries
+        if (entry / "phy80211").exists() or (entry / "wireless").exists()
+    ]
+    if not candidates:
+        return []
+    if iftypes is None:
+        iftypes = _nl80211_iftypes()
+    return [
+        name
+        for name in candidates
+        if iftypes.get(name, NL80211_IFTYPE_STATION) == NL80211_IFTYPE_STATION
+    ]
+
+
+def select_primary_iface(states: dict) -> str:
+    """Pick the interface whose state is mirrored at the document top level.
+
+    Connected cards win over disconnected ones; ties break alphabetically
+    so the choice is stable across polls.
+    """
+    if not states:
+        return ""
+    connected = sorted(name for name, state in states.items() if state.get("connected"))
+    if connected:
+        return connected[0]
+    return sorted(states)[0]
+
+
+def build_multi_state(states: dict) -> dict:
+    """Combine per-iface states into the schema-v3 state document.
+
+    Top level mirrors the primary interface's full state so schema-v2
+    consumers keep working unchanged; `ifaces` lists every discovered
+    card and `interfaces` maps each to its own full state.
+    """
+    primary = select_primary_iface(states)
+    doc = dict(states[primary]) if primary else default_state()
+    doc["ifaces"] = sorted(states)
+    doc["interfaces"] = {
+        name: {k: v for k, v in state.items() if k not in ("ifaces", "interfaces")}
+        for name, state in states.items()
+    }
+    return doc
 
 
 # ---------------------------------------------------------------------------
@@ -898,6 +1033,39 @@ def derive_display(state: dict) -> dict:
 _KNOWN_FIELDS = {f.name for f in fields(WifiState)}
 
 
+def _merge_known(loaded: dict, defaults: dict) -> dict:
+    """Merge a loaded state dict over defaults, keeping only known fields.
+
+    `display` is deep-merged so a partial payload (older daemon, half-flushed
+    write) doesn't blow away unspecified keys; each `interfaces` sub-state
+    gets the same treatment recursively so per-card views are fully typed.
+    """
+    merged = dict(defaults)
+    for key, value in loaded.items():
+        if key not in _KNOWN_FIELDS:
+            continue
+        # Structured fields keep their defaults when the loaded value has
+        # the wrong shape — assigning e.g. a stray string to `interfaces`
+        # would crash every consumer that calls .get() on it.
+        if key == "display":
+            if isinstance(value, dict):
+                deep = dict(defaults["display"])
+                deep.update(value)
+                merged[key] = deep
+        elif key == "interfaces":
+            if isinstance(value, dict):
+                merged[key] = {
+                    name: _merge_known(sub, defaults) if isinstance(sub, dict) else sub
+                    for name, sub in value.items()
+                }
+        elif key == "ifaces":
+            if isinstance(value, list):
+                merged[key] = value
+        else:
+            merged[key] = value
+    return merged
+
+
 def write_state(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(data, indent=2, sort_keys=False)
@@ -971,21 +1139,9 @@ def read_state(path: Path = STATE_PATH) -> dict:
             return defaults
         if not isinstance(loaded, dict):
             return defaults
-        merged = dict(defaults)
-        # Only carry over fields we recognise; tolerate forward-compat additions.
-        for key, value in loaded.items():
-            if key not in _KNOWN_FIELDS:
-                continue
-            # Deep-merge `display` so a partial v2 payload (older daemon
-            # that hasn't learned a new display field yet, or a half-flushed
-            # write) doesn't blow away the unspecified keys with None/zero.
-            if key == "display" and isinstance(value, dict):
-                deep = dict(defaults["display"])
-                deep.update(value)
-                merged[key] = deep
-            else:
-                merged[key] = value
-        return merged
+        # Only carry over fields we recognise; tolerate forward-compat
+        # additions. Deep-merges `display` and each `interfaces` sub-state.
+        return _merge_known(loaded, defaults)
 
     # Legacy v1 (key=value) — the daemon and plasmoid migrate to JSON, this
     # branch survives only the brief upgrade window before a daemon restart.

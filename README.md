@@ -60,10 +60,15 @@ without you having to log out and back in.
 
 ## Daemon
 
-`wifimimo-daemon` polls nl80211 station data via `pyroute2` and writes a versioned
-JSON state file to `/run/user/$UID/wifimimo-state` (`schema_version: 2`). It also
-appends a daily CSV history to `~/.local/state/wifimimo/history/<date>.csv` so you
-can plot link quality over time later.
+`wifimimo-daemon` auto-discovers every wifi netdev under `/sys/class/net`
+(re-scanned each poll, so a hotplugged USB card appears without a restart),
+polls nl80211 station data for each via `pyroute2`, and writes a versioned
+JSON state file to `/run/user/$UID/wifimimo-state` (`schema_version: 3`). It also
+appends a daily CSV history row per card to
+`~/.local/state/wifimimo/history/<date>.csv` so you can plot link quality over
+time later. Set `WIFI_IFACE=<name>` in the service environment to pin the
+daemon to one card instead — the state document (including `ifaces` and
+`interfaces`) then carries only that card.
 
 Polling cadence is adaptive:
 
@@ -79,7 +84,8 @@ from `iw dev <iface> link` as a structured fallback).
 ## Curses monitor
 
 ```bash
-wifimimo-mon
+wifimimo-mon            # primary card (the connected one)
+wifimimo-mon wlp3s0f3u2 # a specific card
 ```
 
 Same telemetry as the panel, in a terminal. Adds a per-link `LINKS` section when
@@ -89,19 +95,27 @@ multi-link MLO is active.
 
 A KDE Plasma 6 panel widget that consumes the daemon's JSON state file. Compact
 representation = a single coloured icon (see table above). Expanded popup = the
-full telemetry pictured at the top of this README.
+full telemetry pictured at the top of this README. When two or more wifi cards
+are present, a button row at the top of the popup selects which card is
+displayed; with no selection the popup follows the daemon's primary card (the
+connected one).
 
 To re-add the widget after install: right-click the panel → Add Widgets → search
 "wifimimo".
 
 ## State schema
 
-The runtime state file is JSON v2. Stable contract:
+The runtime state file is JSON v3. The top level mirrors the *primary*
+interface's full state (schema-v2 shape, so older consumers keep working);
+`ifaces` lists every discovered card and `interfaces` maps each card name to
+its own full state of the same shape. Stable contract:
 
 ```jsonc
 {
-  "schema_version": 2,
-  "iface": "wlp1s0",
+  "schema_version": 3,
+  "iface": "wlp3s0f3u2",
+  "ifaces": ["wlp1s0", "wlp3s0f3u2"],
+  "interfaces": { "wlp1s0": { /* full per-card state */ }, "wlp3s0f3u2": { /* … */ } },
   "connected": true,
   "ssid": "...", "ssid_display": "...", "bssid": "...",
   "freq_mhz": 6295, "chan_num": 69, "bandwidth_mhz": 160,

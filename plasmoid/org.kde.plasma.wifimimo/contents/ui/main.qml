@@ -52,9 +52,9 @@ PlasmoidItem {
     })
 
     readonly property var defaultData: ({
-        schema_version: 2,
+        schema_version: 3,
         connected: false,
-        iface: "wlp1s0",
+        iface: "",
         ssid: "",
         ssid_display: "",
         bssid: "",
@@ -90,6 +90,15 @@ PlasmoidItem {
     })
 
     property var data: defaultData
+
+    // Multi-card (schema v3) support. `data` above always holds the state of
+    // the *displayed* card. The daemon's document carries every discovered
+    // card under `interfaces`; the selector row (visible when 2+ cards are
+    // present) pins one, and empty selection follows the daemon's primary
+    // (the connected card).
+    property var ifaceList: []
+    property string selectedIface: ""   // sticky user pick; "" = auto/primary
+    property string shownIface: ""      // card actually rendered this poll
 
     property real histSigOverallMinValue: 0
     property real histSigOverallMaxValue: 0
@@ -363,6 +372,7 @@ PlasmoidItem {
     function parseState(rawText) {
         const previousConnected = !!(data && data.connected);
         const previousBssid = data && data.bssid ? data.bssid : "";
+        const previousIface = shownIface;
         let parsed = null;
         const trimmed = (rawText || "").trim();
         if (trimmed.length > 0 && trimmed.charAt(0) === "{") {
@@ -378,8 +388,36 @@ PlasmoidItem {
             parsed = parseStateV1Lines(trimmed);
         }
 
-        const next = validateState(parsed);
+        // Schema v3: the document's top level is the primary card's state and
+        // `interfaces` maps every card to its own. Pick the user-selected
+        // card when it exists; a selection whose card vanished (USB unplug)
+        // falls back to the primary until the card returns.
+        let view = parsed;
+        let list = [];
+        if (parsed && typeof parsed === "object") {
+            const map = (parsed.interfaces && typeof parsed.interfaces === "object")
+                ? parsed.interfaces : {};
+            if (Array.isArray(parsed.ifaces) && parsed.ifaces.length > 0) {
+                list = parsed.ifaces;
+            } else if (parsed.iface) {
+                list = [parsed.iface];
+            }
+            if (selectedIface && map[selectedIface]
+                    && typeof map[selectedIface] === "object") {
+                view = map[selectedIface];
+            }
+        }
+        ifaceList = list;
 
+        const next = validateState(view);
+        shownIface = next.iface || "";
+
+        // Switching cards invalidates min/max history even when both cards
+        // are associated to the same BSSID, so track it as its own reset
+        // trigger alongside roams.
+        const ifaceChanged = previousIface.length > 0
+            && shownIface.length > 0
+            && previousIface !== shownIface;
         const bssidChanged = previousConnected && next.connected
             && previousBssid.length > 0
             && next.bssid.length > 0
@@ -395,13 +433,13 @@ PlasmoidItem {
         }
 
         if (!root.expanded) {
-            if (!previousConnected || bssidChanged) {
+            if (!previousConnected || bssidChanged || ifaceChanged) {
                 resetHistory(next);
             }
             return;
         }
 
-        if (!previousConnected || bssidChanged) {
+        if (!previousConnected || bssidChanged || ifaceChanged) {
             resetHistory(next);
             return;
         }
@@ -717,6 +755,55 @@ PlasmoidItem {
                 }
             }
 
+            // Card selector — only rendered when the daemon reports 2+ wifi
+            // cards. Highlight is driven by `highlighted:` (not `checked:`)
+            // because a user click on a checkable button breaks the declared
+            // binding, and the highlight must keep tracking daemon-side
+            // primary switches while in auto mode.
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Kirigami.Units.smallSpacing
+                visible: root.ifaceList.length > 1
+
+                // Restores daemon-primary behavior after a manual pick. In
+                // auto mode both this and the followed card light up:
+                // "auto, currently following <card>".
+                PlasmaComponents3.Button {
+                    text: "auto"
+                    font.family: root.monospaceFamily
+                    highlighted: root.selectedIface === ""
+                    onClicked: {
+                        if (root.selectedIface !== "") {
+                            root.selectedIface = "";
+                            root.resetHistory(null);
+                            root.pollNow();
+                        }
+                    }
+                }
+
+                Repeater {
+                    model: root.ifaceList
+
+                    delegate: PlasmaComponents3.Button {
+                        required property string modelData
+                        text: modelData
+                        font.family: root.monospaceFamily
+                        highlighted: modelData === root.shownIface
+                        onClicked: {
+                            if (modelData !== root.selectedIface) {
+                                root.selectedIface = modelData;
+                                root.resetHistory(null);
+                                root.pollNow();
+                            }
+                        }
+                    }
+                }
+
+                Item {
+                    Layout.fillWidth: true
+                }
+            }
+
             ColumnLayout {
                 Layout.fillWidth: true
                 spacing: 1
@@ -752,7 +839,7 @@ PlasmoidItem {
             PlasmaComponents3.Label {
                 Layout.fillWidth: true
                 visible: !root.hasRecentData
-                text: "Not connected on " + root.data.iface
+                text: root.data.iface ? ("Not connected on " + root.data.iface) : "No wifi interface detected"
                 font.bold: true
                 font.family: root.monospaceFamily
                 color: Kirigami.Theme.negativeTextColor
