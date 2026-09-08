@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-07
+
+### Added
+
+- **Automatic wifi-card detection** — the daemon no longer hardwires
+  `wlp1s0`. Every 802.11 station netdev under `/sys/class/net` is
+  discovered on each poll, so swapping the internal card for a USB
+  adapter (or hotplugging one mid-session) just works, no restart or
+  configuration needed. `WIFI_IFACE=<name>` pins the daemon to one card
+  when you want that; discovery filters to nl80211 *station* iftype so
+  AP / monitor / mesh netdevs on the same radio are never polled as an
+  uplink.
+- **Multi-card polling + JSON state schema v3** — all discovered cards
+  are collected every cycle, each with its own retry window, transition
+  cooldown, and daily history-CSV rows. The state document's top level
+  mirrors the *primary* card (connected wins) so schema-v2 readers keep
+  working; new `ifaces` list and `interfaces` map carry every card's
+  full state.
+- **Plasmoid card selector** — a button row at the top of the popup
+  (visible only with 2+ cards) picks which card is displayed, plus an
+  `auto` button that returns to following the daemon's primary card.
+  Min/max history resets on card switches as well as BSSID roams.
+- **`wifimimo-mon <iface>`** now renders that card's own sub-state, and
+  resets its history when the primary fails over in no-argument mode.
+- **Per-adapter temperature** — hwmon sensors resolve through each
+  interface's own device tree first, so two cards no longer share one
+  reading.
+
+### Fixed
+
+- "Not connected" forever after a wifi card swap (the daemon kept
+  polling the hardcoded, now-absent interface).
+- `read_state` keeps defaults when `interfaces` / `ifaces` / `display`
+  have the wrong JSON shape instead of letting malformed payloads crash
+  consumers.
+
 ## [0.3.0] - 2026-05-13
 
 ### Added
@@ -90,6 +126,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - History CSV writes safely no-op (don't append new-shape rows) when
   the schema-mismatch rotation fails.
 
-[Unreleased]: https://github.com/pizzimenti/wifimimo/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/pizzimenti/wifimimo/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/pizzimenti/wifimimo/releases/tag/v0.4.0
 [0.3.0]: https://github.com/pizzimenti/wifimimo/releases/tag/v0.3.0
 [0.2.0]: https://github.com/pizzimenti/wifimimo/releases/tag/v0.2.0
