@@ -12,7 +12,9 @@ Model
   radio (an activation wifimimo didn't start itself).
 * Every other managed wifi device that can see the leader's SSID is joined
   to the same profile with `connection up <uuid> ifname <dev>`, preferring
-  an access point on a channel no other radio is using.
+  an access point on a frequency no other radio is using (higher band
+  first). For OWE transition-mode networks the hidden OWE twin is pinned,
+  since the open transition beacon itself can't be joined by BSSID.
 * A radio that NetworkManager drops back to its previous profile within
   FLAP_WINDOW_S is not a new leader, and isn't retried until the window
   passes (no fight with NM's autoconnect).
@@ -111,16 +113,20 @@ def parse_dev_show(text: str) -> list[dict]:
     return devices
 
 
+SCAN_FIELDS = "SSID,BSSID,CHAN,FREQ,SIGNAL,SECURITY"
+
+
 def parse_wifi_list(text: str) -> list[dict]:
-    """`nmcli -t -f SSID,BSSID,CHAN,SIGNAL,SECURITY dev wifi list ...`"""
+    """`nmcli -t -f SSID,BSSID,CHAN,FREQ,SIGNAL,SECURITY dev wifi list ...`"""
     out = []
     for line in text.splitlines():
         parts = split_terse(line)
-        if len(parts) < 5:
+        if len(parts) < 6:
             continue
-        ssid, bssid, chan, signal, security = parts[:5]
+        ssid, bssid, chan, freq, signal, security = parts[:6]
         out.append({"ssid": ssid, "bssid": bssid.lower(), "chan": _lead_int(chan),
-                    "signal": _lead_int(signal), "security": security})
+                    "freq": _lead_int(freq), "signal": _lead_int(signal),
+                    "security": security})
     return out
 
 
@@ -215,19 +221,53 @@ FLAG_TITLES = {
 }
 
 
-def pick_bssid(scan: list[dict], ssid: str, used_chans: set[int]) -> str:
-    """Best AP for SSID on an unused channel, or '' to let NM choose.
+def band_rank(freq: int) -> int:
+    """6 GHz > 5 GHz > 2.4 GHz. Frequencies, not channel numbers: 5 and 6 GHz
+    channel numbers overlap."""
+    if freq >= 5925:
+        return 2
+    if freq >= 4900:
+        return 1
+    return 0
 
-    OWE transition-mode networks advertise an open beacon whose BSSID can't
-    be joined directly (the encrypted twin is hidden), so never pin those.
+
+def _owe_twin(beacon: dict, scan: list[dict], ssid: str) -> dict | None:
+    """The hidden OWE BSS behind an OWE transition-mode beacon.
+
+    A transition-mode network advertises an open beacon (security OWE-TM)
+    whose BSSID can't be joined directly; the encrypted twin is a hidden BSS
+    on the same radio: same channel, same first five BSSID octets, security
+    OWE, SSID empty (or revealed as the real / "OWE-" name).
     """
-    candidates = [a for a in scan if a["ssid"] == ssid and a["signal"] >= MIN_SIGNAL_PCT]
-    if not candidates or any("OWE" in a["security"] for a in candidates):
-        return ""
-    fresh = [a for a in candidates if a["chan"] not in used_chans]
+    prefix = beacon["bssid"][:14]
+    for other in scan:
+        if other is beacon or other["bssid"][:14] != prefix:
+            continue
+        if other["freq"] != beacon["freq"]:
+            continue
+        sec = other["security"]
+        if "OWE" in sec and "OWE-TM" not in sec and other["ssid"] in ("", ssid, "OWE-" + ssid):
+            return other
+    return None
+
+
+def pick_bssid(scan: list[dict], ssid: str, used_freqs: set[int]) -> dict | None:
+    """Best AP for SSID on a frequency no other radio is using, or None to
+    let NM choose. Prefers the higher band, then the stronger signal."""
+    candidates: dict[str, dict] = {}
+    for ap in scan:
+        if ap["ssid"] != ssid or ap["signal"] < MIN_SIGNAL_PCT:
+            continue
+        if "OWE-TM" in ap["security"]:
+            twin = _owe_twin(ap, scan, ssid)
+            if twin is None:
+                continue  # can't pin a transition beacon itself
+            ap = dict(twin, ssid=ssid, signal=max(ap["signal"], twin["signal"]))
+        candidates.setdefault(ap["bssid"], ap)
+    fresh = [a for a in candidates.values() if a["freq"] not in used_freqs]
     if not fresh:
-        return ""
-    return max(fresh, key=lambda a: a["signal"])["bssid"]
+        return None
+    return max(fresh, key=lambda a: (band_rank(a["freq"]), a["signal"]))
 
 
 def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
@@ -238,7 +278,7 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
     memory   : persisted {"last": {dev: uuid}, "leader": {...}, "moves": {dev: {...}},
                           "modified": {uuid: original multi-connect}}
     lookup   : object with .profile(uuid) -> dict, .scan(dev) -> list,
-               .global_cloned() -> str, .chan(dev) -> int (0 if unknown)
+               .global_cloned() -> str, .freq(dev) -> MHz (0 if unknown)
     Returns (actions, new_memory, status). Actions:
       ("multi", uuid, value) | ("up", uuid, dev, bssid) | ("down", uuid, dev)
     """
@@ -301,8 +341,8 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
         status["skipped"] = {d["device"]: code for d in wifi if d["device"] != leader["device"]}
         return actions, memory, status
 
-    used_chans = {lookup.chan(d["device"]) for d in wifi if d.get("uuid") == leader["uuid"]}
-    used_chans.discard(0)
+    used_freqs = {lookup.freq(d["device"]) for d in wifi if d.get("uuid") == leader["uuid"]}
+    used_freqs.discard(0)
     need_multi = profile.get("multi_connect", "") not in MULTI_OK
     for dev in wifi:
         name = dev["device"]
@@ -325,17 +365,15 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
         if not any(a["ssid"] == profile.get("ssid") for a in scan):
             status["skipped"][name] = "network not in range"
             continue
-        bssid = pick_bssid(scan, profile.get("ssid", ""), used_chans)
+        pick = pick_bssid(scan, profile.get("ssid", ""), used_freqs)
         if need_multi:
             memory["modified"].setdefault(leader["uuid"], profile.get("multi_connect", "") or "default")
             actions.append(("multi", leader["uuid"], "manual-multiple"))
             need_multi = False
-        actions.append(("up", leader["uuid"], name, bssid))
+        actions.append(("up", leader["uuid"], name, pick["bssid"] if pick else ""))
         moves[name] = {"target": leader["uuid"], "previous": dev.get("uuid", ""), "at": now}
-        if bssid:
-            chan = next((a["chan"] for a in scan if a["bssid"] == bssid), 0)
-            if chan:
-                used_chans.add(chan)
+        if pick:
+            used_freqs.add(pick["freq"])
     return actions, memory, status
 
 
@@ -360,11 +398,11 @@ def run_nmcli(args: list[str], timeout: float = 5) -> tuple[int, str]:
 
 
 class _Lookup:
-    def __init__(self, chan_of) -> None:
+    def __init__(self, freq_of) -> None:
         self._profiles: dict[str, dict] = {}
         self._scans: dict[str, list] = {}
         self._global: str | None = None
-        self._chan_of = chan_of
+        self._freq_of = freq_of
 
     def profile(self, uuid: str) -> dict:
         if uuid not in self._profiles:
@@ -374,8 +412,8 @@ class _Lookup:
 
     def scan(self, dev: str) -> list[dict]:
         if dev not in self._scans:
-            rc, out = run_nmcli(["-t", "-f", "SSID,BSSID,CHAN,SIGNAL,SECURITY",
-                              "device", "wifi", "list", "ifname", dev, "--rescan", "no"])
+            rc, out = run_nmcli(["-t", "-f", SCAN_FIELDS,
+                                 "device", "wifi", "list", "ifname", dev, "--rescan", "no"])
             self._scans[dev] = parse_wifi_list(out) if rc == 0 else []
         return self._scans[dev]
 
@@ -384,8 +422,8 @@ class _Lookup:
             self._global = global_wifi_cloned_mac()
         return self._global
 
-    def chan(self, dev: str) -> int:
-        return self._chan_of(dev)
+    def freq(self, dev: str) -> int:
+        return self._freq_of(dev)
 
 
 def primary_wifi_device(states: dict, routes=None) -> str:
@@ -474,11 +512,11 @@ class Follower:
         if rc != 0:
             return {"error": "nmcli unavailable"}
 
-        def chan_of(dev: str) -> int:
-            return int(states.get(dev, {}).get("chan_num", 0) or 0)
+        def freq_of(dev: str) -> int:
+            return int(states.get(dev, {}).get("freq_mhz", 0) or 0)
 
         actions, memory, status = plan_follow(parse_dev_show(out), self.memory, now,
-                                              _Lookup(chan_of), primary_wifi_device(states))
+                                              _Lookup(freq_of), primary_wifi_device(states))
         errors = [err for err in (self._run(a) for a in actions) if err]
         if memory != self.memory:
             self.memory = memory

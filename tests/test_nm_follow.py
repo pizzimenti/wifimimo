@@ -7,10 +7,10 @@ Q = "22222222-2222-2222-2222-222222222222"   # another network
 
 
 class FakeLookup:
-    def __init__(self, profiles=None, scans=None, chans=None, cloned=""):
+    def __init__(self, profiles=None, scans=None, freqs=None, cloned=""):
         self.profiles = profiles or {}
         self.scans = scans or {}
-        self.chans = chans or {}
+        self.freqs = freqs or {}
         self.cloned = cloned
 
     def profile(self, uuid):
@@ -22,8 +22,8 @@ class FakeLookup:
     def global_cloned(self):
         return self.cloned
 
-    def chan(self, dev):
-        return self.chans.get(dev, 0)
+    def freq(self, dev):
+        return self.freqs.get(dev, 0)
 
 
 def profile(uuid=P, ssid="Central_Library", **kw):
@@ -34,8 +34,9 @@ def profile(uuid=P, ssid="Central_Library", **kw):
     return base
 
 
-def ap(bssid, chan, signal=80, ssid="Central_Library", security="WPA2"):
-    return {"ssid": ssid, "bssid": bssid, "chan": chan, "signal": signal, "security": security}
+def ap(bssid, freq, signal=80, ssid="Central_Library", security="WPA2", chan=0):
+    return {"ssid": ssid, "bssid": bssid, "chan": chan, "freq": freq, "signal": signal,
+            "security": security}
 
 
 def dev(name, uuid="", state=None, reason=0):
@@ -43,14 +44,14 @@ def dev(name, uuid="", state=None, reason=0):
             "state": state if state is not None else (100 if uuid else 30), "reason": reason}
 
 
-SCANS = {"wifi0": [ap("aa:00:00:00:00:01", 36), ap("aa:00:00:00:00:02", 149)],
-         "wifi2": [ap("aa:00:00:00:00:01", 36), ap("aa:00:00:00:00:02", 149, signal=60)]}
+SCANS = {"wifi0": [ap("aa:00:00:00:00:01", 5180), ap("aa:00:00:00:00:02", 5745)],
+         "wifi2": [ap("aa:00:00:00:00:01", 5180), ap("aa:00:00:00:00:02", 5745, signal=60)]}
 
 
 def lookup(**kw):
     kw.setdefault("profiles", {P: profile(), Q: profile(Q, "Home")})
     kw.setdefault("scans", SCANS)
-    kw.setdefault("chans", {"wifi1": 36})
+    kw.setdefault("freqs", {"wifi1": 5180})
     return FakeLookup(**kw)
 
 
@@ -85,8 +86,25 @@ def test_channel_diversity_between_followers():
     after = [dev("wifi1", P), dev("wifi0"), dev("wifi2")]
     actions, _, _ = nm.plan_follow(after, mem, 1.0, lookup())
     picks = {a[2]: a[3] for a in actions if a[0] == "up"}
-    # leader on chan 36 -> first follower takes 149; second has nothing unused -> NM picks
+    # leader on 5180 -> first follower takes 5745; second has nothing unused -> NM picks
     assert picks == {"wifi0": "aa:00:00:00:00:02", "wifi2": ""}
+
+
+def test_higher_band_beats_stronger_signal():
+    scan = [ap("aa:00:00:00:00:01", 2437, signal=90), ap("aa:00:00:00:00:02", 5700, signal=60),
+            ap("aa:00:00:00:00:03", 6295, signal=55)]
+    assert nm.pick_bssid(scan, "Central_Library", set())["bssid"] == "aa:00:00:00:00:03"
+    assert nm.pick_bssid(scan, "Central_Library", {6295})["bssid"] == "aa:00:00:00:00:02"
+
+
+def test_band_rank_uses_frequency_not_channel_number():
+    # 5 GHz ch 36 and 6 GHz ch 37 have near-identical channel numbers
+    assert nm.band_rank(5180) == 1 and nm.band_rank(6135) == 2 and nm.band_rank(2437) == 0
+
+
+def test_weak_candidates_are_ignored():
+    scan = [ap("aa:00:00:00:00:01", 6295, signal=nm.MIN_SIGNAL_PCT - 1)]
+    assert nm.pick_bssid(scan, "Central_Library", set()) is None
 
 
 def test_our_own_join_is_not_a_new_leader():
@@ -143,9 +161,42 @@ def test_out_of_range_radio_is_skipped():
     assert status["skipped"]["wifi0"] == "network not in range"
 
 
-def test_owe_transition_networks_are_never_pinned():
-    scan = [ap("aa:00:00:00:00:01", 36, security="OWE-TM"), ap("aa:00:00:00:00:02", 149, security="OWE-TM")]
-    assert nm.pick_bssid(scan, "Central_Library", set()) == ""
+def test_owe_transition_beacon_without_twin_is_not_pinned():
+    scan = [ap("aa:00:00:00:00:01", 5180, security="OWE-TM"), ap("aa:00:00:00:00:02", 5745, security="OWE-TM")]
+    assert nm.pick_bssid(scan, "Central_Library", set()) is None
+
+
+# Shape of the 2026-09-24 Bend library scan: 6 GHz is pure OWE (pinnable as
+# is); 2.4 / 5 GHz advertise an open OWE-TM beacon plus a hidden OWE twin on
+# the same radio (same channel, same first five octets).
+LIBRARY_SCAN = [
+    ap("04:cd:c0:18:0b:c4", 6855, 72, security="OWE"),                          # leader's AP
+    ap("04:cd:c0:18:0b:04", 6295, 59, security="OWE"),
+    ap("04:cd:c0:18:0b:14", 5700, 59, security="OWE-TM"),
+    ap("04:cd:c0:18:0b:1f", 5700, 60, ssid="Central_Library", security="OWE"),  # its twin
+    ap("04:cd:c0:18:0b:24", 2437, 87, security="OWE-TM"),
+    ap("04:cd:c0:18:0b:2f", 2437, 85, ssid="", security="OWE"),                 # hidden twin
+    ap("04:cd:c0:18:0b:21", 2437, 85, ssid="dpl-iot", security="WPA2 WPA3"),
+]
+
+
+def test_library_scan_spreads_radios_across_bands():
+    used = {6855}
+    first = nm.pick_bssid(LIBRARY_SCAN, "Central_Library", used)
+    assert first["bssid"] == "04:cd:c0:18:0b:04"          # other 6 GHz AP
+    used.add(first["freq"])
+    second = nm.pick_bssid(LIBRARY_SCAN, "Central_Library", used)
+    assert second["bssid"] == "04:cd:c0:18:0b:1f"         # 5 GHz via the twin
+    used.add(second["freq"])
+    third = nm.pick_bssid(LIBRARY_SCAN, "Central_Library", used)
+    assert third["bssid"] == "04:cd:c0:18:0b:2f"          # 2.4 GHz hidden twin, never the beacon
+
+
+def test_twin_must_share_channel_and_prefix():
+    scan = [ap("04:cd:c0:18:0b:24", 2437, 87, security="OWE-TM"),
+            ap("04:cd:c0:18:0b:2f", 2462, 85, ssid="", security="OWE"),   # wrong channel
+            ap("04:cd:c0:99:0b:2e", 2437, 85, ssid="", security="OWE")]   # wrong radio
+    assert nm.pick_bssid(scan, "Central_Library", set()) is None
 
 
 def test_already_multi_profile_isnt_modified():
@@ -181,9 +232,9 @@ def test_split_terse_unescapes_colons():
 
 
 def test_parse_wifi_list_lowercases_bssid():
-    rows = nm.parse_wifi_list(r"Central_Library:04\:CD\:C0\:18\:0B\:24:6:87:OWE-TM")
+    rows = nm.parse_wifi_list(r"Central_Library:04\:CD\:C0\:18\:0B\:24:6:2437 MHz:87:OWE-TM")
     assert rows == [{"ssid": "Central_Library", "bssid": "04:cd:c0:18:0b:24", "chan": 6,
-                     "signal": 87, "security": "OWE-TM"}]
+                     "freq": 2437, "signal": 87, "security": "OWE-TM"}]
 
 
 def test_primary_wifi_device_is_lowest_metric():
