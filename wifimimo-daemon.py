@@ -358,6 +358,11 @@ def main() -> int:
     # all wifi netdevs each poll (hotplug-friendly).
     iface = os.environ.get("WIFI_IFACE", "").strip()
     daemon = WifimimoDaemon(iface, STATE_PATH, HISTORY_DIR)
+    # NM follow only acts while /etc/wifimimo/multipath-enabled exists;
+    # WIFIMIMO_NO_FOLLOW=1 disables it entirely.
+    if os.environ.get("WIFIMIMO_NO_FOLLOW", "") != "1":
+        import wifimimo_nm
+        daemon.follower = wifimimo_nm.Follower()
     daemon.run()
     return 0
 
