@@ -1,5 +1,7 @@
 """NetworkManager follow planner, nmcli parsing, and profile tidy."""
 
+import json
+
 import wifimimo_nm as nm
 
 P = "11111111-1111-1111-1111-111111111111"   # Central_Library
@@ -359,8 +361,48 @@ def test_parse_dev_show():
             "GENERAL.DEVICE:p2p-dev-wifi1\nGENERAL.TYPE:wifi-p2p\nGENERAL.STATE:30 (disconnected)\n"
             "GENERAL.REASON:0 (No reason given)\nGENERAL.CON-UUID:\n")
     devices = nm.parse_dev_show(text)
-    assert devices[0] == {"device": "wifi1", "type": "wifi", "state": 100, "reason": 0, "uuid": P}
+    assert devices[0] == {"device": "wifi1", "type": "wifi", "state": 100, "reason": 0, "uuid": P,
+                          "connectivity": 0}
     assert devices[1]["type"] == "wifi-p2p" and devices[1]["uuid"] == ""
+
+
+def test_parse_dev_show_reads_connectivity():
+    text = ("GENERAL.DEVICE:wifi2\nGENERAL.TYPE:wifi\nGENERAL.STATE:100 (connected)\n"
+            "GENERAL.REASON:0 (No reason given)\nGENERAL.CON-UUID:" + P + "\n"
+            "GENERAL.IP4-CONNECTIVITY:3 (limited)\n")
+    assert nm.parse_dev_show(text)[0]["connectivity"] == 3
+
+
+def test_heal_candidates_only_waiting_radios_now_fully_connected():
+    excluded = [{"iface": "wifi2", "reason": "no connectivity"},
+                {"iface": "wifi0", "reason": "not connected"},
+                {"iface": "wifi3", "reason": "limited connectivity"}]
+    devices = [{"device": "wifi2", "connectivity": 4}, {"device": "wifi0", "connectivity": 4},
+               {"device": "wifi3", "connectivity": 3}]
+    assert nm.heal_candidates(excluded, devices) == ["wifi2"]
+
+
+def test_follower_heal_is_rate_limited(tmp_path, monkeypatch):
+    status = tmp_path / "multipath.json"
+    status.write_text(json.dumps({"excluded": [{"iface": "wifi2", "reason": "no connectivity"}]}))
+    monkeypatch.setattr(nm.shared, "MULTIPATH_STATUS", status)
+    launched = []
+
+    class FakeProc:
+        def __init__(self, argv, **_kw):
+            launched.append(argv)
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(nm.subprocess, "Popen", FakeProc)
+    follower = nm.Follower(tmp_path / "follow.json")
+    devices = [{"device": "wifi2", "connectivity": 4}]
+    assert follower.heal(devices, 100.0) == ["wifi2"]
+    assert follower.heal(devices, 110.0) == []            # within 30 s
+    assert follower.heal(devices, 131.0) == ["wifi2"]
+    assert launched[0] == ["pkexec", "/usr/local/lib/wifimimo/wifimimo-helper", "multipath", "apply"]
+    assert len(launched) == 2
 
 
 def test_split_terse_unescapes_colons():

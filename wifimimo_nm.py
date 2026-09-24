@@ -104,6 +104,8 @@ def parse_dev_show(text: str) -> list[dict]:
             cur["reason"] = _lead_int(value)
         elif key == "GENERAL.CON-UUID":
             cur["uuid"] = value
+        elif key == "GENERAL.IP4-CONNECTIVITY":
+            cur["connectivity"] = _lead_int(value)
     if cur:
         devices.append(cur)
     for dev in devices:
@@ -111,7 +113,25 @@ def parse_dev_show(text: str) -> list[dict]:
         dev.setdefault("state", 0)
         dev.setdefault("reason", 0)
         dev.setdefault("uuid", "")
+        dev.setdefault("connectivity", 0)
     return devices
+
+
+DEV_FIELDS = ("GENERAL.DEVICE,GENERAL.TYPE,GENERAL.STATE,GENERAL.REASON,"
+              "GENERAL.CON-UUID,GENERAL.IP4-CONNECTIVITY")
+CONNECTIVITY_FULL = 4
+# Helper exclusion reasons that clear up on their own once NM's per-device
+# connectivity check passes (which fires no dispatcher event of its own).
+HEALABLE_REASONS = frozenset({"no connectivity", "limited connectivity", "captive portal",
+                              "gateway unreachable"})
+HEAL_INTERVAL_S = 30.0
+
+
+def heal_candidates(excluded: list[dict], devices: list[dict]) -> list[str]:
+    """Radios the helper left out that NM now rates fully connected."""
+    waiting = {e.get("iface") for e in excluded or [] if e.get("reason") in HEALABLE_REASONS}
+    return sorted(d["device"] for d in devices
+                  if d.get("device") in waiting and d.get("connectivity") == CONNECTIVITY_FULL)
 
 
 SCAN_FIELDS = "SSID,BSSID,CHAN,FREQ,SIGNAL,SECURITY"
@@ -543,6 +563,33 @@ class Follower:
         except (OSError, ValueError):
             self.memory = {}
         self.was_enabled = False
+        self.last_heal = 0.0
+        self.heal_proc: subprocess.Popen | None = None
+
+    def heal(self, devices: list[dict], now: float) -> list[str]:
+        """Ask the root helper to re-apply when a waiting radio became healthy.
+
+        Fire-and-forget through the same pkexec / polkit path the widget
+        uses, at most every HEAL_INTERVAL_S, so the poll loop never blocks.
+        """
+        if self.heal_proc is not None and self.heal_proc.poll() is None:
+            return []
+        if now - self.last_heal < HEAL_INTERVAL_S:
+            return []
+        try:
+            status = json.loads(shared.MULTIPATH_STATUS.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        ready = heal_candidates(status.get("excluded", []) if isinstance(status, dict) else [], devices)
+        if ready:
+            self.last_heal = now
+            try:
+                self.heal_proc = subprocess.Popen(
+                    ["pkexec", str(shared.HELPER_PATH), "multipath", "apply"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError:
+                self.heal_proc = None
+        return ready
 
     def _save(self) -> None:
         try:
@@ -589,16 +636,17 @@ class Follower:
             self.was_enabled = False
             return {}
         self.was_enabled = True
-        rc, out = run_nmcli(["-t", "-f", "GENERAL.DEVICE,GENERAL.TYPE,GENERAL.STATE,"
-                          "GENERAL.REASON,GENERAL.CON-UUID", "device", "show"])
+        rc, out = run_nmcli(["-t", "-f", DEV_FIELDS, "device", "show"])
         if rc != 0:
             return {"error": "nmcli unavailable"}
 
         def freq_of(dev: str) -> int:
             return int(states.get(dev, {}).get("freq_mhz", 0) or 0)
 
-        actions, memory, status = plan_follow(parse_dev_show(out), self.memory, now,
+        devices = parse_dev_show(out)
+        actions, memory, status = plan_follow(devices, self.memory, now,
                                               _Lookup(freq_of), primary_wifi_device(states))
+        status["healed"] = self.heal(devices, now)
         errors = [err for err in (self._run(a) for a in actions) if err]
         if memory != self.memory:
             self.memory = memory
