@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Run the wifimimo plasmoid in plasmoidviewer with every QML message on stdout.
+# Qt 6 logs to the journal, not stderr, when there is no controlling terminal
+# (agent/IDE shells). QT_FORCE_STDERR_LOGGING=1 pins it to stderr; the pattern
+# adds the level (D/I/W/E) and, for console.*, the QML file:line.
+# usage: tools/pv [-t SECONDS] [extra plasmoidviewer args]
+#   -t N      quit after N seconds (always use in non-interactive runs)
+#   PV_ALL=1  keep plasmoidviewer's own shell/containment noise
+# exit status: plasmoidviewer's (a -t timeout counts as success)
+#
+# The installed widget logs to the journal instead:
+#   journalctl --user -u plasma-plasmashell.service -f --grep wifimimo
+set -u
+repo=$(cd "$(dirname "$0")/.." && pwd)
+pkg=$repo/plasmoid/org.kde.plasma.wifimimo
+cmd=(plasmoidviewer -a "$pkg" -f planar -s 1500x1150)
+if [ "${1:-}" = -t ]; then cmd=(timeout "$2" "${cmd[@]}"); shift 2; fi
+
+export QT_FORCE_STDERR_LOGGING=1
+export QT_LOGGING_RULES="qml.debug=true${QT_LOGGING_RULES:+;$QT_LOGGING_RULES}"
+export QT_MESSAGE_PATTERN='%{if-debug}D%{endif}%{if-info}I%{endif}%{if-warning}W%{endif}%{if-critical}E%{endif}%{if-fatal}F%{endif} %{if-category}%{category} %{file}:%{line}: %{endif}%{message}'
+
+"${cmd[@]}" "$@" 2>&1 |
+    if [ -n "${PV_ALL:-}" ]; then cat; else
+        grep --line-buffered -Ev 'org\.kde\.(desktopcontainment|plasma\.plasmoidviewershell)/|object DeclarativeDropArea overrides|^QML debugging is enabled'
+    fi |
+    sed -u -e "s|file://$pkg/contents/||g" -e 's| unknown:0:|:|'
+s=${PIPESTATUS[0]}
+exit $(( s == 124 ? 0 : s ))

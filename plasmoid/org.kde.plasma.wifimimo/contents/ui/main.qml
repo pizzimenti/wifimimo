@@ -112,8 +112,9 @@ PlasmoidItem {
     // present) pins one, and empty selection follows the daemon's primary
     // (the connected card).
     property var ifaceList: []
-    property string selectedIface: ""   // sticky user pick; "" = auto/primary
+    property string selectedIface: ""   // the card the user picked (defaults to the first)
     property string shownIface: ""      // card actually rendered this poll
+    property string lastInternalIface: ""  // internal card's iface while it was present
     readonly property string internalGhost: "@internal"  // selector id for a switched-off internal card
 
     // Schema v4: the whole document (multipath, internal_card, nm, every
@@ -565,6 +566,21 @@ PlasmoidItem {
             } else if (parsed.iface) {
                 list = [parsed.iface];
             }
+            // Selection is always an explicit card (no "auto"): default to
+            // the first card; follow the internal card between its live
+            // button and its ghost as it's switched off / on; when a
+            // selected stick is unplugged, fall back to the first card.
+            const card = parsed.internal_card || {};
+            if (card.present && card.iface) {
+                lastInternalIface = card.iface;
+            }
+            if (selectedIface === internalGhost && card.present && card.iface && map[card.iface]) {
+                selectedIface = card.iface;
+            } else if (selectedIface !== internalGhost && !map[selectedIface]) {
+                selectedIface = (card.managed && !card.present && selectedIface !== ""
+                                 && selectedIface === lastInternalIface)
+                    ? internalGhost : (list.length > 0 ? list[0] : "");
+            }
             if (selectedIface === internalGhost) {
                 // The internal card's panel: live card if it's back, else a
                 // named, empty skeleton so the layout keeps its shape.
@@ -976,30 +992,15 @@ PlasmoidItem {
                 Layout.topMargin: Kirigami.Units.smallSpacing
             }
 
-            // Card selector — always shown (even for one card) so it never
-            // appears / disappears and shifts the layout. Highlight uses
-            // `highlighted:` (not `checked:`) because a click would break a
-            // `checked` binding, and in auto mode it must track the primary.
+            // Card selector: one button per card, always shown (even for one
+            // card) so it never appears / disappears and shifts the layout.
+            // Highlight uses `highlighted:` (not `checked:`) because a click
+            // would break a `checked` binding. Unselected buttons are flat so
+            // the selected card stands out raised; `highlighted` alone is
+            // invisible under Breeze.
             RowLayout {
                 Layout.fillWidth: true
                 spacing: Kirigami.Units.smallSpacing
-
-                // Unselected buttons are flat so the selected card (and
-                // "auto", when following the primary) stands out raised;
-                // `highlighted` alone is invisible under Breeze.
-                PlasmaComponents3.Button {
-                    text: "auto"
-                    font.family: root.monospaceFamily
-                    highlighted: root.selectedIface === ""
-                    flat: !highlighted
-                    onClicked: {
-                        if (root.selectedIface !== "") {
-                            root.selectedIface = "";
-                            root.resetHistory(null);
-                            root.pollNow();
-                        }
-                    }
-                }
 
                 Repeater {
                     model: root.radios

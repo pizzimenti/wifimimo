@@ -34,8 +34,11 @@ Planned as 1.0.0.
 
 ### Changed
 
-- Popup has a fixed height with content pinned to the top; the card selector no
-  longer moves, and a disconnected card keeps the full layout with placeholders.
+- Popup is sized to its content with no scrolling and denser one-line meters; a
+  disconnected card keeps the full layout with placeholders, so the card selector
+  never moves.
+- Card selector: one button per card, the first selected by default; the `auto`
+  button is gone.
 - State schema v4 (per-radio bus / USB speed / addressing / throughput / history /
   flags / colour; document-level multipath, internal card, NM, helper status).
 - Daily history CSV gains `rx_mbps`, `tx_mbps`, `usb_speed_mbps`, `flags`.

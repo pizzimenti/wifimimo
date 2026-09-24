@@ -110,15 +110,16 @@ multi-link MLO is active.
 ## Plasma widget
 
 A KDE Plasma 6 panel widget that consumes the daemon's JSON state file. Compact
-representation = a single coloured icon (see table above). The expanded popup has
-a fixed size with everything pinned to the top, so nothing shifts when a card
-goes down. From the top:
+representation = a single coloured icon (see table above). The expanded popup is
+sized to its content with no scrolling; every card renders the same skeleton, so
+nothing shifts when a card goes down or you switch cards. From the top:
 
-- **Controls** — *Multipath* and *Internal Wi-Fi* switches (see below).
-- **All radios, last 60 s** — signal (dBm) for every radio on a fixed −90…−30 dBm
+- **Controls** — *Multipath* and *Internal Wi-Fi* switches on one line (see
+  below); hover a label for its status.
+- **Signal, last 60 s** — signal (dBm) for every radio on a fixed −90…−30 dBm
   axis with good / warn / bad bands, so link quality reads at a glance. The axis
   never rescales. Points are placed by time, and gaps (radio down) break the line.
-- **Card selector** — `auto` follows the connected primary; each card shows a
+- **Card selector** — one button per card (the first is selected by default); each card shows a
   filled dot when up, a hollow one when down, and `!` when flagged. A switched-off
   internal card keeps a ghost button.
 - **Card panel** — the card's name (e.g. `A9000`, `A8000`, `Built-in`), SSID or
@@ -297,6 +298,13 @@ planning, cross-file packaging facts (polkit path, dispatcher, versions), and a
 QML parity check that fails CI if PHY-mode literals leak back into the QML.
 
 GitHub Actions CI runs on `ubuntu-24.04` with Python `3.12.7`.
+
+Widget development: `tools/pv -t 10` runs the plasmoid in `plasmoidviewer` with
+every QML message on stdout. Qt 6 sends logging to the systemd journal whenever
+the process has no controlling terminal (IDE and agent shells), so without the
+script the messages are only in `journalctl --user _COMM=plasmoidviewer`. The
+installed widget always logs to the journal:
+`journalctl --user -u plasma-plasmashell.service -f --grep wifimimo`.
 
 ## License
 

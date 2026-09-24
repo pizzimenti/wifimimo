@@ -181,7 +181,7 @@ Item {
                 preferredRendererType: Shape.CurveRenderer
                 // Selected radio on top and heavier; the rest recede a little.
                 z: modelData.selected ? 2 : 1
-                opacity: modelData.selected || graph.app.selectedIface === "" ? 1.0 : 0.7
+                opacity: modelData.selected ? 1.0 : 0.7
 
                 ShapePath {
                     strokeColor: line.modelData.color
