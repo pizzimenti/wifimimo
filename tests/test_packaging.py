@@ -57,8 +57,24 @@ def test_qml_helper_path_matches_shared():
 
 def test_install_targets_match_shared():
     text = (ROOT / "install.sh").read_text()
-    if "wifimimo-helper" in text:
-        assert "/usr/local/lib/wifimimo" in text
+    assert f'TARGET_LIB_DIR="{shared.LIB_DIR}"' in text
+    assert 'TARGET_HELPER="$TARGET_LIB_DIR/wifimimo-helper"' in text
+    assert f'ETC_DIR="{shared.ETC_DIR}"' in text
+    assert f'INTERNAL_RULE="{shared.INTERNAL_UDEV_RULE}"' in text
+    assert 'TARGET_POLICY="/usr/share/polkit-1/actions/io.github.pizzimenti.wifimimo.policy"' in text
+    assert 'TARGET_DISPATCHER="$TARGET_DISPATCHER_DIR/90-wifimimo"' in text
+
+
+def test_install_ships_every_module_the_daemon_imports():
+    text = (ROOT / "install.sh").read_text()
+    for module in ("phy_modes.py", "wifimimo_core.py", "wifimimo_shared.py",
+                   "wifimimo_radio.py", "wifimimo_nm.py"):
+        assert module in text, module
+
+
+def test_rt_protos_entry_matches_shared():
+    text = (ROOT / "install.sh").read_text()
+    assert f"printf '{shared.RT_PROTO}\\t{shared.RT_PROTO_NAME}\\n'" in text
 
 
 def test_versions_agree():
