@@ -11,10 +11,11 @@ Model
 * The **leader** is the most recent profile the *user* activated on any
   radio (an activation wifimimo didn't start itself).
 * Every other managed wifi device that can see the leader's SSID is joined
-  to the same profile with `connection up <uuid> ifname <dev>`, preferring
+  to the same profile with `connection up <uuid> ifname <dev>`, locked to
   an access point on a frequency no other radio is using (higher band
-  first). For OWE transition-mode networks the hidden OWE twin is pinned,
-  since the open transition beacon itself can't be joined by BSSID.
+  first; see `activate_pinned`). For OWE transition-mode networks the
+  hidden OWE twin is pinned, since the open transition beacon itself can't
+  be joined by BSSID.
 * A radio that NetworkManager drops back to its previous profile within
   FLAP_WINDOW_S is not a new leader, and isn't retried until the window
   passes (no fight with NM's autoconnect).
@@ -144,6 +145,7 @@ def parse_profile(text: str) -> dict:
         "interface_name": info.get("connection.interface-name", ""),
         "stable_id": info.get("connection.stable-id", ""),
         "ssid": info.get("802-11-wireless.ssid", ""),
+        "bssid": info.get("802-11-wireless.bssid", ""),
         "mac_address": info.get("802-11-wireless.mac-address", ""),
         "cloned_mac": info.get("802-11-wireless.cloned-mac-address", ""),
         "key_mgmt": info.get("802-11-wireless-security.key-mgmt", ""),
@@ -155,7 +157,7 @@ def parse_profile(text: str) -> dict:
 PROFILE_FIELDS = ",".join([
     "connection.uuid", "connection.id", "connection.type", "connection.multi-connect",
     "connection.interface-name", "connection.stable-id", "connection.timestamp",
-    "802-11-wireless.ssid", "802-11-wireless.mac-address",
+    "802-11-wireless.ssid", "802-11-wireless.bssid", "802-11-wireless.mac-address",
     "802-11-wireless.cloned-mac-address", "802-11-wireless-security.key-mgmt",
     "ipv4.route-table",
 ])
@@ -365,7 +367,8 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
         if not any(a["ssid"] == profile.get("ssid") for a in scan):
             status["skipped"][name] = "network not in range"
             continue
-        pick = pick_bssid(scan, profile.get("ssid", ""), used_freqs)
+        # A BSSID the user pinned on the profile themselves wins: never override it.
+        pick = None if profile.get("bssid") else pick_bssid(scan, profile.get("ssid", ""), used_freqs)
         if need_multi:
             memory["modified"].setdefault(leader["uuid"], profile.get("multi_connect", "") or "default")
             actions.append(("multi", leader["uuid"], "manual-multiple"))
@@ -426,6 +429,34 @@ class _Lookup:
         return self._freq_of(dev)
 
 
+def activate_pinned(uuid: str, dev: str, bssid: str, nmcli=None) -> int:
+    """Activate profile `uuid` on `dev`, locked to `bssid` for this radio only.
+
+    `connection up ... ap <BSSID>` is only a hint (wpa_supplicant still picks
+    the strongest AP; verified live 2026-09-24). A BSSID in the *profile* is
+    binding, but the profile is shared by every radio. NetworkManager copies
+    the profile into a per-device "applied connection" when the activation
+    starts, so: pin the BSSID in memory (--temporary), start the activation
+    (-w 0 returns once it's queued, i.e. after the copy), and immediately
+    clear it again. Other radios keep their own applied copies, and nothing
+    is ever written to disk.
+    """
+    nmcli = nmcli or run_nmcli
+    if not bssid:
+        rc, _ = nmcli(["-w", "0", "connection", "up", "uuid", uuid, "ifname", dev])
+        return rc
+    rc, _ = nmcli(["connection", "modify", "--temporary", "uuid", uuid,
+                   "802-11-wireless.bssid", bssid])
+    if rc != 0:
+        rc, _ = nmcli(["-w", "0", "connection", "up", "uuid", uuid, "ifname", dev])
+        return rc
+    try:
+        rc, _ = nmcli(["-w", "0", "connection", "up", "uuid", uuid, "ifname", dev])
+    finally:
+        nmcli(["connection", "modify", "--temporary", "uuid", uuid, "802-11-wireless.bssid", ""])
+    return rc
+
+
 def primary_wifi_device(states: dict, routes=None) -> str:
     """The wifi device carrying NM's lowest-metric default route in `main`."""
     if routes is None:
@@ -476,10 +507,7 @@ class Follower:
                             "connection.multi-connect", value])
         elif kind == "up":
             _, uuid, dev, bssid = action
-            args = ["-w", "0", "connection", "up", "uuid", uuid, "ifname", dev]
-            if bssid:
-                args += ["ap", bssid]
-            rc, _ = run_nmcli(args)
+            rc = activate_pinned(uuid, dev, bssid)
         elif kind == "down":
             # Deactivate this device's instance of the profile only; never
             # `device disconnect` (that blocks the device's autoconnect).

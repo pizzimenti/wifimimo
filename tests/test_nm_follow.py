@@ -206,6 +206,49 @@ def test_already_multi_profile_isnt_modified():
     assert memory["modified"] == {}
 
 
+def test_activate_pinned_sets_then_clears_bssid_around_activation():
+    calls = []
+
+    def fake(args):
+        calls.append(" ".join(args))
+        return 0, ""
+
+    assert nm.activate_pinned(P, "wifi2", "04:cd:c0:18:0b:04", nmcli=fake) == 0
+    assert calls == [
+        f"connection modify --temporary uuid {P} 802-11-wireless.bssid 04:cd:c0:18:0b:04",
+        f"-w 0 connection up uuid {P} ifname wifi2",
+        f"connection modify --temporary uuid {P} 802-11-wireless.bssid ",
+    ]
+
+
+def test_activate_pinned_clears_bssid_even_if_activation_raises():
+    calls = []
+
+    def fake(args):
+        calls.append(args[0:2])
+        if "up" in args:
+            raise OSError("nmcli died")
+        return 0, ""
+
+    try:
+        nm.activate_pinned(P, "wifi2", "04:cd:c0:18:0b:04", nmcli=fake)
+    except OSError:
+        pass
+    assert calls[-1] == ["connection", "modify"]
+
+
+def test_activate_without_pick_is_plain_up():
+    calls = []
+    nm.activate_pinned(P, "wifi2", "", nmcli=lambda a: (calls.append(" ".join(a)), (0, ""))[1])
+    assert calls == [f"-w 0 connection up uuid {P} ifname wifi2"]
+
+
+def test_user_pinned_bssid_is_respected():
+    look = lookup(profiles={P: profile(bssid="aa:00:00:00:00:01")})
+    actions, _, _ = nm.plan_follow([dev("wifi1", P), dev("wifi0")], {}, 1.0, look, "wifi1")
+    assert [a for a in actions if a[0] == "up"] == [("up", P, "wifi0", "")]
+
+
 def test_release_restores_original_multi_connect():
     assert nm.plan_release({"modified": {P: "0"}}) == [("multi", P, "0")]
     assert nm.plan_release({}) == []
