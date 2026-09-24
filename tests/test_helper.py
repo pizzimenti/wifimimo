@@ -139,6 +139,31 @@ def test_teardown_removes_ecmp_route_first_and_restores_sysctls_last():
     assert not [c for c in cmds if "5270" in c or "32766" in c]
 
 
+def test_unhealthy_radio_gets_routing_but_no_nexthop():
+    # Live 2026-09-24: a radio still waiting on NM's connectivity check had
+    # strict rp_filter and no source rule, so its replies were dropped and
+    # the check could never pass. It must get its table, rule and loose
+    # rp_filter; only the nexthop waits for health.
+    third = {"iface": "wifi0", "perm_mac": "3c:3b:ad:16:b7:30", "ip": "172.20.179.201",
+             "subnet": "172.20.176.0/22", "gw": "172.20.176.1"}
+    routable = MEMBERS + [third]
+    plan = helper.plan_apply(routable, [], [], {}, ecmp=MEMBERS)
+    cmds = argvs(plan)
+    assert "ip -4 rule add priority 32003 from 172.20.179.201 lookup 103 protocol 211" in cmds
+    assert ("sysctl", "net/ipv4/conf/wifi0/rp_filter", "2") in plan
+    swap = [c for c in cmds if c.startswith("ip -4 route replace default table 100")][0]
+    assert "dev wifi0" not in swap and "dev wifi1" in swap and "dev wifi2" in swap
+
+
+def test_fewer_than_two_healthy_removes_ecmp_but_keeps_radio_routing():
+    rules, routes = _as_live(MEMBERS)
+    plan = helper.plan_apply(MEMBERS, rules, routes, GOOD_SYSCTLS, ecmp=MEMBERS[:1])
+    cmds = argvs(plan)
+    assert "ip -4 route del default table 100" in cmds
+    assert not [c for c in cmds if "replace default table 100" in c]
+    assert not [c for c in cmds if " rule del " in c]      # radio rules stay
+
+
 def test_foreign_table_100_route_is_refused():
     routes = [{"dst": "default", "table": "100", "protocol": "static", "dev": "eth0"}]
     assert helper.foreign_conflicts([], routes)

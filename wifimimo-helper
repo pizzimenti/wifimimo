@@ -203,42 +203,50 @@ def gateway_reachable(ctx: Ctx, iface: str, gw: str) -> bool:
     return rc == 0
 
 
-def discover_members(ctx: Ctx) -> tuple[list[dict], list[dict]]:
-    """Radios eligible for ECMP, sorted by permanent MAC, plus exclusions."""
+def discover_members(ctx: Ctx) -> tuple[list[dict], list[dict], list[dict]]:
+    """Classify wifi radios. Returns (healthy, excluded, routable).
+
+    routable: up, with an address and an NM default route. Every routable
+    radio gets its own table, source rule and loose rp_filter, *including*
+    ones not yet healthy: with several radios in one subnet, a radio without
+    them has its replies dropped by strict reverse-path filtering, so it can
+    never pass NM's connectivity check and would stay excluded forever
+    (found live 2026-09-24).
+    healthy: routable + NM full/unknown connectivity + reachable gateway.
+    Only these become ECMP nexthops. All lists sorted by permanent MAC.
+    """
     addrs = _addrs(ctx.query_json(["ip", "-j", "-4", "addr", "show"]))
     gws = _gateways(ctx.query_json(["ip", "-j", "-4", "route", "show", "default", "table", "main"]))
-    members, excluded = [], []
+    routable, excluded = [], []
     for dev in wifi_netdevs(ctx):
         name = dev["iface"]
-
-        def skip(reason: str) -> None:
-            excluded.append({"iface": name, "reason": reason})
-
         if dev["operstate"] != "up" or not dev["carrier"]:
-            skip("not connected")
+            excluded.append({"iface": name, "reason": "not connected"})
             continue
         if name not in addrs:
-            skip("no IPv4 address")
+            excluded.append({"iface": name, "reason": "no IPv4 address"})
             continue
         if name not in gws:
-            skip("no default route")
-            continue
-        ok, why = nm_connectivity_ok(ctx, name)
-        if not ok:
-            skip(why)
-            continue
-        if not gateway_reachable(ctx, name, gws[name]):
-            skip("gateway unreachable")
+            excluded.append({"iface": name, "reason": "no default route"})
             continue
         ip, subnet = addrs[name]
-        members.append({"iface": name, "perm_mac": dev["perm_mac"], "ip": ip,
-                        "subnet": subnet, "gw": gws[name]})
-    members.sort(key=lambda m: m["perm_mac"])
-    if len(members) > shared.MAX_RADIOS:
-        for extra in members[shared.MAX_RADIOS:]:
+        routable.append({"iface": name, "perm_mac": dev["perm_mac"], "ip": ip,
+                         "subnet": subnet, "gw": gws[name]})
+    routable.sort(key=lambda m: m["perm_mac"])
+    if len(routable) > shared.MAX_RADIOS:
+        for extra in routable[shared.MAX_RADIOS:]:
             excluded.append({"iface": extra["iface"], "reason": "too many radios"})
-        members = members[:shared.MAX_RADIOS]
-    return members, excluded
+        routable = routable[:shared.MAX_RADIOS]
+    healthy = []
+    for radio in routable:
+        ok, why = nm_connectivity_ok(ctx, radio["iface"])
+        if not ok:
+            excluded.append({"iface": radio["iface"], "reason": why})
+        elif not gateway_reachable(ctx, radio["iface"], radio["gw"]):
+            excluded.append({"iface": radio["iface"], "reason": "gateway unreachable"})
+        else:
+            healthy.append(radio)
+    return healthy, excluded, routable
 
 
 # ---------------------------------------------------------------------------
@@ -341,13 +349,21 @@ def desired_sysctls(members: list[dict]) -> dict[str, str]:
     return want
 
 
-def plan_apply(members: list[dict], rules, routes_all, sysctl_now: dict[str, str]) -> list[tuple]:
+def plan_apply(members: list[dict], rules, routes_all, sysctl_now: dict[str, str],
+               ecmp: list[dict] | None = None) -> list[tuple]:
     """Ordered plan: ("cmd", argv) | ("sysctl", key, value).
+
+    `members` (the routable radios) get tables, source rules and sysctls;
+    `ecmp` (the healthy subset, default: all members) become nexthops. With
+    fewer than two healthy radios the multipath route is removed but the
+    per-radio routing stays, so the others can pass their connectivity check
+    and join on a later apply.
 
     Order matters for never dropping traffic: build radio tables and rules,
     set sysctls, then swap the ECMP default in ONE `route replace`, and only
     then remove stale owned state.
     """
+    ecmp = members if ecmp is None else ecmp
     plan: list[tuple] = []
     tables_wanted: dict[int, set[tuple[str, str]]] = {}
     existing = owned_rules(rules)
@@ -381,12 +397,17 @@ def plan_apply(members: list[dict], rules, routes_all, sysctl_now: dict[str, str
         if sysctl_now.get(key) != value:
             plan.append(("sysctl", key, value))
 
-    # 4. the one change that moves new flows: atomic ECMP swap
-    ecmp = ["ip", "-4", "route", "replace", "default", "table", str(shared.ECMP_TABLE),
-            "proto", str(shared.RT_PROTO)]
-    for m in members:
-        ecmp += ["nexthop", "via", m["gw"], "dev", m["iface"], "weight", "1"]
-    plan.append(("cmd", ecmp))
+    # 4. the one change that moves new flows: atomic ECMP swap (or, with
+    #    fewer than two healthy radios, removal; NM's defaults take over)
+    if len(ecmp) >= 2:
+        swap = ["ip", "-4", "route", "replace", "default", "table", str(shared.ECMP_TABLE),
+                "proto", str(shared.RT_PROTO)]
+        for m in ecmp:
+            swap += ["nexthop", "via", m["gw"], "dev", m["iface"], "weight", "1"]
+        plan.append(("cmd", swap))
+    elif any(_route_table(r) == shared.ECMP_TABLE and shared.proto_is_ours(r.get("protocol"))
+             for r in (routes_all if isinstance(routes_all, list) else [])):
+        plan.append(("cmd", ["ip", "-4", "route", "del", "default", "table", str(shared.ECMP_TABLE)]))
 
     # 5. stale cleanup
     for have in existing:
@@ -524,33 +545,27 @@ def multipath_apply(ctx: Ctx, desired: bool) -> dict:
         result["error"] = "; ".join(errors)
         return result
 
-    members, excluded = discover_members(ctx)
-    result["excluded"] = excluded
-    if len(members) < 2:
-        plan = plan_teardown(rules, routes_all)
-        result["reason"] = "needs ≥2 connected radios"
-    else:
-        sysctl_now = read_sysctls(ctx, desired_sysctls(members).keys())
-        plan = plan_apply(members, rules, routes_all, sysctl_now)
-        result["members"] = [m["iface"] for m in members]
-    result["plan"] = plan
+    def build() -> tuple[list[tuple], list[str], list[dict], str]:
+        healthy, excluded, routable = discover_members(ctx)
+        if len(routable) < 2:
+            return plan_teardown(rules, routes_all), [], excluded, "needs ≥2 connected radios"
+        sysctl_now = read_sysctls(ctx, desired_sysctls(routable).keys())
+        plan = plan_apply(routable, rules, routes_all, sysctl_now, ecmp=healthy)
+        if len(healthy) < 2:
+            return plan, [], excluded, "waiting for radios to reach full connectivity"
+        return plan, [m["iface"] for m in healthy], excluded, ""
+
+    plan, members, excluded, reason = build()
     errors = execute(ctx, plan)
     if errors and any("Cannot find device" in e for e in errors):
         # rename / hotplug race: rediscover once
         time.sleep(1)
-        members, excluded = discover_members(ctx)
         rules, routes_all = multipath_snapshot(ctx)
-        if len(members) >= 2:
-            sysctl_now = read_sysctls(ctx, desired_sysctls(members).keys())
-            plan = plan_apply(members, rules, routes_all, sysctl_now)
-            result["members"] = [m["iface"] for m in members]
-        else:
-            plan = plan_teardown(rules, routes_all)
-            result["members"], result["reason"] = [], "needs ≥2 connected radios"
-        result["excluded"], result["plan"] = excluded, plan
+        plan, members, excluded, reason = build()
         errors = execute(ctx, plan)
-    result["error"] = "; ".join(errors)
-    result["active"] = bool(result["members"]) and not errors
+    result.update(plan=plan, members=members, excluded=excluded, reason=reason,
+                  error="; ".join(errors))
+    result["active"] = bool(members) and not errors
     return result
 
 
