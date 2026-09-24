@@ -19,7 +19,9 @@ Item {
     readonly property real yTop: -30
     readonly property real yBottom: -90
     readonly property real windowS: 60
-    readonly property var gridLines: [-30, -50, -65, -75, -90]
+    // Labelled every 20 dB: -65 / -75 are only 10 dB apart and collide at
+    // this height; the good / warn / bad bands still mark those thresholds.
+    readonly property var gridLines: [-30, -50, -70, -90]
     readonly property real nowTs: app.doc && app.doc.sampled_at ? app.doc.sampled_at : Date.now() / 1000
     readonly property var series: app.radios
     readonly property real smallFont: Math.max(9, Kirigami.Theme.defaultFont.pixelSize - 2)
@@ -30,7 +32,7 @@ Item {
     readonly property real plotW: Math.max(1, width - leftPad - rightPad)
     readonly property real plotH: Math.max(1, height - bottomPad)
 
-    implicitHeight: Kirigami.Units.gridUnit * 5
+    implicitHeight: Kirigami.Units.gridUnit * 4.5
 
     function xFor(ts) {
         return (ts - (nowTs - windowS)) / windowS * plotW;
@@ -222,6 +224,16 @@ Item {
                 font.bold: endLabel.modelData.selected
             }
         }
+    }
+
+    // Caption inside the plot instead of a header line above it.
+    PlasmaComponents3.Label {
+        x: graph.leftPad + 4
+        y: 1
+        text: "signal · last 60 s"
+        color: Kirigami.Theme.disabledTextColor
+        font.family: graph.app.monospaceFamily
+        font.pixelSize: graph.smallFont
     }
 
     PlasmaComponents3.Label {

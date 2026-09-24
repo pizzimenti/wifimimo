@@ -806,7 +806,7 @@ PlasmoidItem {
               available: live && !!root.data.signal_avg_dbm },
             { label: "Antenna 1", value: antennaSignalAt(0), hist: "sig_ant0", kind: "signal", available: live && n >= 1 },
             { label: "Antenna 2", value: antennaSignalAt(1), hist: "sig_ant1", kind: "signal", available: live && n >= 2 },
-            { label: "Spread", value: spreadValue(), hist: "sig_spread", kind: "spread", suffix: "warn >15",
+            { label: "Spread", value: spreadValue(), hist: "sig_spread", kind: "spread",
               available: live && n >= 2 }
         ];
     }
@@ -896,20 +896,20 @@ PlasmoidItem {
     }
 
     fullRepresentation: PlasmaExtras.Representation {
-        // Fixed size. The popup grows upward from a bottom panel, so any
-        // change in content height would move every row above it — that's
-        // what made the card buttons jump when a card went down. Everything
-        // is pinned to the top; the per-card body scrolls if it's too tall.
-        // 36 grid units keeps the controls, graph, selector and the card's
-        // headline + SIGNAL in view; RATES / MCS / RETRIES scroll.
-        readonly property real fixedHeight: Math.min(Kirigami.Units.gridUnit * 36,
-                                                     Screen.desktopAvailableHeight * 0.9)
+        // Sized exactly to the content, no scrolling. The content's height
+        // is constant: every card (up, down, or switched off) renders the
+        // same skeleton, notes live on section-header lines and flag chips
+        // on one line, so switching cards never resizes the popup or moves
+        // the card buttons. Dense rows keep it well under the screen height
+        // (~740 px at 18 px/gridUnit vs 879 px available on a 1200p/130%
+        // laptop with a 44 px panel).
+        readonly property real fitHeight: contentColumn.implicitHeight + 2 * Kirigami.Units.smallSpacing
         Layout.minimumWidth:  Kirigami.Units.gridUnit * 30
         Layout.maximumWidth:  Kirigami.Units.gridUnit * 30
         Layout.preferredWidth: Kirigami.Units.gridUnit * 30
-        Layout.minimumHeight: fixedHeight
-        Layout.maximumHeight: fixedHeight
-        Layout.preferredHeight: fixedHeight
+        Layout.minimumHeight: fitHeight
+        Layout.maximumHeight: fitHeight
+        Layout.preferredHeight: fitHeight
         collapseMarginsHint: true
 
         ColumnLayout {
@@ -964,17 +964,10 @@ PlasmoidItem {
                 app: root
             }
 
-            PlasmaComponents3.Label {
-                Layout.fillWidth: true
-                Layout.topMargin: Kirigami.Units.smallSpacing
-                text: "ALL RADIOS  signal, last 60 s"
-                font.bold: true
-                font.family: root.monospaceFamily
-            }
-
             SignalGraph {
                 Layout.fillWidth: true
-                Layout.preferredHeight: Kirigami.Units.gridUnit * 5
+                Layout.topMargin: Kirigami.Units.smallSpacing
+                Layout.preferredHeight: Kirigami.Units.gridUnit * 4.5
                 app: root
             }
 
@@ -1090,440 +1083,10 @@ PlasmoidItem {
                 }
             }
 
-            PlasmaComponents3.ScrollView {
-                id: cardScroll
+            CardPanel {
                 Layout.fillWidth: true
-                Layout.fillHeight: true
-                contentWidth: availableWidth
-
-                ColumnLayout {
-                    id: cardBody
-                    width: cardScroll.availableWidth
-                    spacing: 2
-
-            // Card panel: identical structure whether the card is up or down.
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: Kirigami.Units.smallSpacing
-
-                PlasmaComponents3.Label {
-                    text: root.data.card_name || root.data.iface || "—"
-                    font.bold: true
-                    font.pixelSize: Math.round(Kirigami.Theme.defaultFont.pixelSize * 1.35)
-                    font.family: root.monospaceFamily
-                }
-                PlasmaComponents3.Label {
-                    text: root.data.iface || ""
-                    color: Kirigami.Theme.disabledTextColor
-                    font.family: root.monospaceFamily
-                }
-                Item {
-                    Layout.fillWidth: true
-                }
-                PlasmaComponents3.Label {
-                    visible: root.hasRecentData
-                    text: "up " + (root.data.connected_time_s > 0 ? root.fmtUptime(root.data.connected_time_s) : "?")
-                    font.family: root.monospaceFamily
-                    color: Kirigami.Theme.disabledTextColor
-                }
+                app: root
             }
-
-            PlasmaComponents3.Label {
-                Layout.fillWidth: true
-                text: root.hasRecentData
-                      ? (root.data.ssid_display || root.data.ssid || root.data.bssid) + "  (" + root.data.bssid + ")"
-                      : root.statusReason()
-                elide: Text.ElideRight
-                font.bold: true
-                font.pixelSize: Math.round(Kirigami.Theme.defaultFont.pixelSize * 1.15)
-                font.family: root.monospaceFamily
-                color: root.hasRecentData ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.disabledTextColor
-            }
-
-            PlasmaComponents3.Label {
-                Layout.fillWidth: true
-                text: root.hasRecentData ? root.freqLine() + "   " + root.linkStatusLine() : "—"
-                elide: Text.ElideRight
-                font.family: root.monospaceFamily
-                color: Kirigami.Theme.textColor
-            }
-
-            PlasmaComponents3.Label {
-                Layout.fillWidth: true
-                text: root.deviceLine() || "—"
-                elide: Text.ElideRight
-                font.family: root.monospaceFamily
-                color: Kirigami.Theme.disabledTextColor
-                font.pixelSize: Math.max(9, Kirigami.Theme.defaultFont.pixelSize - 1)
-            }
-
-            FlagChips {
-                Layout.fillWidth: true
-                Layout.topMargin: 2
-                flags: root.data.flags || []
-                live: root.hasRecentData
-                fontFamily: root.monospaceFamily
-            }
-
-            // Telemetry: always laid out; without a recent sample values
-            // read "—", meters are empty tracks and the block is dimmed, so
-            // nothing masquerades as a real zero reading.
-            ColumnLayout {
-                Layout.fillWidth: true
-                Layout.topMargin: Kirigami.Units.smallSpacing
-                opacity: root.hasRecentData ? 1.0 : 0.45
-                spacing: 2
-
-            PlasmaComponents3.Label {
-                Layout.fillWidth: true
-                text: "SIGNAL"
-                font.bold: true
-                font.family: root.monospaceFamily
-                color: Kirigami.Theme.textColor
-            }
-
-            PlasmaComponents3.Label {
-                Layout.fillWidth: true
-                // Visible whenever the kernel has reported the link is up but
-                // the chain-signal list is empty — the per-antenna telemetry
-                // gap is structural (driver doesn't surface it for MLD
-                // stations), not transient.
-                visible: root.hasRecentData && root.antennaSignals.length === 0
-                text: "Per-antenna data unavailable (MLD-level signal only)"
-                wrapMode: Text.Wrap
-                color: Kirigami.Theme.disabledTextColor
-                font.family: root.monospaceFamily
-                font.italic: true
-                font.pixelSize: Math.max(9, Kirigami.Theme.defaultFont.pixelSize - 2)
-            }
-
-            Repeater {
-                model: root.buildSignalModel()
-
-                delegate: ColumnLayout {
-                    id: signalBlock
-                    required property var modelData
-                    Layout.fillWidth: true
-                    spacing: 0
-
-                    readonly property real frac: signalBlock.modelData.kind === "spread"
-                        ? root.spreadFraction(signalBlock.modelData.value)
-                        : root.signalFractionForDbm(signalBlock.modelData.value)
-                    readonly property var fillColor: signalBlock.modelData.kind === "spread"
-                        ? root.alertColor(signalBlock.modelData.value, 10, 15)
-                        : root.signalColorForDbm(signalBlock.modelData.value)
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: Kirigami.Units.largeSpacing
-
-                        PlasmaComponents3.Label {
-                            Layout.preferredWidth: Kirigami.Units.gridUnit * 6
-                            text: signalBlock.modelData.label
-                            color: Kirigami.Theme.disabledTextColor
-                            font.family: root.monospaceFamily
-                        }
-
-                        PlasmaComponents3.Label {
-                            Layout.preferredWidth: Kirigami.Units.gridUnit * 5
-                            text: signalBlock.modelData.available
-                                  ? Number(signalBlock.modelData.value).toFixed(0) + (signalBlock.modelData.kind === "spread" ? " dB" : " dBm")
-                                  : (root.hasRecentData ? "n/a" : "—")
-                            color: signalBlock.modelData.available ? signalBlock.fillColor : Kirigami.Theme.disabledTextColor
-                            font.family: root.monospaceFamily
-                        }
-
-                        PlasmaComponents3.Label {
-                            Layout.fillWidth: true
-                            text: signalBlock.modelData.available
-                                  ? Number(root.histMin(signalBlock.modelData.hist, signalBlock.modelData.value)).toFixed(0)
-                                    + " .. "
-                                    + Number(root.histMax(signalBlock.modelData.hist, signalBlock.modelData.value)).toFixed(0)
-                                    + (signalBlock.modelData.suffix ? "  " + signalBlock.modelData.suffix : "")
-                                  : ""
-                            horizontalAlignment: Text.AlignRight
-                            color: Kirigami.Theme.disabledTextColor
-                            font.family: root.monospaceFamily
-                        }
-                    }
-
-                    MeterBar {
-                        placeholder: !signalBlock.modelData.available
-                        fraction: signalBlock.frac
-                        fillColor: signalBlock.fillColor
-                        markerFraction: signalBlock.modelData.kind === "spread"
-                            ? root.spreadFraction(root.histMax(signalBlock.modelData.hist, signalBlock.modelData.value))
-                            : root.signalFractionForDbm(root.histMax(signalBlock.modelData.hist, signalBlock.modelData.value))
-                    }
-                }
-            }
-
-            PlasmaComponents3.Label {
-                Layout.fillWidth: true
-                Layout.topMargin: 10
-                text: "RATES"
-                font.bold: true
-                font.family: root.monospaceFamily
-                color: Kirigami.Theme.textColor
-            }
-
-            Repeater {
-                model: [
-                    { label: "TX", rate: root.data.tx_rate_mbps, nss: root.data.tx_nss, mcs: root.data.tx_mcs, rates: root.display.tx_rates_mbps, nss_dots: root.display.tx_nss_dots, gi_label: root.display.tx_gi_label, hist: "tx_rate" },
-                    { label: "RX", rate: root.data.rx_rate_mbps, nss: root.data.rx_nss, mcs: root.data.rx_mcs, rates: root.display.rx_rates_mbps, nss_dots: root.display.rx_nss_dots, gi_label: root.display.rx_gi_label, hist: "rx_rate" }
-                ]
-
-                delegate: ColumnLayout {
-                    id: rateBlock
-                    required property var modelData
-                    Layout.fillWidth: true
-                    spacing: 0
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: Kirigami.Units.largeSpacing
-
-                        PlasmaComponents3.Label {
-                            Layout.preferredWidth: Kirigami.Units.gridUnit * 3
-                            text: rateBlock.modelData.label
-                            color: Kirigami.Theme.disabledTextColor
-                            font.family: root.monospaceFamily
-                        }
-
-                        PlasmaComponents3.Label {
-                            Layout.preferredWidth: Kirigami.Units.gridUnit * 6
-                            text: root.hasRecentData ? Number(rateBlock.modelData.rate).toFixed(1) + " Mb/s" : "—"
-                            font.family: root.monospaceFamily
-                        }
-
-                        PlasmaComponents3.Label {
-                            Layout.fillWidth: true
-                            text: root.hasRecentData
-                                  ? Number(root.histMin(rateBlock.modelData.hist, rateBlock.modelData.rate)).toFixed(0)
-                                    + " .. "
-                                    + Number(root.histMax(rateBlock.modelData.hist, rateBlock.modelData.rate)).toFixed(0)
-                                    + "  NSS " + rateBlock.modelData.nss + " " + rateBlock.modelData.nss_dots
-                                    + (rateBlock.modelData.gi_label ? "  GI " + rateBlock.modelData.gi_label : "")
-                                  : ""
-                            horizontalAlignment: Text.AlignRight
-                            color: Kirigami.Theme.disabledTextColor
-                            font.family: root.monospaceFamily
-                        }
-                    }
-
-                    MeterBar {
-                        id: rateBar
-                        readonly property real ceiling: {
-                            const rates = rateBlock.modelData.rates;
-                            if (rates && rates.length > 0) {
-                                return Math.max(rates[rates.length - 1], 1.0);
-                            }
-                            return Math.max(rateBlock.modelData.rate, 1.0);
-                        }
-                        placeholder: !root.hasRecentData
-                        fraction: rateBlock.modelData.rate / ceiling
-                        markerFraction: root.histMax(rateBlock.modelData.hist, rateBlock.modelData.rate) / ceiling
-                        fillColor: Kirigami.Theme.positiveTextColor
-                    }
-                }
-            }
-
-            PlasmaComponents3.Label {
-                Layout.fillWidth: true
-                Layout.topMargin: 10
-                text: "MCS INDEX"
-                font.bold: true
-                font.family: root.monospaceFamily
-                color: Kirigami.Theme.textColor
-            }
-
-            Repeater {
-                model: [
-                    { label: "TX", mcs: root.data.tx_mcs, rate: root.data.tx_rate_mbps, rates: root.display.tx_rates_mbps, hist: "tx_mcs" },
-                    { label: "RX", mcs: root.data.rx_mcs, rate: root.data.rx_rate_mbps, rates: root.display.rx_rates_mbps, hist: "rx_mcs" }
-                ]
-
-                delegate: ColumnLayout {
-                    id: mcsBlock
-                    required property var modelData
-                    readonly property var rates: mcsBlock.modelData.rates || []
-                    readonly property int gridCount: mcsBlock.rates.length > 0 ? mcsBlock.rates.length : root.display.mcs_grid_count
-                    Layout.fillWidth: true
-                    spacing: 1
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: Kirigami.Units.smallSpacing
-
-                        PlasmaComponents3.Label {
-                            text: mcsBlock.modelData.label + "  MCS " + root.displayMcs(mcsBlock.modelData.mcs)
-                            font.family: root.monospaceFamily
-                        }
-
-                        PlasmaComponents3.Label {
-                            text: root.hasRecentData ? Number(mcsBlock.modelData.rate).toFixed(0) + " Mb/s" : "—"
-                            color: root.mcsColor(
-                                Math.max(0, mcsBlock.modelData.mcs),
-                                mcsBlock.modelData.mcs,
-                                mcsBlock.modelData.mcs,
-                                mcsBlock.modelData.mcs,
-                                Math.max(0, mcsBlock.gridCount - 1)
-                            )
-                            font.family: root.monospaceFamily
-                        }
-
-                        Item {
-                            Layout.fillWidth: true
-                        }
-
-                        PlasmaComponents3.Label {
-                            text: mcsBlock.modelData.mcs >= 0
-                                  ? ("min " + Number(root.histMin(mcsBlock.modelData.hist, mcsBlock.modelData.mcs)).toFixed(0)
-                                     + "  max " + Number(root.histMax(mcsBlock.modelData.hist, mcsBlock.modelData.mcs)).toFixed(0))
-                                  : "min -  max -"
-                            font.family: root.monospaceFamily
-                        }
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 1
-
-                        Repeater {
-                            model: mcsBlock.gridCount
-
-                            delegate: Rectangle {
-                                required property int index
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: Kirigami.Units.gridUnit * 1.4
-                                radius: 3
-                                color: root.mcsColor(
-                                    index,
-                                    mcsBlock.modelData.mcs,
-                                    mcsBlock.modelData.mcs >= 0 ? root.histMin(mcsBlock.modelData.hist, mcsBlock.modelData.mcs) : -1,
-                                    mcsBlock.modelData.mcs >= 0 ? root.histMax(mcsBlock.modelData.hist, mcsBlock.modelData.mcs) : -1,
-                                    Math.max(0, mcsBlock.gridCount - 1)
-                                )
-
-                                PlasmaComponents3.Label {
-                                    anchors.centerIn: parent
-                                    text: index
-                                    color: index === mcsBlock.modelData.mcs ? Kirigami.Theme.backgroundColor : Kirigami.Theme.textColor
-                                    font.family: root.monospaceFamily
-                                    font.pixelSize: Math.max(9, Kirigami.Theme.defaultFont.pixelSize - 2)
-                                }
-                            }
-                        }
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 1
-
-                        Repeater {
-                            model: mcsBlock.gridCount
-
-                            // Wrap each rate label in an Item so the row's
-                            // Layout.fillWidth distributes equal widths (Item
-                            // has implicitWidth 0) — using a bare Label gave
-                            // proportional widths based on text content, so
-                            // "144" claimed less width than "2882" and the
-                            // rate centers drifted off the MCS cell centers.
-                            delegate: Item {
-                                required property int index
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: rateLabel.implicitHeight
-
-                                PlasmaComponents3.Label {
-                                    id: rateLabel
-                                    anchors.centerIn: parent
-                                    text: parent.index < mcsBlock.rates.length ? mcsBlock.rates[parent.index] : "-"
-                                    color: Kirigami.Theme.disabledTextColor
-                                    font.family: root.monospaceFamily
-                                    font.pixelSize: Math.max(9, Kirigami.Theme.defaultFont.pixelSize - 2)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            PlasmaComponents3.Label {
-                Layout.fillWidth: true
-                Layout.topMargin: 10
-                text: "TX RETRIES"
-                font.bold: true
-                font.family: root.monospaceFamily
-                color: Kirigami.Theme.textColor
-            }
-
-            PlasmaComponents3.Label {
-                Layout.fillWidth: true
-                // Visible when an MLD link is active. mt7925 (and likely
-                // other current Mediatek MLO firmware) doesn't surface
-                // tx_retries / tx_failed at any kernel level when the
-                // station is MLD-aggregated — confirmed empty across
-                // iw, nl80211, sysfs netdev, debugfs phy, and the mt76
-                // driver-private debugfs nodes. A persistent 0% on a
-                // visibly degraded link is honest reporting of the gap,
-                // not a wifimimo bug.
-                visible: root.linkCount > 0
-                text: "Counter unreliable on MLD link (driver/firmware gap)"
-                wrapMode: Text.Wrap
-                color: Kirigami.Theme.disabledTextColor
-                font.family: root.monospaceFamily
-                font.italic: true
-                font.pixelSize: Math.max(9, Kirigami.Theme.defaultFont.pixelSize - 2)
-            }
-
-            ColumnLayout {
-                id: retryBlock
-                Layout.fillWidth: true
-                spacing: 0
-
-                readonly property real retryPct: Number(root.data && root.data.retry_10s_pct !== undefined ? root.data.retry_10s_pct : 0)
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Kirigami.Units.mediumSpacing
-
-                    PlasmaComponents3.Label {
-                        Layout.preferredWidth: Kirigami.Units.gridUnit * 6
-                        text: "Retry rate"
-                        color: Kirigami.Theme.disabledTextColor
-                        font.family: root.monospaceFamily
-                    }
-
-                    PlasmaComponents3.Label {
-                        Layout.preferredWidth: Kirigami.Units.gridUnit * 5
-                        text: root.hasRecentData ? retryBlock.retryPct.toFixed(1) + "%" : "—"
-                        color: root.hasRecentData ? root.alertColor(retryBlock.retryPct, 10, 30) : Kirigami.Theme.disabledTextColor
-                        font.family: root.monospaceFamily
-                    }
-
-                    PlasmaComponents3.Label {
-                        Layout.fillWidth: true
-                        text: root.hasRecentData
-                              ? root.histMax("retry_pct", retryBlock.retryPct).toFixed(1) + "% max  "
-                                + root.data.retry_10s_retries + "/" + root.data.retry_10s_packets + " retries  fail " + root.data.retry_10s_failed
-                              : ""
-                        horizontalAlignment: Text.AlignRight
-                        color: Kirigami.Theme.disabledTextColor
-                        font.family: root.monospaceFamily
-                    }
-                }
-
-                MeterBar {
-                    placeholder: !root.hasRecentData
-                    fraction: retryBlock.retryPct / 100.0
-                    markerFraction: root.histMax("retry_pct", retryBlock.retryPct) / 100.0
-                    fillColor: root.alertColor(retryBlock.retryPct, 10, 30)
-                }
-            }
-
-            }  // end of telemetry
-                }  // end of cardBody
-            }  // end of cardScroll
         }  // end of contentColumn
     }
 
