@@ -4,17 +4,19 @@
 from __future__ import annotations
 
 import csv
-import io
 import os
 import signal
-import subprocess
 import sys
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
+import wifimimo_radio as radio
+import wifimimo_shared as shared
 from wifimimo_core import (
+    ALERT_RETRY_PCT,
+    ALERT_SIGNAL_DBM,
     HISTORY_COLUMNS,
     HISTORY_DIR,
     STATE_PATH,
@@ -29,9 +31,6 @@ from wifimimo_core import (
 )
 
 
-ALERT_DIFF_DBM = 15
-ALERT_SIGNAL_DBM = -75
-ALERT_RETRY_PCT = 30
 POLL_FAST_S = 1.0
 POLL_SLOW_S = 5.0
 TRANSITION_COOLDOWN_S = 30.0
@@ -63,6 +62,14 @@ class WifimimoDaemon:
         self._history_file = None
         self._history_writer = None
         self._history_date: str = ""
+        # Per-radio memory keyed by permanent MAC, so a rename or replug
+        # keeps a radio's graph line and colour.
+        self.throughput = radio.ThroughputTracker()
+        self.signal_rings = radio.SignalRing()
+        self.radio_colors = radio.RadioColors()
+        self.name_overrides = radio.NameOverrides()
+        # Optional NetworkManager follower (multipath); injected by main().
+        self.follower = None
 
     def current_ifaces(self) -> list[str]:
         ifaces = [self.pinned_iface] if self.pinned_iface else discover_wifi_ifaces()
@@ -85,26 +92,78 @@ class WifimimoDaemon:
         )
         while self.running:
             loop_start = time.monotonic()
-            states: dict[str, dict] = {}
-            for iface in self.current_ifaces():
-                state = collect(iface)
-                state["timestamp"] = int(time.time())
-                state.update(collect_power(iface))
-                self.update_retry_window(iface, state, loop_start)
-                issues = self.collect_issues(state)
-                state["issue_count"] = len(issues)
-                state["display"] = derive_display(state)
-                states[iface] = state
-            doc = build_multi_state(states)
-            # With zero cards the primary defaults carry timestamp 0; stamp
-            # the document anyway so consumers can tell the daemon is alive.
-            doc["timestamp"] = int(time.time())
+            doc, states = self.poll_once(loop_start)
             poll_interval = self.poll_interval_for_states(states, loop_start)
             write_state(self.state_path, doc)
             for state in states.values():
                 self.write_history(state)
             elapsed = time.monotonic() - loop_start
             time.sleep(max(0.05, poll_interval - elapsed))
+
+    def enrich(self, iface: str, state: dict, ipv4: dict, managed_ids: set,
+               wall: float, mono: float) -> None:
+        # A handful of sysfs reads; re-read every poll so a stick that
+        # re-enumerates at a different USB speed is noticed immediately.
+        info = radio.collect_device_info(iface)
+        state.update(info)
+        state.update(ipv4.get(iface, {}))
+        key = info.get("perm_mac") or iface
+        state["card_name"] = radio.card_name(dict(info, iface=iface), self.name_overrides.get())
+        state["internal"] = info.get("bus") == "pci" and info.get("dev_id") in managed_ids
+        state["rx_mbps"], state["tx_mbps"] = self.throughput.sample(key, iface, mono)
+        state["color_index"] = self.radio_colors.index(key)
+        if state.get("connected"):
+            self.signal_rings.append(key, wall, int(state.get("signal_dbm", 0) or 0))
+        state["signal_history"] = self.signal_rings.snapshot(key, wall)
+
+    def poll_once(self, loop_start: float) -> tuple[dict, dict[str, dict]]:
+        wall = time.time()
+        ipv4 = radio.collect_ipv4()
+        internal = radio.read_internal_status()
+        managed_ids = {e["id"] for e in shared.read_internal_conf()}
+        states: dict[str, dict] = {}
+        for iface in self.current_ifaces():
+            state = collect(iface)
+            state["timestamp"] = int(wall)
+            state.update(collect_power(iface))
+            self.update_retry_window(iface, state, loop_start)
+            self.enrich(iface, state, ipv4, managed_ids, wall, loop_start)
+            states[iface] = state
+
+        cross = radio.cross_iface_flags(states)
+        for iface, state in states.items():
+            state["flags"] = (
+                radio.link_health_flags(state)
+                + radio.device_flags(state)
+                + cross.get(iface, [])
+            )
+            state["issue_count"] = len(state["flags"])
+            state["display"] = derive_display(state)
+
+        nm_status: dict = {}
+        if self.follower is not None:
+            try:
+                nm_status = self.follower.step(states, wall)
+            except Exception as exc:  # never let NM trouble stop telemetry
+                nm_status = {"error": str(exc)}
+            for iface, extra in (nm_status.pop("iface_flags", {}) or {}).items():
+                if iface in states:
+                    states[iface]["flags"].extend(extra)
+                    states[iface]["issue_count"] = len(states[iface]["flags"])
+
+        doc = build_multi_state(states)
+        # With zero cards the primary defaults carry timestamp 0; stamp
+        # the document anyway so consumers can tell the daemon is alive.
+        doc["timestamp"] = int(wall)
+        doc["sampled_at"] = round(wall, 1)
+        multipath_desired = shared.MULTIPATH_FLAG.exists()
+        doc["multipath"] = radio.read_multipath_status(
+            live=None if multipath_desired else {"active": False, "members": []}
+        )
+        doc["internal_card"] = internal
+        doc["helper_available"] = radio.helper_available()
+        doc["nm"] = nm_status
+        return doc, states
 
     def stop(self, *_args) -> None:
         self.running = False
@@ -293,45 +352,6 @@ class WifimimoDaemon:
         if packet_delta > 0:
             state["retry_10s_pct"] = retry_delta * 100.0 / packet_delta
 
-    def collect_issues(self, state: dict) -> list[tuple[str, str, str]]:
-        issues: list[tuple[str, str, str]] = []
-        if not state.get("connected"):
-            return issues
-
-        antennas = [int(value) for value in state.get("signal_antennas", [])]
-        antenna_count = len(antennas)
-        # Empty antenna list means the driver doesn't expose chain signal at
-        # all (mt7925 in MLO mode aggregates everything to MLD level). That's
-        # a telemetry gap, not a degraded MIMO state — only alert when the
-        # list is present but short (= an antenna actually dropped offline).
-        if 0 < antenna_count < 2:
-            issues.append(("normal", "MIMO Offline", f"Only {antenna_count}/2 antennas reporting"))
-        for index, dbm in enumerate(antennas, start=1):
-            if dbm < ALERT_SIGNAL_DBM:
-                issues.append(("normal", f"Weak Signal — Antenna {index}", f"{dbm} dBm  (threshold {ALERT_SIGNAL_DBM} dBm)"))
-        if len(antennas) >= 2:
-            spread = max(antennas) - min(antennas)
-            if spread > ALERT_DIFF_DBM:
-                issues.append(("normal", "Antenna Imbalance", f"{spread} dBm spread  ({min(antennas)} to {max(antennas)} dBm)"))
-
-        tx_nss = int(state.get("tx_nss", 0) or 0)
-        rx_nss = int(state.get("rx_nss", 0) or 0)
-        # Require BOTH directions to have reported NSS before flagging
-        # "MIMO Degraded" — otherwise a partial association where only one
-        # direction has rate-info yet (tx=1, rx=0) trips a transient
-        # false-positive alert. With both populated and max<2, every
-        # active stream is single-stream → genuine 1x1 collapse.
-        if tx_nss > 0 and rx_nss > 0 and max(tx_nss, rx_nss) < 2:
-            issues.append((
-                "critical",
-                "MIMO Degraded",
-                f"Both directions running NSS 1  (TX {tx_nss}, RX {rx_nss}; expected 2x2)",
-            ))
-
-        retry_pct = float(state.get("retry_10s_pct", 0.0) or 0.0)
-        if retry_pct > ALERT_RETRY_PCT:
-            issues.append(("normal", "High Interference", f"10s TX retry rate: {retry_pct:.1f}%  (threshold {ALERT_RETRY_PCT}%)"))
-        return issues
 
 def main() -> int:
     # WIFI_IFACE pins the daemon to one card; unset/empty auto-discovers
