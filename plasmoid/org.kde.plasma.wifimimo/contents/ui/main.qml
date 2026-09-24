@@ -52,9 +52,24 @@ PlasmoidItem {
     })
 
     readonly property var defaultData: ({
-        schema_version: 3,
+        schema_version: 4,
         connected: false,
         iface: "",
+        card_name: "",
+        perm_mac: "",
+        bus: "",
+        driver: "",
+        dev_id: "",
+        usb_speed_mbps: 0,
+        operstate: "",
+        ipv4: "",
+        prefixlen: 0,
+        rx_mbps: 0.0,
+        tx_mbps: 0.0,
+        signal_history: [],
+        flags: [],
+        color_index: -1,
+        internal: false,
         ssid: "",
         ssid_display: "",
         bssid: "",
@@ -99,6 +114,44 @@ PlasmoidItem {
     property var ifaceList: []
     property string selectedIface: ""   // sticky user pick; "" = auto/primary
     property string shownIface: ""      // card actually rendered this poll
+    readonly property string internalGhost: "@internal"  // selector id for a switched-off internal card
+
+    // Schema v4: the whole document (multipath, internal_card, nm, every
+    // card) and a per-radio summary model for the graph / traffic / selector.
+    property var doc: ({})
+    property var radios: []
+    readonly property var internalCard: doc && doc.internal_card ? doc.internal_card : ({})
+    readonly property bool internalGhostShown: !!internalCard.managed && !internalCard.present
+    readonly property bool onlyConnectedIsInternal: {
+        const up = radios.filter(r => r.connected);
+        return up.length === 1 && up[0].internal;
+    }
+    readonly property string trafficCaption: {
+        const mp = doc && doc.multipath ? doc.multipath : {};
+        if (mp.active) {
+            return "multipath · " + (mp.members || []).length + " radios";
+        }
+        const primary = radios.find(r => r.iface === (doc ? doc.iface : ""));
+        return primary && primary.connected ? "single path · " + primary.name : "";
+    }
+
+    // Root helper (pkexec; polkit allows the active session without a prompt).
+    readonly property string helperPath: "/usr/local/lib/wifimimo/wifimimo-helper"
+    readonly property var helperActions: ({
+        "multipath": ["enable", "disable"],
+        "internal": ["enable", "disable"]
+    })
+    property string helperBusy: ""
+    property string helperError: ""
+
+    // Radio palette (validated for colour-vision-deficiency separation).
+    // Red / yellow / green are left out: they mean good / warn / bad here.
+    readonly property bool darkTheme: {
+        const c = Kirigami.Theme.backgroundColor;
+        return (0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b) < 0.5;
+    }
+    readonly property var paletteLight: ["#2a78d6", "#eb6834", "#1baf7a", "#4a3aa7", "#e87ba4"]
+    readonly property var paletteDark: ["#3987e5", "#d95926", "#199e70", "#9085e9", "#d55181"]
 
     property real histSigOverallMinValue: 0
     property real histSigOverallMaxValue: 0
@@ -366,7 +419,124 @@ PlasmoidItem {
         if (!Array.isArray(merged.links)) {
             merged.links = [];
         }
+        if (!Array.isArray(merged.flags)) {
+            merged.flags = [];
+        }
+        if (!Array.isArray(merged.signal_history)) {
+            merged.signal_history = [];
+        }
         return merged;
+    }
+
+    function radioColor(index) {
+        if (index === undefined || index < 0) {
+            return Kirigami.Theme.disabledTextColor;
+        }
+        const pal = darkTheme ? paletteDark : paletteLight;
+        return pal[index % pal.length];
+    }
+
+    function worstSeverity(flags) {
+        const rank = { info: 0, warn: 1, crit: 2 };
+        let worst = "";
+        for (const f of (flags || [])) {
+            if (worst === "" || (rank[f.severity] || 0) > (rank[worst] || 0)) {
+                worst = f.severity || "";
+            }
+        }
+        return worst;
+    }
+
+    function buildRadios(list, map) {
+        const out = [];
+        for (const name of list) {
+            const s = map[name];
+            if (!s || typeof s !== "object") {
+                continue;
+            }
+            out.push({
+                iface: name,
+                name: s.card_name || name,
+                color: radioColor(s.color_index),
+                connected: !!s.connected,
+                internal: !!s.internal,
+                rx: Number(s.rx_mbps) || 0,
+                tx: Number(s.tx_mbps) || 0,
+                history: Array.isArray(s.signal_history) ? s.signal_history : [],
+                worst: worstSeverity(s.flags),
+                selected: name === shownIface
+            });
+        }
+        return out;
+    }
+
+    // Allow-listed helper verbs only; the command string is never built
+    // from anything but these literals.
+    function runHelper(verb, action) {
+        const allowed = helperActions[verb];
+        if (!allowed || allowed.indexOf(action) < 0 || helperBusy !== "") {
+            return;
+        }
+        helperBusy = verb + " " + action;
+        helperError = "";
+        helperWatchdog.restart();
+        helperSource.connectSource("pkexec " + helperPath + " " + verb + " " + action);
+    }
+
+    function finishHelper(sourceData) {
+        const code = sourceData["exit code"];
+        let result = null;
+        try {
+            result = JSON.parse((sourceData.stdout || "").trim().split("\n").pop() || "{}");
+        } catch (e) {
+            result = null;
+        }
+        if (code === 126 || code === 127) {
+            helperError = "Not authorized, or the helper isn't installed (re-run install.sh).";
+        } else if (code !== 0 || (result && result.error)) {
+            helperError = (result && result.error) ? result.error : ("helper exited " + code);
+        }
+        helperBusy = "";
+        helperWatchdog.stop();
+        pollNow();
+    }
+
+    function statusReason() {
+        if (selectedIface === internalGhost && internalGhostShown) {
+            return "Internal card is off (removed from the PCI bus)";
+        }
+        if (!data.iface) {
+            return "No wifi interface detected";
+        }
+        if (data.connected && stale) {
+            return "Stale data (daemon last seen " + fmtClock(data.timestamp) + ")";
+        }
+        if (data.operstate === "dormant") {
+            return "Connecting…";
+        }
+        return "Not associated";
+    }
+
+    function deviceLine() {
+        const parts = [];
+        if (data.bus === "usb") {
+            const gen = data.usb_speed_mbps >= 5000 ? "USB 3" : data.usb_speed_mbps > 0 ? "USB 2" : "USB";
+            parts.push(gen + (data.usb_speed_mbps > 0
+                ? " · " + (data.usb_speed_mbps >= 1000 ? (data.usb_speed_mbps / 1000) + " Gb/s" : data.usb_speed_mbps + " Mb/s")
+                : ""));
+        } else if (data.bus === "pci") {
+            parts.push("PCIe");
+        }
+        if (data.driver) {
+            parts.push(data.driver);
+        }
+        if (data.perm_mac) {
+            parts.push(data.perm_mac);
+        }
+        if (data.ipv4) {
+            parts.push(data.ipv4 + "/" + data.prefixlen);
+        }
+        return parts.join(" · ");
     }
 
     function parseState(rawText) {
@@ -394,23 +564,34 @@ PlasmoidItem {
         // falls back to the primary until the card returns.
         let view = parsed;
         let list = [];
+        let map = {};
         if (parsed && typeof parsed === "object") {
-            const map = (parsed.interfaces && typeof parsed.interfaces === "object")
+            map = (parsed.interfaces && typeof parsed.interfaces === "object")
                 ? parsed.interfaces : {};
             if (Array.isArray(parsed.ifaces) && parsed.ifaces.length > 0) {
                 list = parsed.ifaces;
             } else if (parsed.iface) {
                 list = [parsed.iface];
             }
-            if (selectedIface && map[selectedIface]
+            if (selectedIface === internalGhost) {
+                // The internal card's panel: live card if it's back, else a
+                // named, empty skeleton so the layout keeps its shape.
+                const card = parsed.internal_card || {};
+                view = card.iface && map[card.iface]
+                    ? map[card.iface]
+                    : { iface: "", card_name: "Built-in", connected: false,
+                        timestamp: parsed.timestamp || 0 };
+            } else if (selectedIface && map[selectedIface]
                     && typeof map[selectedIface] === "object") {
                 view = map[selectedIface];
             }
         }
         ifaceList = list;
+        doc = (parsed && typeof parsed === "object") ? parsed : {};
 
         const next = validateState(view);
         shownIface = next.iface || "";
+        radios = buildRadios(list, map);
 
         // Switching cards invalidates min/max history even when both cards
         // are associated to the same BSSID, so track it as its own reset
@@ -621,25 +802,21 @@ PlasmoidItem {
     }
 
     function buildSignalModel() {
-        // Only include per-antenna rows when the driver actually exposes a
-        // chain-signal list. mt7925 in MLO mode aggregates to MLD-level and
-        // leaves NL80211_STA_INFO_CHAIN_SIGNAL empty; rendering "0 dBm" rows
-        // for absent antennas is more misleading than just omitting them.
-        // Same logic for "Avg" — if signal_avg_dbm is 0 it's a default /
-        // pre-association placeholder, not a real -0 dBm reading.
-        const rows = [
-            { label: "Overall", value: root.data.signal_dbm, hist: "sig_overall", kind: "signal" }
+        // Always the same five rows so the panel never changes height.
+        // Rows the driver can't fill (mt7925 in MLO mode leaves the chain
+        // signal list empty; avg 0 is a pre-association placeholder) render
+        // as "n/a" with an empty track rather than a fake "0 dBm".
+        const live = root.hasRecentData;
+        const n = antennaSignals.length;
+        return [
+            { label: "Overall", value: root.data.signal_dbm, hist: "sig_overall", kind: "signal", available: live },
+            { label: "Avg", value: root.data.signal_avg_dbm, hist: "sig_avg", kind: "signal",
+              available: live && !!root.data.signal_avg_dbm },
+            { label: "Antenna 1", value: antennaSignalAt(0), hist: "sig_ant0", kind: "signal", available: live && n >= 1 },
+            { label: "Antenna 2", value: antennaSignalAt(1), hist: "sig_ant1", kind: "signal", available: live && n >= 2 },
+            { label: "Spread", value: spreadValue(), hist: "sig_spread", kind: "spread", suffix: "warn >15",
+              available: live && n >= 2 }
         ];
-        if (root.data.signal_avg_dbm) {
-            rows.push({ label: "Avg", value: root.data.signal_avg_dbm, hist: "sig_avg", kind: "signal" });
-        }
-        for (let i = 0; i < antennaSignals.length; ++i) {
-            rows.push({ label: "Antenna " + (i + 1), value: antennaSignals[i], hist: "sig_ant" + i, kind: "signal" });
-        }
-        if (antennaSignals.length >= 2) {
-            rows.push({ label: "Spread", value: spreadValue(), hist: "sig_spread", kind: "spread", suffix: "warn >15" });
-        }
-        return rows;
     }
 
     function displayMcs(value) {
@@ -689,6 +866,27 @@ PlasmoidItem {
         }
     }
 
+    Plasma5Support.DataSource {
+        id: helperSource
+        engine: "executable"
+        interval: 0
+        onNewData: (sourceName, sourceData) => {
+            // The engine keys sources by command string: disconnect so the
+            // same toggle can run again later.
+            helperSource.disconnectSource(sourceName);
+            root.finishHelper(sourceData);
+        }
+    }
+
+    Timer {
+        id: helperWatchdog
+        interval: 30000
+        onTriggered: {
+            root.helperError = "The helper didn't answer within 30 s.";
+            root.helperBusy = "";
+        }
+    }
+
     Timer {
         id: pollTimer
         interval: root.expanded ? root.refreshMs : root.compactRefreshMs
@@ -706,11 +904,18 @@ PlasmoidItem {
     }
 
     fullRepresentation: PlasmaExtras.Representation {
-        // No fixed height — the panel sizes to its content so we get
-        // uniform spacing between every section instead of a single
-        // fillHeight-driven slack pocket above SIGNAL.
+        // Fixed size. The popup grows upward from a bottom panel, so any
+        // change in content height would move every row above it — that's
+        // what made the card buttons jump when a card went down. Everything
+        // is pinned to the top; the per-card body scrolls if it's too tall.
+        readonly property real fixedHeight: Math.min(Kirigami.Units.gridUnit * 44,
+                                                     Screen.desktopAvailableHeight * 0.9)
         Layout.minimumWidth:  Kirigami.Units.gridUnit * 30
         Layout.maximumWidth:  Kirigami.Units.gridUnit * 30
+        Layout.preferredWidth: Kirigami.Units.gridUnit * 30
+        Layout.minimumHeight: fixedHeight
+        Layout.maximumHeight: fixedHeight
+        Layout.preferredHeight: fixedHeight
         collapseMarginsHint: true
 
         ColumnLayout {
@@ -719,12 +924,10 @@ PlasmoidItem {
                 fill: parent
                 margins: Kirigami.Units.smallSpacing
             }
-            spacing: 3
+            spacing: Kirigami.Units.smallSpacing
 
-            // Title row: "wifimimo v0.2.0      link uptime: 7h 09m 23s"
-            // All one font size; "wifimimo" bold, version regular, uptime dim.
-            // Version is pulled from the plasmoid's metadata.json so the
-            // string moves in lockstep with `Version` there.
+            // Title row: "wifimimo v1.0.0      ● 12:04:31". Version comes from
+            // metadata.json; the dot says whether the daemon is alive.
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 0
@@ -746,28 +949,60 @@ PlasmoidItem {
                     Layout.fillWidth: true
                 }
 
+                Rectangle {
+                    readonly property bool fresh: !!root.doc.timestamp
+                        && (Math.floor(Date.now() / 1000) - root.doc.timestamp) <= 15
+                    width: 8
+                    height: 8
+                    radius: 4
+                    color: fresh ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.negativeTextColor
+                }
+
                 PlasmaComponents3.Label {
-                    visible: root.hasRecentData
-                    text: "link uptime: " + (root.data.connected_time_s > 0 ? root.fmtUptime(root.data.connected_time_s) : "?")
-                    font.pixelSize: Math.round(Kirigami.Theme.defaultFont.pixelSize * 1.5)
+                    text: " " + root.fmtClock(root.doc.timestamp || 0)
                     font.family: root.monospaceFamily
                     color: Kirigami.Theme.disabledTextColor
                 }
             }
 
-            // Card selector — only rendered when the daemon reports 2+ wifi
-            // cards. Highlight is driven by `highlighted:` (not `checked:`)
-            // because a user click on a checkable button breaks the declared
-            // binding, and the highlight must keep tracking daemon-side
-            // primary switches while in auto mode.
+            ControlStrip {
+                Layout.fillWidth: true
+                app: root
+            }
+
+            PlasmaComponents3.Label {
+                Layout.fillWidth: true
+                Layout.topMargin: Kirigami.Units.smallSpacing
+                text: "ALL RADIOS  signal, last 60 s"
+                font.bold: true
+                font.family: root.monospaceFamily
+            }
+
+            SignalGraph {
+                Layout.fillWidth: true
+                Layout.preferredHeight: Kirigami.Units.gridUnit * 6
+                app: root
+            }
+
+            TrafficShare {
+                Layout.fillWidth: true
+                Layout.topMargin: Kirigami.Units.smallSpacing
+                app: root
+            }
+
+            Kirigami.Separator {
+                Layout.fillWidth: true
+                Layout.topMargin: Kirigami.Units.smallSpacing
+            }
+
+            // Card selector — always shown (even for one card) so it never
+            // appears / disappears and shifts the layout. Highlight uses
+            // `highlighted:` (not `checked:`) because a click would break a
+            // `checked` binding, and in auto mode it must track the primary.
             RowLayout {
                 Layout.fillWidth: true
                 spacing: Kirigami.Units.smallSpacing
-                visible: root.ifaceList.length > 1
 
-                // Restores daemon-primary behavior after a manual pick. In
-                // auto mode both this and the followed card light up:
-                // "auto, currently following <card>".
                 PlasmaComponents3.Button {
                     text: "auto"
                     font.family: root.monospaceFamily
@@ -782,20 +1017,77 @@ PlasmoidItem {
                 }
 
                 Repeater {
-                    model: root.ifaceList
+                    model: root.radios
 
                     delegate: PlasmaComponents3.Button {
-                        required property string modelData
-                        text: modelData
+                        id: cardButton
+                        required property var modelData
                         font.family: root.monospaceFamily
-                        highlighted: modelData === root.shownIface
+                        highlighted: modelData.iface === root.shownIface
+                        contentItem: Row {
+                            spacing: 5
+                            Rectangle {
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 9
+                                height: 9
+                                radius: 4.5
+                                // filled = connected, hollow ring = down
+                                color: cardButton.modelData.connected ? cardButton.modelData.color : "transparent"
+                                border.width: cardButton.modelData.connected ? 0 : 1.5
+                                border.color: Kirigami.Theme.disabledTextColor
+                            }
+                            PlasmaComponents3.Label {
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: cardButton.modelData.iface
+                                font.family: root.monospaceFamily
+                            }
+                            PlasmaComponents3.Label {
+                                anchors.verticalCenter: parent.verticalCenter
+                                visible: cardButton.modelData.worst === "warn" || cardButton.modelData.worst === "crit"
+                                text: "!"
+                                font.bold: true
+                                color: cardButton.modelData.worst === "crit"
+                                       ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.neutralTextColor
+                            }
+                        }
                         onClicked: {
-                            if (modelData !== root.selectedIface) {
-                                root.selectedIface = modelData;
+                            if (modelData.iface !== root.selectedIface) {
+                                root.selectedIface = modelData.iface;
                                 root.resetHistory(null);
                                 root.pollNow();
                             }
                         }
+                    }
+                }
+
+                // Switched-off internal card: a ghost button so its panel
+                // (and the way back) stays reachable.
+                PlasmaComponents3.Button {
+                    visible: root.internalGhostShown
+                    highlighted: root.selectedIface === root.internalGhost
+                    font.family: root.monospaceFamily
+                    contentItem: Row {
+                        spacing: 5
+                        Rectangle {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 9
+                            height: 9
+                            radius: 4.5
+                            color: "transparent"
+                            border.width: 1.5
+                            border.color: Kirigami.Theme.disabledTextColor
+                        }
+                        PlasmaComponents3.Label {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "internal"
+                            color: Kirigami.Theme.disabledTextColor
+                            font.family: root.monospaceFamily
+                        }
+                    }
+                    onClicked: {
+                        root.selectedIface = root.internalGhost;
+                        root.resetHistory(null);
+                        root.pollNow();
                     }
                 }
 
@@ -804,58 +1096,88 @@ PlasmoidItem {
                 }
             }
 
-            ColumnLayout {
+            PlasmaComponents3.ScrollView {
+                id: cardScroll
                 Layout.fillWidth: true
-                spacing: 1
-                visible: root.hasRecentData
+                Layout.fillHeight: true
+                contentWidth: availableWidth
+
+                ColumnLayout {
+                    id: cardBody
+                    width: cardScroll.availableWidth
+                    spacing: 2
+
+            // Card panel: identical structure whether the card is up or down.
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Kirigami.Units.smallSpacing
 
                 PlasmaComponents3.Label {
-                    Layout.fillWidth: true
-                    text: (root.data.ssid_display || root.data.ssid || root.data.bssid) + "  (" + root.data.bssid + ")"
-                    elide: Text.ElideRight
+                    text: root.data.card_name || root.data.iface || "—"
                     font.bold: true
-                    font.pixelSize: Math.round(Kirigami.Theme.defaultFont.pixelSize * 1.20)
+                    font.pixelSize: Math.round(Kirigami.Theme.defaultFont.pixelSize * 1.35)
                     font.family: root.monospaceFamily
-                    color: Kirigami.Theme.positiveTextColor
                 }
-
                 PlasmaComponents3.Label {
-                    Layout.fillWidth: true
-                    text: root.freqLine()
-                    font.pixelSize: Math.round(Kirigami.Theme.defaultFont.pixelSize * 1.10)
+                    text: root.data.iface
+                    color: Kirigami.Theme.disabledTextColor
                     font.family: root.monospaceFamily
-                    color: Kirigami.Theme.textColor
                 }
-
-                PlasmaComponents3.Label {
+                Item {
                     Layout.fillWidth: true
-                    text: root.linkStatusLine()
-                    font.pixelSize: Math.round(Kirigami.Theme.defaultFont.pixelSize * 1.10)
+                }
+                PlasmaComponents3.Label {
+                    visible: root.hasRecentData
+                    text: "up " + (root.data.connected_time_s > 0 ? root.fmtUptime(root.data.connected_time_s) : "?")
                     font.family: root.monospaceFamily
-                    color: Kirigami.Theme.textColor
+                    color: Kirigami.Theme.disabledTextColor
                 }
             }
 
             PlasmaComponents3.Label {
                 Layout.fillWidth: true
-                visible: !root.hasRecentData
-                text: root.data.iface ? ("Not connected on " + root.data.iface) : "No wifi interface detected"
+                text: root.hasRecentData
+                      ? (root.data.ssid_display || root.data.ssid || root.data.bssid) + "  (" + root.data.bssid + ")"
+                      : root.statusReason()
+                elide: Text.ElideRight
                 font.bold: true
+                font.pixelSize: Math.round(Kirigami.Theme.defaultFont.pixelSize * 1.15)
                 font.family: root.monospaceFamily
-                color: Kirigami.Theme.negativeTextColor
+                color: root.hasRecentData ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.disabledTextColor
             }
 
-            // Telemetry sections are hidden when there's no recent sample
-            // — otherwise the panel renders default 0 dBm / 0 Mb/s / 0% rows
-            // under "Not connected", which look like real-but-zero readings.
-            // Negative top-margin tightens the gap between the link header
-            // and the first section (SIGNAL); per-section topMargin on
-            // RATES / MCS INDEX / TX RETRIES adds breathing room between
-            // the four telemetry blocks.
+            PlasmaComponents3.Label {
+                Layout.fillWidth: true
+                text: root.hasRecentData ? root.freqLine() + "   " + root.linkStatusLine() : "—"
+                elide: Text.ElideRight
+                font.family: root.monospaceFamily
+                color: Kirigami.Theme.textColor
+            }
+
+            PlasmaComponents3.Label {
+                Layout.fillWidth: true
+                text: root.deviceLine() || "—"
+                elide: Text.ElideRight
+                font.family: root.monospaceFamily
+                color: Kirigami.Theme.disabledTextColor
+                font.pixelSize: Math.max(9, Kirigami.Theme.defaultFont.pixelSize - 1)
+            }
+
+            FlagChips {
+                Layout.fillWidth: true
+                Layout.topMargin: 2
+                flags: root.data.flags || []
+                live: root.hasRecentData
+                fontFamily: root.monospaceFamily
+            }
+
+            // Telemetry: always laid out; without a recent sample values
+            // read "—", meters are empty tracks and the block is dimmed, so
+            // nothing masquerades as a real zero reading.
             ColumnLayout {
                 Layout.fillWidth: true
-                Layout.topMargin: -2
-                visible: root.hasRecentData
+                Layout.topMargin: Kirigami.Units.smallSpacing
+                opacity: root.hasRecentData ? 1.0 : 0.45
                 spacing: 2
 
             PlasmaComponents3.Label {
@@ -910,55 +1232,34 @@ PlasmoidItem {
 
                         PlasmaComponents3.Label {
                             Layout.preferredWidth: Kirigami.Units.gridUnit * 5
-                            text: Number(signalBlock.modelData.value).toFixed(0) + " dBm"
-                            color: signalBlock.fillColor
+                            text: signalBlock.modelData.available
+                                  ? Number(signalBlock.modelData.value).toFixed(0) + (signalBlock.modelData.kind === "spread" ? " dB" : " dBm")
+                                  : (root.hasRecentData ? "n/a" : "—")
+                            color: signalBlock.modelData.available ? signalBlock.fillColor : Kirigami.Theme.disabledTextColor
                             font.family: root.monospaceFamily
                         }
 
                         PlasmaComponents3.Label {
                             Layout.fillWidth: true
-                            text: Number(root.histMin(signalBlock.modelData.hist, signalBlock.modelData.value)).toFixed(0)
-                                  + " .. "
-                                  + Number(root.histMax(signalBlock.modelData.hist, signalBlock.modelData.value)).toFixed(0)
-                                  + (signalBlock.modelData.suffix ? "  " + signalBlock.modelData.suffix : "")
+                            text: signalBlock.modelData.available
+                                  ? Number(root.histMin(signalBlock.modelData.hist, signalBlock.modelData.value)).toFixed(0)
+                                    + " .. "
+                                    + Number(root.histMax(signalBlock.modelData.hist, signalBlock.modelData.value)).toFixed(0)
+                                    + (signalBlock.modelData.suffix ? "  " + signalBlock.modelData.suffix : "")
+                                  : ""
                             horizontalAlignment: Text.AlignRight
                             color: Kirigami.Theme.disabledTextColor
                             font.family: root.monospaceFamily
                         }
                     }
 
-                    Item {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 12
-                        Layout.minimumHeight: 12
-                        Layout.maximumHeight: 12
-
-                        Rectangle {
-                            anchors.fill: parent
-                            radius: height / 2
-                            color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g, Kirigami.Theme.textColor.b, 0.12)
-                        }
-
-                        Rectangle {
-                            anchors.left: parent.left
-                            anchors.top: parent.top
-                            anchors.bottom: parent.bottom
-                            width: Math.max(4, parent.width * signalBlock.frac)
-                            radius: height / 2
-                            color: signalBlock.fillColor
-                        }
-
-                        Rectangle {
-                            width: 2
-                            radius: 1
-                            anchors.top: parent.top
-                            anchors.bottom: parent.bottom
-                            x: Math.max(0, Math.min(parent.width - width, parent.width * (signalBlock.modelData.kind === "spread"
-                                ? root.spreadFraction(root.histMax(signalBlock.modelData.hist, signalBlock.modelData.value))
-                                : root.signalFractionForDbm(root.histMax(signalBlock.modelData.hist, signalBlock.modelData.value)))))
-                            color: Kirigami.Theme.textColor
-                            opacity: 0.6
-                        }
+                    MeterBar {
+                        placeholder: !signalBlock.modelData.available
+                        fraction: signalBlock.frac
+                        fillColor: signalBlock.fillColor
+                        markerFraction: signalBlock.modelData.kind === "spread"
+                            ? root.spreadFraction(root.histMax(signalBlock.modelData.hist, signalBlock.modelData.value))
+                            : root.signalFractionForDbm(root.histMax(signalBlock.modelData.hist, signalBlock.modelData.value))
                     }
                 }
             }
@@ -997,30 +1298,27 @@ PlasmoidItem {
 
                         PlasmaComponents3.Label {
                             Layout.preferredWidth: Kirigami.Units.gridUnit * 6
-                            text: Number(rateBlock.modelData.rate).toFixed(1) + " Mb/s"
+                            text: root.hasRecentData ? Number(rateBlock.modelData.rate).toFixed(1) + " Mb/s" : "—"
                             font.family: root.monospaceFamily
                         }
 
                         PlasmaComponents3.Label {
                             Layout.fillWidth: true
-                            text: Number(root.histMin(rateBlock.modelData.hist, rateBlock.modelData.rate)).toFixed(0)
-                                  + " .. "
-                                  + Number(root.histMax(rateBlock.modelData.hist, rateBlock.modelData.rate)).toFixed(0)
-                                  + "  NSS " + rateBlock.modelData.nss + " " + rateBlock.modelData.nss_dots
-                                  + (rateBlock.modelData.gi_label ? "  GI " + rateBlock.modelData.gi_label : "")
+                            text: root.hasRecentData
+                                  ? Number(root.histMin(rateBlock.modelData.hist, rateBlock.modelData.rate)).toFixed(0)
+                                    + " .. "
+                                    + Number(root.histMax(rateBlock.modelData.hist, rateBlock.modelData.rate)).toFixed(0)
+                                    + "  NSS " + rateBlock.modelData.nss + " " + rateBlock.modelData.nss_dots
+                                    + (rateBlock.modelData.gi_label ? "  GI " + rateBlock.modelData.gi_label : "")
+                                  : ""
                             horizontalAlignment: Text.AlignRight
                             color: Kirigami.Theme.disabledTextColor
                             font.family: root.monospaceFamily
                         }
                     }
 
-                    Item {
+                    MeterBar {
                         id: rateBar
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 12
-                        Layout.minimumHeight: 12
-                        Layout.maximumHeight: 12
-
                         readonly property real ceiling: {
                             const rates = rateBlock.modelData.rates;
                             if (rates && rates.length > 0) {
@@ -1028,31 +1326,10 @@ PlasmoidItem {
                             }
                             return Math.max(rateBlock.modelData.rate, 1.0);
                         }
-
-                        Rectangle {
-                            anchors.fill: parent
-                            radius: height / 2
-                            color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g, Kirigami.Theme.textColor.b, 0.12)
-                        }
-
-                        Rectangle {
-                            anchors.left: parent.left
-                            anchors.top: parent.top
-                            anchors.bottom: parent.bottom
-                            width: Math.max(4, parent.width * Math.max(0, Math.min(1, rateBlock.modelData.rate / rateBar.ceiling)))
-                            radius: height / 2
-                            color: Kirigami.Theme.positiveTextColor
-                        }
-
-                        Rectangle {
-                            width: 2
-                            radius: 1
-                            anchors.top: parent.top
-                            anchors.bottom: parent.bottom
-                            x: Math.max(0, Math.min(parent.width - width, parent.width * Math.max(0, Math.min(1, root.histMax(rateBlock.modelData.hist, rateBlock.modelData.rate) / rateBar.ceiling))))
-                            color: Kirigami.Theme.textColor
-                            opacity: 0.6
-                        }
+                        placeholder: !root.hasRecentData
+                        fraction: rateBlock.modelData.rate / ceiling
+                        markerFraction: root.histMax(rateBlock.modelData.hist, rateBlock.modelData.rate) / ceiling
+                        fillColor: Kirigami.Theme.positiveTextColor
                     }
                 }
             }
@@ -1090,7 +1367,7 @@ PlasmoidItem {
                         }
 
                         PlasmaComponents3.Label {
-                            text: Number(mcsBlock.modelData.rate).toFixed(0) + " Mb/s"
+                            text: root.hasRecentData ? Number(mcsBlock.modelData.rate).toFixed(0) + " Mb/s" : "—"
                             color: root.mcsColor(
                                 Math.max(0, mcsBlock.modelData.mcs),
                                 mcsBlock.modelData.mcs,
@@ -1225,56 +1502,35 @@ PlasmoidItem {
 
                     PlasmaComponents3.Label {
                         Layout.preferredWidth: Kirigami.Units.gridUnit * 5
-                        text: retryBlock.retryPct.toFixed(1) + "%"
-                        color: root.alertColor(retryBlock.retryPct, 10, 30)
+                        text: root.hasRecentData ? retryBlock.retryPct.toFixed(1) + "%" : "—"
+                        color: root.hasRecentData ? root.alertColor(retryBlock.retryPct, 10, 30) : Kirigami.Theme.disabledTextColor
                         font.family: root.monospaceFamily
                     }
 
                     PlasmaComponents3.Label {
                         Layout.fillWidth: true
-                        text: root.histMax("retry_pct", retryBlock.retryPct).toFixed(1) + "% max  "
-                              + root.data.retry_10s_retries + "/" + root.data.retry_10s_packets + " retries  fail " + root.data.retry_10s_failed
+                        text: root.hasRecentData
+                              ? root.histMax("retry_pct", retryBlock.retryPct).toFixed(1) + "% max  "
+                                + root.data.retry_10s_retries + "/" + root.data.retry_10s_packets + " retries  fail " + root.data.retry_10s_failed
+                              : ""
                         horizontalAlignment: Text.AlignRight
                         color: Kirigami.Theme.disabledTextColor
                         font.family: root.monospaceFamily
                     }
                 }
 
-                Item {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 12
-                    Layout.minimumHeight: 12
-                    Layout.maximumHeight: 12
-
-                    Rectangle {
-                        anchors.fill: parent
-                        radius: height / 2
-                        color: Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g, Kirigami.Theme.textColor.b, 0.12)
-                    }
-
-                    Rectangle {
-                        anchors.left: parent.left
-                        anchors.top: parent.top
-                        anchors.bottom: parent.bottom
-                        width: Math.max(4, parent.width * Math.max(0, Math.min(1, retryBlock.retryPct / 100.0)))
-                        radius: height / 2
-                        color: root.alertColor(retryBlock.retryPct, 10, 30)
-                    }
-
-                    Rectangle {
-                        width: 2
-                        radius: 1
-                        anchors.top: parent.top
-                        anchors.bottom: parent.bottom
-                        x: Math.max(0, Math.min(parent.width - width, parent.width * Math.max(0, Math.min(1, root.histMax("retry_pct", retryBlock.retryPct) / 100.0))))
-                        color: Kirigami.Theme.textColor
-                        opacity: 0.6
-                    }
+                MeterBar {
+                    placeholder: !root.hasRecentData
+                    fraction: retryBlock.retryPct / 100.0
+                    markerFraction: root.histMax("retry_pct", retryBlock.retryPct) / 100.0
+                    fillColor: root.alertColor(retryBlock.retryPct, 10, 30)
                 }
             }
 
-            }  // end of "telemetry sections visible only when hasRecentData"
-        }
+            }  // end of telemetry
+                }  // end of cardBody
+            }  // end of cardScroll
+        }  // end of contentColumn
     }
 
     // Keep the icon visible at all times — PassiveStatus would auto-hide it
@@ -1292,5 +1548,9 @@ PlasmoidItem {
           + (mloMultiLink ? ("  ·  MLO " + linkCount + " links") : "")
           + "\nOverall " + Math.min(data.tx_rate_mbps || 0, data.rx_rate_mbps || 0).toFixed(1) + " MBit/s"
           + "  ·  Signal " + data.signal_dbm + " dBm"
+          + (doc.multipath && doc.multipath.active
+             ? "\nMultipath: active (" + (doc.multipath.members || []).length + " radios)" : "")
+          + (radios.filter(r => r.worst === "warn" || r.worst === "crit").length > 0
+             ? "\n" + radios.filter(r => r.worst === "warn" || r.worst === "crit").length + " radio(s) flagged" : "")
     toolTipTextFormat: Text.PlainText
 }

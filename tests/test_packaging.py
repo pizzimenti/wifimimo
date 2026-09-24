@@ -50,9 +50,16 @@ def test_helper_shebang_isolates_python():
 def test_qml_helper_path_matches_shared():
     literals = set()
     for qml in QML_DIR.glob("*.qml"):
-        literals |= set(re.findall(r'"(/usr/local/lib/wifimimo/wifimimo-helper)"', qml.read_text()))
-    if literals:  # the widget may not reference it until the UI lands
-        assert literals == {str(shared.HELPER_PATH)}
+        literals |= set(re.findall(r'helperPath:\s*"([^"]+)"', qml.read_text()))
+    assert literals == {str(shared.HELPER_PATH)}
+
+
+def test_qml_only_runs_allowlisted_helper_verbs():
+    text = (QML_DIR / "main.qml").read_text()
+    # every helper command is built from the allow-list, never free text
+    assert '"multipath": ["enable", "disable"]' in text
+    assert '"internal": ["enable", "disable"]' in text
+    assert 'allowed.indexOf(action) < 0' in text
 
 
 def test_install_targets_match_shared():
