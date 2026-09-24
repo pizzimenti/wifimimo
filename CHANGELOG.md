@@ -6,6 +6,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+Planned as 1.0.0.
+
+### Added
+
+- **Multipath**: a widget switch that balances new connections across every
+  connected radio (L4 ECMP). Routes live outside the main table (rules 32000 /
+  32001+ / 32090, tables 100-116, proto `wifimimo`), are rebuilt by a
+  NetworkManager dispatcher hook on every network change, admit only radios with
+  full connectivity and a reachable gateway, and survive reboots.
+- **NetworkManager follow**: while multipath is on, choosing a network in the
+  Plasma applet joins every radio to it (in-memory `multi-connect` only; saved
+  profiles untouched), and disconnecting drops them all. `wifimimo-nm-tidy`
+  removes hand-made per-card profile copies.
+- **Internal card toggle** (`install.sh --manage-internal`): switch a built-in PCI
+  card off (removed from the bus) or on (rescan + driver load) from the widget;
+  persists across reboots via a generated udev rule.
+- **Root helper** `wifimimo-helper` with a fixed verb set, polkit action allowing
+  the active session without a password, dry-run mode.
+- **Health flags**: USB 3 stick running at USB 2, USB 2-only port, radios sharing
+  an access point or channel, ARP-flux risk, weak overall signal on MLD links,
+  plus the existing link checks, as chips in the widget and lines in the monitor.
+- **Signal graph**: last 60 s of every radio's signal on a fixed −90…−30 dBm axis.
+- **Traffic share**: live per-radio throughput.
+- **Card names**: `A9000`, `A8000`, `Built-in`, vendor + chip otherwise; override in
+  `~/.config/wifimimo/names.json`.
+- `install.sh --migrate-legacy-rules` and `--uninstall`.
+
+### Changed
+
+- Popup has a fixed height with content pinned to the top; the card selector no
+  longer moves, and a disconnected card keeps the full layout with placeholders.
+- State schema v4 (per-radio bus / USB speed / addressing / throughput / history /
+  flags / colour; document-level multipath, internal card, NM, helper status).
+- Daily history CSV gains `rx_mbps`, `tx_mbps`, `usb_speed_mbps`, `flags`.
+- Alert thresholds consolidated in `wifimimo_core`.
+
+### Removed
+
+- `future.md` (the v0.3 refactor plan, fully implemented).
+
 ## [0.4.0] - 2026-09-07
 
 ### Added

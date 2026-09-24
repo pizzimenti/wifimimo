@@ -48,22 +48,38 @@ The installer:
 
 | Path | Role |
 |------|------|
-| `/usr/local/lib/wifimimo/` | Daemon + monitor + plasmoid source bridge + venv |
+| `/usr/local/lib/wifimimo/` | Daemon + monitor + modules + venv |
+| `/usr/local/lib/wifimimo/wifimimo-helper` | Root helper (multipath, internal card), root-owned |
 | `/usr/local/bin/wifimimo-daemon` | Background poller |
 | `/usr/local/bin/wifimimo-mon` | Curses monitor launcher |
-| `/usr/local/bin/wifimimo-plasmoid-source` | One-shot state-file dumper used by the plasmoid |
+| `/usr/local/bin/wifimimo-nm-tidy` | Collapses per-card copies of NetworkManager profiles |
+| `/usr/local/bin/wifimimo-plasmoid-source` | One-shot state-file dumper |
+| `/usr/share/polkit-1/actions/io.github.pizzimenti.wifimimo.policy` | polkit action for the helper |
+| `/etc/NetworkManager/dispatcher.d/90-wifimimo` | Re-applies multipath on network changes |
+| `/etc/iproute2/rt_protos.d/wifimimo.conf` | Names route protocol 211 `wifimimo` |
+| `/etc/wifimimo/` | Multipath / internal-card state (root-owned) |
 | `~/.config/systemd/user/wifimimo-daemon.service` | User systemd service (auto-enabled) |
 | Plasmoid (via `kpackagetool6`) | Per-user `org.kde.plasma.wifimimo` widget |
 
 The script also restarts `plasma-plasmashell.service` so the new widget code loads
 without you having to log out and back in.
 
+Options:
+
+```bash
+./install.sh --manage-internal 14c3:7925     # let the widget toggle an internal PCI card
+./install.sh --manage-internal auto          # ...every bound PCI wifi card present now
+./install.sh --manage-internal 14c3:7925=mt7925e   # card not present: name the driver
+./install.sh --migrate-legacy-rules          # move hand-made "remove this card" udev rules aside
+./install.sh --uninstall                     # remove everything (restores the internal card)
+```
+
 ## Daemon
 
 `wifimimo-daemon` auto-discovers every wifi netdev under `/sys/class/net`
 (re-scanned each poll, so a hotplugged USB card appears without a restart),
 polls nl80211 station data for each via `pyroute2`, and writes a versioned
-JSON state file to `/run/user/$UID/wifimimo-state` (`schema_version: 3`). It also
+JSON state file to `/run/user/$UID/wifimimo-state` (`schema_version: 4`). It also
 appends a daily CSV history row per card to
 `~/.local/state/wifimimo/history/<date>.csv` so you can plot link quality over
 time later. Set `WIFI_IFACE=<name>` in the service environment to pin the
@@ -94,25 +110,132 @@ multi-link MLO is active.
 ## Plasma widget
 
 A KDE Plasma 6 panel widget that consumes the daemon's JSON state file. Compact
-representation = a single coloured icon (see table above). Expanded popup = the
-full telemetry pictured at the top of this README. When two or more wifi cards
-are present, a button row at the top of the popup selects which card is
-displayed; with no selection the popup follows the daemon's primary card (the
-connected one).
+representation = a single coloured icon (see table above). The expanded popup has
+a fixed size with everything pinned to the top, so nothing shifts when a card
+goes down. From the top:
+
+- **Controls** — *Multipath* and *Internal Wi-Fi* switches (see below).
+- **All radios, last 60 s** — signal (dBm) for every radio on a fixed −90…−30 dBm
+  axis with good / warn / bad bands, so link quality reads at a glance. The axis
+  never rescales. Points are placed by time, and gaps (radio down) break the line.
+- **Traffic** — live per-radio throughput and share.
+- **Card selector** — `auto` follows the connected primary; each card shows a
+  filled dot when up, a hollow one when down, and `!` when flagged. A switched-off
+  internal card keeps a ghost button.
+- **Card panel** — the card's name (e.g. `A9000`, `A8000`, `Built-in`), SSID or
+  the reason it's down, device line (bus, USB speed, driver, MAC, address),
+  health-flag chips, then SIGNAL / RATES / MCS / TX RETRIES. A down card keeps
+  the same layout with dashes and empty meters instead of collapsing.
 
 To re-add the widget after install: right-click the panel → Add Widgets → search
 "wifimimo".
 
+## Multipath
+
+On networks that cap bandwidth *per client* (libraries, cafés, hotels), several
+radios get several allowances. Turning on **Multipath** balances new connections
+across every connected radio at layer 4 (the kernel hashes each TCP/UDP flow's
+5-tuple onto one radio), measured at roughly 2× with two radios and up to ~3×
+upload with three. A single download still uses one radio; it can't be split.
+
+How it works: the root helper keeps its routes **outside** the main table
+(NetworkManager prunes unknown routes there):
+
+| Priority | Rule | Purpose |
+|---|---|---|
+| 32000 | `lookup main suppress_prefixlength 0` | NM's specific routes (LAN, VPNs) still win |
+| 32001+ | `from <radio address> lookup 101+` | replies leave the radio they came in on |
+| 32090 | `lookup 100` | table 100 holds the one multipath default route |
+
+It also sets `fib_multipath_hash_policy=1`, `ignore_routes_with_linkdown=1`,
+`rp_filter=2` and `arp_ignore=1` / `arp_announce=2` on member radios (originals
+restored on disable). A radio only joins when NetworkManager reports full
+connectivity (so a captive portal can't swallow a share of your connections) and
+its gateway answers. The dispatcher hook rebuilds the layout on every connect,
+disconnect or DHCP change. The setting survives reboots.
+
+Radios on the same access point or channel share airtime, so they gain nothing
+from each other; wifimimo flags that. IPv4 only.
+
+Recovery, if anything ever goes wrong: `pkexec /usr/local/lib/wifimimo/wifimimo-helper multipath disable`,
+or just `sudo ip rule del pref 32090`.
+
+### Following your network choice (NetworkManager)
+
+While multipath is on, the daemon makes one click in the Plasma network applet
+drive every radio: the network you pick becomes the leader and every other radio
+that can see it joins the same profile, preferring an access point on a different
+channel. Pick another network and they all follow; disconnect and they all drop.
+No per-card profile copies are needed, and NetworkManager's saved profiles are
+never modified (only an in-memory `multi-connect` change, reverted when multipath
+is turned off). It runs as you, so passwords come from your own keyring.
+
+It won't follow a profile that's tied to one card (`mac-address` /
+`interface-name` set) or that clones one MAC for every radio (`stable` /
+`stable-ssid` without `${DEVICE}` in `connection.stable-id`); those get a flag.
+`wifimimo-nm-tidy` (dry run by default, `--apply` to act) removes the card-bound
+copies people made by hand for multi-radio use, keeping the original profile.
+
+## Internal card toggle
+
+With `install.sh --manage-internal <vendor:device>`, the widget gets an
+*Internal Wi-Fi* switch for a built-in PCI card: useful when a USB stick is
+impractical (flights, walking around) but you normally keep the internal radio
+off. Off removes the card from the PCI bus (like unplugging it); on rescans the
+bus and loads its driver. The choice survives reboots via a generated udev rule
+(`/etc/udev/rules.d/70-wifimimo-internal.rules`, from `/etc/wifimimo/internal.conf`).
+The driver module is never unloaded, since it can be shared with USB sticks of
+the same chip family.
+
+## Health flags
+
+Each card carries flags the widget shows as chips and the monitor lists:
+
+| Flag | Meaning |
+|---|---|
+| Running at USB 2 | A USB 3 stick negotiated 480 Mb/s on a USB 3 port: reseat it firmly |
+| USB 2 port | A USB 3 stick on a USB 2-only port |
+| Shares an access point / a channel | Two radios split one airtime budget |
+| ARP flux risk | Several radios in one subnet without `arp_ignore` / `arp_announce` |
+| Weak signal / antenna, antenna imbalance, MIMO offline / degraded, high interference | Link-level checks |
+| Profile tied to one card, shared cloned MAC | NetworkManager follow can't use this profile |
+
+## Card names
+
+Cards get short names: known models by USB id (`A9000`, `A8000`), `Built-in` for
+PCI cards, otherwise vendor + chip (e.g. `NetGear MT7921U`). Override any of them
+in `~/.config/wifimimo/names.json`, keyed by permanent MAC:
+
+```json
+{ "28:94:01:bb:f8:96": "Travel stick" }
+```
+
+## Security model
+
+Everything privileged goes through one root helper with a fixed command set
+(`multipath enable|disable|apply|status`, `internal enable|disable|status|sync-rules`).
+It accepts no interface names, paths or numbers from the caller, runs under
+`python3 -I`, and only touches routes, rules and tables it owns. The polkit
+action lets processes in the **active local session** run it without a password
+(that's what makes the switches usable on a plane); inactive and remote sessions
+need admin authentication. Anything running as you in your desktop session can
+therefore toggle multipath or the internal card.
+
 ## State schema
 
-The runtime state file is JSON v3. The top level mirrors the *primary*
+The runtime state file is JSON v4. The top level mirrors the *primary*
 interface's full state (schema-v2 shape, so older consumers keep working);
 `ifaces` lists every discovered card and `interfaces` maps each card name to
-its own full state of the same shape. Stable contract:
+its own full state of the same shape. v4 adds per-card `card_name`, `perm_mac`,
+`bus`, `driver`, `dev_id`, `usb_speed_mbps`, `ipv4` / `subnet` / `gateway`,
+`rx_mbps` / `tx_mbps`, `signal_history` (`[[unix_ts, dBm], ...]`, last 60 s),
+`flags` (`{code, severity, title, detail}`) and `color_index`, plus
+document-level `multipath`, `internal_card`, `nm`, `helper_available` and
+`sampled_at` (never repeated inside `interfaces`). Stable contract:
 
 ```jsonc
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "iface": "wlp3s0f3u2",
   "ifaces": ["wlp1s0", "wlp3s0f3u2"],
   "interfaces": { "wlp1s0": { /* full per-card state */ }, "wlp3s0f3u2": { /* … */ } },
@@ -167,8 +290,12 @@ pytest -q
 
 Suite covers PHY-mode round-tripping (HT/VHT/HE/EHT), iw output fixtures
 (single-link / MLO / disconnected / VHT), state file (write, read, v1 migration,
-forward-compat), derived display, history-CSV schema rotation, and a QML parity
-check that fails CI if PHY-mode literals leak back into the QML.
+forward-compat), derived display, history-CSV schema rotation, sysfs bus / USB
+port detection on fake trees, health flags, card names, the helper's argument
+validation and routing plans (ordering, idempotency, teardown, refusal of
+foreign state), the internal-card udev rule, NetworkManager follow and tidy
+planning, cross-file packaging facts (polkit path, dispatcher, versions), and a
+QML parity check that fails CI if PHY-mode literals leak back into the QML.
 
 GitHub Actions CI runs on `ubuntu-24.04` with Python `3.12.7`.
 
