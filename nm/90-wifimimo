@@ -13,4 +13,17 @@ case "$1" in
     lo|tailscale*) exit 0 ;;
 esac
 timeout 20 /usr/local/lib/wifimimo/wifimimo-helper multipath apply >/dev/null 2>&1 || true
+# NM's per-device connectivity check finishes a few seconds after "up", and
+# the helper leaves out radios it hasn't cleared yet. When only one radio's
+# check completes, global connectivity doesn't change, so no further event
+# arrives: schedule re-checks instead. A pending timer with the same name
+# makes systemd-run fail, which is fine (a re-check is already queued).
+case "$2" in
+    up|dhcp4-change)
+        for delay in 10 30; do
+            systemd-run --quiet --collect --on-active="$delay" --unit="wifimimo-reapply-$delay" \
+                /usr/local/lib/wifimimo/wifimimo-helper multipath apply >/dev/null 2>&1 || true
+        done
+        ;;
+esac
 exit 0
