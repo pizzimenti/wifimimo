@@ -51,12 +51,18 @@ SIGNAL_FLOOR_DBM = -90
 SIGNAL_CEIL_DBM = -20
 SPREAD_FRACTION_FLOOR = 30.0  # dBm spread that maps to a full bar
 
+# Health-flag thresholds, shared by the daemon's flags, the adaptive poll
+# cadence, and wifimimo-mon's colouring.
+ALERT_DIFF_DBM = 15
+ALERT_SIGNAL_DBM = SIGNAL_WARN_DBM
+ALERT_RETRY_PCT = 30
+
 STATE_PATH = Path(f"/run/user/{os.getuid()}/wifimimo-state")
 # Plasmoid touches this marker each poll while the popup is expanded.
 # The daemon uses its mtime to drop into fast-poll mode without needing
 # a DBus channel — purely filesystem-mediated.
 UI_ACTIVE_PATH = Path(f"/run/user/{os.getuid()}/wifimimo-ui-active")
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 KNOWN_WIFI_DRIVERS = ("iwlwifi", "mt76", "mt79", "ath", "rtw", "brcm", "mwifiex")
 
@@ -205,6 +211,43 @@ class WifiState:
     # to its own full per-iface state (same shape, minus these two keys).
     ifaces: list[str] = field(default_factory=list)
     interfaces: dict = field(default_factory=dict)
+    # Schema v4 per-radio additions (see wifimimo_radio).
+    card_name: str = ""
+    perm_mac: str = ""
+    mac: str = ""
+    bus: str = ""
+    driver: str = ""
+    dev_id: str = ""
+    dev_path: str = ""
+    usb_speed_mbps: int = 0
+    usb_port_usb3: bool = False
+    operstate: str = ""
+    ipv4: str = ""
+    prefixlen: int = 0
+    subnet: str = ""
+    gateway: str = ""
+    rx_mbps: float = 0.0
+    tx_mbps: float = 0.0
+    signal_history: list = field(default_factory=list)
+    flags: list = field(default_factory=list)
+    color_index: int = -1
+    internal: bool = False
+    # Schema v4 document-level blocks (never inside `interfaces[*]`).
+    multipath: dict = field(default_factory=dict)
+    internal_card: dict = field(default_factory=dict)
+    nm: dict = field(default_factory=dict)
+    helper_available: bool = False
+    sampled_at: float = 0.0
+
+
+# Keys that describe the whole machine rather than one radio. They live only
+# at the document top level and are stripped from each `interfaces` entry.
+DOC_ONLY_KEYS = frozenset({
+    "ifaces", "interfaces", "multipath", "internal_card", "nm",
+    "helper_available", "sampled_at",
+})
+_DICT_FIELDS = frozenset({"multipath", "internal_card", "nm"})
+_LIST_FIELDS = frozenset({"ifaces", "signal_history", "flags", "links", "signal_antennas"})
 
 
 # ---------------------------------------------------------------------------
@@ -425,7 +468,7 @@ def build_multi_state(states: dict) -> dict:
     doc = dict(states[primary]) if primary else default_state()
     doc["ifaces"] = sorted(states)
     doc["interfaces"] = {
-        name: {k: v for k, v in state.items() if k not in ("ifaces", "interfaces")}
+        name: {k: v for k, v in state.items() if k not in DOC_ONLY_KEYS}
         for name, state in states.items()
     }
     return doc
@@ -1058,8 +1101,11 @@ def _merge_known(loaded: dict, defaults: dict) -> dict:
                     name: _merge_known(sub, defaults) if isinstance(sub, dict) else sub
                     for name, sub in value.items()
                 }
-        elif key == "ifaces":
+        elif key in _LIST_FIELDS:
             if isinstance(value, list):
+                merged[key] = value
+        elif key in _DICT_FIELDS:
+            if isinstance(value, dict):
                 merged[key] = value
         else:
             merged[key] = value
@@ -1164,6 +1210,7 @@ HISTORY_COLUMNS = [
     "tx_packets", "tx_retries", "tx_failed",
     "card_temp_c", "power_save", "pci_power_state", "runtime_pm",
     "connected", "link_count",
+    "rx_mbps", "tx_mbps", "usb_speed_mbps", "flags",
 ]
 
 
@@ -1179,6 +1226,8 @@ def history_row(data: dict) -> list[str]:
             row.append("1" if data.get("connected") else "0")
         elif col == "link_count":
             row.append(str(len(data.get("links", []))))
+        elif col == "flags":
+            row.append(";".join(f.get("code", "") for f in data.get("flags", []) or []))
         else:
             value = data.get(col, "")
             row.append(str(value))
