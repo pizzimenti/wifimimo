@@ -86,7 +86,7 @@ def test_shared_bss_live_pair():
 def test_shared_channel_different_bss():
     states = {"a": radio("aa:aa:aa:aa:aa:01", 5500), "b": radio("bb:bb:bb:bb:bb:02", 5500)}
     flags = cross_iface_flags(states, GOOD_ARP)
-    assert codes(flags["a"]) == ["shared_channel"] and flags["a"][0]["severity"] == "info"
+    assert codes(flags["a"]) == ["shared_channel"] and flags["a"][0]["severity"] == "warn"
 
 
 def test_shared_bss_via_mlo_link():

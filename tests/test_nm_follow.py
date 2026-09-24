@@ -206,6 +206,100 @@ def test_already_multi_profile_isnt_modified():
     assert memory["modified"] == {}
 
 
+# --- rebalancing (enable / topology change) ---------------------------------
+
+SIX_A, SIX_B, FIVE, TWO = 6855, 6295, 5700, 2437
+SPREAD_SCAN = [ap("aa:00:00:00:00:61", SIX_A, 80, security="OWE"),
+               ap("aa:00:00:00:00:62", SIX_B, 60, security="OWE"),
+               ap("aa:00:00:00:00:51", FIVE, 60, security="WPA2"),
+               ap("aa:00:00:00:00:21", TWO, 90, security="WPA2")]
+
+
+def spread_lookup(freqs, **kw):
+    kw.setdefault("scans", {d: SPREAD_SCAN for d in ("wifi0", "wifi1", "wifi2", "wifi3")})
+    return lookup(freqs=freqs, **kw)
+
+
+def ups(actions):
+    return {a[2]: a[3] for a in actions if a[0] == "up"}
+
+
+def test_enabling_multipath_spreads_radios_sharing_a_frequency():
+    # all three landed on the strongest 6 GHz AP (what NM does on its own)
+    devices = [dev("wifi1", P), dev("wifi2", P), dev("wifi0", P)]
+    look = spread_lookup({"wifi1": SIX_A, "wifi2": SIX_A, "wifi0": SIX_A})
+    actions, memory, status = nm.plan_follow(devices, {}, 1.0, look, primary_device="wifi1")
+    assert ups(actions) == {"wifi0": "aa:00:00:00:00:62", "wifi2": "aa:00:00:00:00:51"}
+    assert sorted(status["moved"]) == ["wifi0", "wifi2"]
+    assert memory["devices"] == ["wifi0", "wifi1", "wifi2"]
+
+
+def test_no_reshuffle_without_a_topology_change():
+    devices = [dev("wifi1", P), dev("wifi2", P)]
+    mem = baseline(devices)
+    mem.update(devices=["wifi1", "wifi2"], leader={"uuid": P, "device": "wifi1", "at": 0})
+    look = spread_lookup({"wifi1": SIX_A, "wifi2": SIX_A})
+    actions, _, _ = nm.plan_follow(devices, mem, 50.0, look)
+    assert actions == []
+
+
+def test_yanking_a_radio_lets_the_rest_step_up_a_band():
+    before = ["wifi0", "wifi1", "wifi2"]
+    devices = [dev("wifi1", P), dev("wifi2", P)]          # wifi0 (was on 6 GHz B) yanked
+    mem = baseline(devices)
+    mem.update(devices=before, leader={"uuid": P, "device": "wifi1", "at": 0})
+    look = spread_lookup({"wifi1": SIX_A, "wifi2": TWO})
+    actions, _, status = nm.plan_follow(devices, mem, 60.0, look)
+    assert ups(actions) == {"wifi2": "aa:00:00:00:00:62"}  # 2.4 GHz -> freed 6 GHz
+    assert status["moved"] == ["wifi2"]
+
+
+def test_diverse_followers_are_left_alone_on_topology_change():
+    devices = [dev("wifi1", P), dev("wifi2", P)]
+    mem = baseline(devices)
+    mem.update(devices=["wifi1", "wifi2", "wifi9"], leader={"uuid": P, "device": "wifi1", "at": 0})
+    look = spread_lookup({"wifi1": SIX_A, "wifi2": SIX_B})   # already the best free band
+    actions, _, _ = nm.plan_follow(devices, mem, 60.0, look)
+    assert actions == []
+
+
+def test_leader_radio_yanked_best_band_follower_inherits():
+    devices = [dev("wifi2", P), dev("wifi0", P)]
+    mem = baseline(devices)
+    mem.update(devices=["wifi0", "wifi1", "wifi2"], leader={"uuid": P, "device": "wifi1", "at": 0})
+    look = spread_lookup({"wifi2": FIVE, "wifi0": SIX_B})
+    actions, memory, _ = nm.plan_follow(devices, mem, 60.0, look)
+    assert memory["leader"]["device"] == "wifi0"
+    assert memory["leader"]["uuid"] == P
+    assert ups(actions) == {"wifi2": "aa:00:00:00:00:61"}  # 5 GHz -> freed 6 GHz A
+
+
+def test_added_card_joins_even_if_nm_autoconnected_it_elsewhere():
+    devices = [dev("wifi1", P), dev("wifi2", P), dev("wifi0", Q)]   # internal just switched on
+    mem = baseline([dev("wifi1", P), dev("wifi2", P)])
+    mem.update(devices=["wifi1", "wifi2"], leader={"uuid": P, "device": "wifi1", "at": 0})
+    look = spread_lookup({"wifi1": SIX_A, "wifi2": SIX_B, "wifi0": TWO})
+    actions, _, _ = nm.plan_follow(devices, mem, 60.0, look)
+    assert ups(actions) == {"wifi0": "aa:00:00:00:00:51"}  # the free 5 GHz AP
+
+
+def test_existing_other_network_radio_is_not_touched_on_topology_change():
+    devices = [dev("wifi1", P), dev("wifi2", Q)]
+    mem = baseline(devices)
+    mem.update(devices=["wifi1", "wifi2", "wifi0"], leader={"uuid": P, "device": "wifi1", "at": 0})
+    actions, _, status = nm.plan_follow(devices, mem, 60.0, spread_lookup({"wifi1": SIX_A}))
+    assert actions == []
+    assert status["skipped"]["wifi2"] == "on another network"
+
+
+def test_user_pinned_profile_is_never_rebalanced():
+    devices = [dev("wifi1", P), dev("wifi2", P)]
+    look = spread_lookup({"wifi1": SIX_A, "wifi2": SIX_A},
+                         profiles={P: profile(bssid="aa:00:00:00:00:61")})
+    actions, _, _ = nm.plan_follow(devices, {}, 1.0, look, primary_device="wifi1")
+    assert actions == []
+
+
 def test_activate_pinned_sets_then_clears_bssid_around_activation():
     calls = []
 

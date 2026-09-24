@@ -463,11 +463,13 @@ def cross_iface_flags(states: dict[str, dict], reader=read_sysctl) -> dict[str, 
         same_chan = [o for o in names if o != name and o not in same_bss and freqs(me) & freqs(up[o])]
         if same_bss:
             result[name].append(_flag("shared_bss", "warn", "Shares an access point",
-                                      f"Same BSS as {', '.join(same_bss)}: the radios split one "
-                                      "airtime budget, so multipath gains nothing between them."))
+                                      f"Same access point and band as {', '.join(same_bss)}: the "
+                                      "radios split one airtime budget. Multipath only gains here "
+                                      "if the network caps each client; no other AP was free."))
         if same_chan:
-            result[name].append(_flag("shared_channel", "info", "Shares a channel",
-                                      f"Same channel as {', '.join(same_chan)}: they contend for airtime."))
+            result[name].append(_flag("shared_channel", "warn", "Shares a channel",
+                                      f"Same channel as {', '.join(same_chan)} (different AP): they "
+                                      "contend for the same airtime."))
 
     by_subnet: dict[str, list[str]] = {}
     for name in names:

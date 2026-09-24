@@ -295,13 +295,18 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
     actions: list[tuple] = []
     status = {"leader": {}, "followers": [], "skipped": {}, "iface_flags": {}}
 
+    # Radios seen last poll. A radio that just appeared (stick plugged in,
+    # internal card switched on) and got auto-connected somewhere by NM has
+    # made no user choice, so its first connection never counts as one.
+    known = set(memory.get("devices") or last.keys())
+
     # 1. Who did the user just activate? (On the very first poll there is
     #    no baseline: record what's there instead of treating every radio
     #    as a brand-new user choice.)
     fresh_leader = False
     for dev in wifi:
         uuid, prev = dev.get("uuid", ""), last.get(dev["device"], "")
-        if first_poll or not uuid or uuid == prev:
+        if first_poll or not uuid or uuid == prev or dev["device"] not in known:
             continue
         move = moves.get(dev["device"])
         ours = move and move.get("target") == uuid
@@ -328,6 +333,26 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
         memory["last"] = {d["device"]: d.get("uuid", "") for d in wifi}
         return actions, memory, status
 
+    # 3. Topology: which radios exist now vs last poll. A radio added
+    #    (stick plugged in, internal card switched on) or removed (yanked,
+    #    switched off) is the moment to re-spread; so is enabling multipath
+    #    (first poll) and a new user choice. Between those, assignments are
+    #    left alone so nothing flaps.
+    devices_now = sorted(d["device"] for d in wifi)
+    prev_devices = memory.get("devices")
+    new_devices = set(devices_now) - set(prev_devices or devices_now)
+    topology_changed = prev_devices is not None and devices_now != prev_devices
+    rebalance = first_poll or topology_changed or fresh_leader
+    memory["devices"] = devices_now
+
+    # The leader's radio vanished (yanked / switched off): the best-band
+    # radio still on that network takes over, so the choice survives.
+    if leader and leader.get("device") not in by_dev:
+        heirs = [d for d in wifi if d.get("uuid") == leader["uuid"]]
+        if heirs:
+            heir = max(heirs, key=lambda d: (band_rank(lookup.freq(d["device"])), d["device"]))
+            leader = dict(leader, device=heir["device"])
+
     memory["leader"] = leader
     memory["last"] = {d["device"]: d.get("uuid", "") for d in wifi}
     if not leader:
@@ -336,6 +361,7 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
     profile = lookup.profile(leader["uuid"])
     status["leader"] = {"uuid": leader["uuid"], "id": profile.get("id", ""),
                         "device": leader["device"], "ssid": profile.get("ssid", "")}
+    status["moved"] = []
     code, severity, detail = followability(profile, lookup.global_cloned())
     if code:
         status["iface_flags"][leader["device"]] = [
@@ -343,15 +369,49 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
         status["skipped"] = {d["device"]: code for d in wifi if d["device"] != leader["device"]}
         return actions, memory, status
 
-    used_freqs = {lookup.freq(d["device"]) for d in wifi if d.get("uuid") == leader["uuid"]}
-    used_freqs.discard(0)
+    ssid = profile.get("ssid", "")
+    # A BSSID the user pinned on the profile themselves wins: never override it.
+    user_pinned = bool(profile.get("bssid"))
     need_multi = profile.get("multi_connect", "") not in MULTI_OK
+
+    def join(name: str, bssid: str, previous: str) -> None:
+        nonlocal need_multi
+        if need_multi:
+            memory["modified"].setdefault(leader["uuid"], profile.get("multi_connect", "") or "default")
+            actions.append(("multi", leader["uuid"], "manual-multiple"))
+            need_multi = False
+        actions.append(("up", leader["uuid"], name, bssid))
+        moves[name] = {"target": leader["uuid"], "previous": previous, "at": now}
+
+    # 4. Radios already on the leader's network. The leader itself never
+    #    moves (it's the user's choice). On a rebalance, a follower that
+    #    shares a frequency with a radio placed before it, or that could
+    #    step up to a free higher band, is re-pinned; best bands first.
+    used: set[int] = {lookup.freq(leader["device"])} - {0}
+    on_network = [d for d in wifi if d["device"] != leader["device"] and d.get("uuid") == leader["uuid"]]
+    on_network.sort(key=lambda d: (-band_rank(lookup.freq(d["device"])), d["device"]))
+    for dev in on_network:
+        name, cur = dev["device"], lookup.freq(dev["device"])
+        status["followers"].append(name)
+        if not rebalance or user_pinned or dev.get("state", 0) != STATE_ACTIVATED:
+            used.add(cur)
+            continue
+        pick = pick_bssid(lookup.scan(name), ssid, used)
+        collides = cur == 0 or cur in used
+        if pick and (collides or band_rank(pick["freq"]) > band_rank(cur)):
+            join(name, pick["bssid"], leader["uuid"])
+            used.add(pick["freq"])
+            status["moved"].append(name)
+        else:
+            used.add(cur)
+    used.discard(0)
+
+    # 5. Radios not on the network: idle ones join; ones on another network
+    #    only when the user just chose this one, or the radio just appeared
+    #    (NM may have auto-connected a freshly added card elsewhere).
     for dev in wifi:
         name = dev["device"]
-        if name == leader["device"]:
-            continue
-        if dev.get("uuid") == leader["uuid"]:
-            status["followers"].append(name)
+        if name == leader["device"] or dev.get("uuid") == leader["uuid"]:
             continue
         if 40 <= dev.get("state", 0) < STATE_ACTIVATED:
             status["skipped"][name] = "connecting"
@@ -360,23 +420,17 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
         if now - move.get("failed_at", -1e18) < FLAP_WINDOW_S:
             status["skipped"][name] = "cooling down after a failed join"
             continue
-        if dev.get("uuid") and not fresh_leader:
+        if dev.get("uuid") and not fresh_leader and name not in new_devices:
             status["skipped"][name] = "on another network"
             continue
         scan = lookup.scan(name)
-        if not any(a["ssid"] == profile.get("ssid") for a in scan):
+        if not any(a["ssid"] == ssid for a in scan):
             status["skipped"][name] = "network not in range"
             continue
-        # A BSSID the user pinned on the profile themselves wins: never override it.
-        pick = None if profile.get("bssid") else pick_bssid(scan, profile.get("ssid", ""), used_freqs)
-        if need_multi:
-            memory["modified"].setdefault(leader["uuid"], profile.get("multi_connect", "") or "default")
-            actions.append(("multi", leader["uuid"], "manual-multiple"))
-            need_multi = False
-        actions.append(("up", leader["uuid"], name, pick["bssid"] if pick else ""))
-        moves[name] = {"target": leader["uuid"], "previous": dev.get("uuid", ""), "at": now}
+        pick = None if user_pinned else pick_bssid(scan, ssid, used)
+        join(name, pick["bssid"] if pick else "", dev.get("uuid", ""))
         if pick:
-            used_freqs.add(pick["freq"])
+            used.add(pick["freq"])
     return actions, memory, status
 
 
