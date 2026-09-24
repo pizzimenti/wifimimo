@@ -80,7 +80,8 @@ def test_user_activation_becomes_leader_and_moves_everyone():
     ups = sorted(a[2] for a in actions if a[0] == "up")
     assert ups == ["wifi0", "wifi2"]
     assert memory["leader"]["device"] == "wifi1" and memory["leader"]["uuid"] == P
-    assert memory["moves"]["wifi0"] == {"target": P, "previous": Q, "at": 200.0}
+    assert memory["moves"]["wifi0"] == {"target": P, "previous": Q, "at": 200.0,
+                                        "bssid": "aa:00:00:00:00:02"}
 
 
 def test_channel_diversity_between_followers():
@@ -300,6 +301,55 @@ def test_user_pinned_profile_is_never_rebalanced():
                          profiles={P: profile(bssid="aa:00:00:00:00:61")})
     actions, _, _ = nm.plan_follow(devices, {}, 1.0, look, primary_device="wifi1")
     assert actions == []
+
+
+# --- bad-AP avoidance --------------------------------------------------------
+
+
+def _pinned_mem(devices, name, bssid, at, previous=""):
+    mem = baseline(devices)
+    mem.update(devices=sorted(d["device"] for d in devices),
+               leader={"uuid": P, "device": "wifi1", "at": 0},
+               moves={name: {"target": P, "previous": previous, "at": at, "bssid": bssid}})
+    return mem
+
+
+def test_join_that_did_not_stick_marks_ap_bad_and_repicks():
+    # wifi2 was pinned to 6 GHz B but DHCP failed: NM dropped it to disconnected
+    devices = [dev("wifi1", P), dev("wifi2")]
+    mem = _pinned_mem(devices, "wifi2", "aa:00:00:00:00:62", at=100.0)
+    look = spread_lookup({"wifi1": SIX_A})
+    actions, memory, status = nm.plan_follow(devices, mem, 150.0, look)
+    assert "aa:00:00:00:00:62" in memory["bad"]["wifi2"]
+    assert ups(actions) == {"wifi2": "aa:00:00:00:00:51"}           # next best: 5 GHz
+    assert status["iface_flags"]["wifi2"][0]["code"] == "avoiding_ap"
+
+
+def test_join_stuck_at_limited_connectivity_is_repinned():
+    limited = dict(dev("wifi2", P), connectivity=3)
+    devices = [dev("wifi1", P), limited]
+    mem = _pinned_mem(devices, "wifi2", "aa:00:00:00:00:62", at=100.0, previous=P)
+    look = spread_lookup({"wifi1": SIX_A, "wifi2": SIX_B})
+    # within the grace period: leave it alone
+    actions, _, _ = nm.plan_follow(devices, mem, 130.0, look)
+    assert actions == []
+    # past the grace period: bad AP, re-pinned elsewhere
+    actions, memory, status = nm.plan_follow(devices, mem, 100.0 + nm.LIMITED_GRACE_S + 1, look)
+    assert ups(actions) == {"wifi2": "aa:00:00:00:00:51"}
+    assert status["moved"] == ["wifi2"]
+
+
+def test_bad_ap_marks_expire():
+    devices = [dev("wifi1", P), dev("wifi2")]
+    mem = baseline(devices)
+    mem.update(devices=["wifi1", "wifi2"], leader={"uuid": P, "device": "wifi1", "at": 0},
+               bad={"wifi2": {"aa:00:00:00:00:62": 500.0}})
+    look = spread_lookup({"wifi1": SIX_A})
+    actions, memory, _ = nm.plan_follow(devices, mem, 400.0, look)
+    assert ups(actions) == {"wifi2": "aa:00:00:00:00:51"}           # still avoided
+    actions, memory, _ = nm.plan_follow(devices, mem, 600.0, look)
+    assert ups(actions) == {"wifi2": "aa:00:00:00:00:62"}           # expired: best again
+    assert "wifi2" not in memory["bad"]
 
 
 def test_activate_pinned_sets_then_clears_bssid_around_activation():

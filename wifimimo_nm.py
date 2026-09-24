@@ -45,6 +45,11 @@ NM_CONF_PATHS = (Path("/etc/NetworkManager/NetworkManager.conf"),
 
 FLAP_WINDOW_S = 600.0
 MIN_SIGNAL_PCT = 40          # nmcli SIGNAL is 0-100; ~40 is roughly -70 dBm
+# A pinned join is judged within this window: it either sticks with full
+# connectivity or its AP is marked bad for that radio.
+JOIN_JUDGE_S = 180.0
+LIMITED_GRACE_S = 60.0       # joined but not fully connected for this long = bad AP
+BAD_AP_TTL_S = 1800.0        # how long a bad AP is avoided for that radio
 REASON_USER_REQUESTED = 39
 STATE_DISCONNECTED = 30
 STATE_ACTIVATED = 100
@@ -273,9 +278,11 @@ def _owe_twin(beacon: dict, scan: list[dict], ssid: str) -> dict | None:
     return None
 
 
-def pick_bssid(scan: list[dict], ssid: str, used_freqs: set[int]) -> dict | None:
+def pick_bssid(scan: list[dict], ssid: str, used_freqs: set[int],
+               avoid: set[str] | frozenset = frozenset()) -> dict | None:
     """Best AP for SSID on a frequency no other radio is using, or None to
-    let NM choose. Prefers the higher band, then the stronger signal."""
+    let NM choose. Prefers the higher band, then the stronger signal.
+    `avoid`: BSSIDs that recently failed for this radio."""
     candidates: dict[str, dict] = {}
     for ap in scan:
         if ap["ssid"] != ssid or ap["signal"] < MIN_SIGNAL_PCT:
@@ -285,6 +292,8 @@ def pick_bssid(scan: list[dict], ssid: str, used_freqs: set[int]) -> dict | None
             if twin is None:
                 continue  # can't pin a transition beacon itself
             ap = dict(twin, ssid=ssid, signal=max(ap["signal"], twin["signal"]))
+        if ap["bssid"] in avoid:
+            continue
         candidates.setdefault(ap["bssid"], ap)
     fresh = [a for a in candidates.values() if a["freq"] not in used_freqs]
     if not fresh:
@@ -401,22 +410,65 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
             actions.append(("multi", leader["uuid"], "manual-multiple"))
             need_multi = False
         actions.append(("up", leader["uuid"], name, bssid))
-        moves[name] = {"target": leader["uuid"], "previous": previous, "at": now}
+        moves[name] = {"target": leader["uuid"], "previous": previous, "at": now, "bssid": bssid}
+
+    # 3b. Judge recent pinned joins. A join that didn't stick (the radio is
+    #     back to disconnected), or that stuck but hasn't reached full
+    #     connectivity after LIMITED_GRACE_S, marks that AP bad for that
+    #     radio for BAD_AP_TTL_S; the radio is re-pinned elsewhere below.
+    #     (Live 2026-09-24: one AP never gave the A8000 a DHCP lease, and
+    #     without this the follower re-picked it forever.)
+    bad: dict = memory.setdefault("bad", {})
+    for name in list(bad):
+        bad[name] = {b: until for b, until in bad[name].items() if until > now}
+        if not bad[name]:
+            del bad[name]
+    broken: set[str] = set()
+    for name, mv in moves.items():
+        bssid, dev = mv.get("bssid"), by_dev.get(name)
+        if not bssid or dev is None or now - mv.get("at", 0) > JOIN_JUDGE_S:
+            continue
+        on_target = dev.get("uuid") == mv.get("target")
+        failed = (not on_target and dev.get("state") == STATE_DISCONNECTED) or (
+            on_target and dev.get("state") == STATE_ACTIVATED
+            and dev.get("connectivity") in (1, 2, 3)
+            and now - mv.get("at", 0) > LIMITED_GRACE_S)
+        if failed:
+            bad.setdefault(name, {})[bssid] = now + BAD_AP_TTL_S
+            mv["bssid"] = ""
+            if on_target:
+                broken.add(name)
+    for name, entries in bad.items():
+        if name in by_dev:
+            status["iface_flags"].setdefault(name, []).append(_flag(
+                "avoiding_ap", "info", "Avoiding an access point",
+                "Recently failed to give this radio a working connection: "
+                + ", ".join(sorted(entries)) + ". Retried after 30 min."))
+
+    def avoid(name: str) -> set[str]:
+        return set(bad.get(name, {}))
 
     # 4. Radios already on the leader's network. The leader itself never
     #    moves (it's the user's choice). On a rebalance, a follower that
     #    shares a frequency with a radio placed before it, or that could
-    #    step up to a free higher band, is re-pinned; best bands first.
+    #    step up to a free higher band, is re-pinned; best bands first. A
+    #    follower whose AP just proved broken is re-pinned at any time.
     used: set[int] = {lookup.freq(leader["device"])} - {0}
     on_network = [d for d in wifi if d["device"] != leader["device"] and d.get("uuid") == leader["uuid"]]
     on_network.sort(key=lambda d: (-band_rank(lookup.freq(d["device"])), d["device"]))
     for dev in on_network:
         name, cur = dev["device"], lookup.freq(dev["device"])
         status["followers"].append(name)
+        if name in broken and not user_pinned:
+            pick = pick_bssid(lookup.scan(name), ssid, used, avoid(name))
+            join(name, pick["bssid"] if pick else "", leader["uuid"])
+            used.add(pick["freq"] if pick else cur)
+            status["moved"].append(name)
+            continue
         if not rebalance or user_pinned or dev.get("state", 0) != STATE_ACTIVATED:
             used.add(cur)
             continue
-        pick = pick_bssid(lookup.scan(name), ssid, used)
+        pick = pick_bssid(lookup.scan(name), ssid, used, avoid(name))
         collides = cur == 0 or cur in used
         if pick and (collides or band_rank(pick["freq"]) > band_rank(cur)):
             join(name, pick["bssid"], leader["uuid"])
@@ -447,7 +499,7 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
         if not any(a["ssid"] == ssid for a in scan):
             status["skipped"][name] = "network not in range"
             continue
-        pick = None if user_pinned else pick_bssid(scan, ssid, used)
+        pick = None if user_pinned else pick_bssid(scan, ssid, used, avoid(name))
         join(name, pick["bssid"] if pick else "", dev.get("uuid", ""))
         if pick:
             used.add(pick["freq"])
