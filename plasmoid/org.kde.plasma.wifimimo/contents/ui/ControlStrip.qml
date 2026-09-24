@@ -10,6 +10,10 @@ import org.kde.plasma.components as PlasmaComponents3
 // pkexec (polkit action allows the active session without a prompt). A
 // switch's `checked` always tracks the daemon's reported state: after a
 // click we re-bind it, so the UI can never claim a state the machine isn't in.
+//
+// Every transient state (busy, error, "are you sure?") is shown *inside* the
+// existing two rows, never as an extra row, so nothing below this block
+// (graph, traffic, card selector) ever moves.
 ColumnLayout {
     id: strip
 
@@ -18,14 +22,38 @@ ColumnLayout {
     readonly property var mp: app.doc && app.doc.multipath ? app.doc.multipath : ({})
     readonly property var card: app.doc && app.doc.internal_card ? app.doc.internal_card : ({})
     readonly property var nm: app.doc && app.doc.nm ? app.doc.nm : ({})
+    readonly property real smallFont: Math.max(9, Kirigami.Theme.defaultFont.pixelSize - 1)
     property bool confirmInternalOff: false
 
+    // Multipath needs two radios. A switched-off managed internal card counts
+    // (turning it on makes two), and the switch never hides while multipath
+    // is on, so it can always be turned off.
+    readonly property int possibleRadios: app.radios.length + (app.internalGhostShown ? 1 : 0)
+    readonly property bool showMultipath: possibleRadios >= 2 || !!mp.desired
+    // The internal row shows whenever wifimimo manages an internal card, even
+    // while it's off and absent from the bus: that row is the way back on.
+    readonly property bool showInternal: !!card.managed
+
     spacing: 2
-    visible: !!(app.doc && app.doc.helper_available)
+    visible: !!(app.doc && app.doc.helper_available) && (showMultipath || showInternal)
+
+    function busy(verb) {
+        return app.helperBusy.indexOf(verb) === 0;
+    }
+
+    function failed(verb) {
+        return app.helperError !== "" && app.helperErrorVerb === verb;
+    }
 
     function multipathSubtitle() {
-        if (app.helperBusy.indexOf("multipath") === 0) {
+        if (busy("multipath")) {
             return "applying…";
+        }
+        if (failed("multipath")) {
+            return app.helperError;
+        }
+        if (mp.error) {
+            return mp.error;
         }
         if (!mp.desired) {
             return "off";
@@ -42,8 +70,14 @@ ColumnLayout {
     }
 
     function internalSubtitle() {
-        if (app.helperBusy.indexOf("internal") === 0) {
+        if (confirmInternalOff) {
+            return "Your only connected radio. Turn it off anyway?";
+        }
+        if (busy("internal")) {
             return app.helperBusy.endsWith("enable") ? "turning on…" : "turning off…";
+        }
+        if (failed("internal")) {
+            return app.helperError;
         }
         if (card.present) {
             return "on" + (card.iface ? " · " + card.iface : "") + (card.bound ? "" : " · no driver");
@@ -51,36 +85,60 @@ ColumnLayout {
         return card.desired ? "on · waiting for the card" : "off · removed from the PCI bus";
     }
 
+    component RowTitle: PlasmaComponents3.Label {
+        font.bold: true
+        font.family: strip.app.monospaceFamily
+    }
+
+    component RowSubtitle: PlasmaComponents3.Label {
+        id: sub
+        property bool warn: false
+        property bool bad: false
+        Layout.fillWidth: true
+        elide: Text.ElideRight
+        color: bad ? Kirigami.Theme.negativeTextColor
+             : warn ? Kirigami.Theme.neutralTextColor
+             : Kirigami.Theme.disabledTextColor
+        font.family: strip.app.monospaceFamily
+        font.pixelSize: strip.smallFont
+
+        MouseArea {
+            id: subHover
+            anchors.fill: parent
+            hoverEnabled: true
+            acceptedButtons: Qt.NoButton
+        }
+        PlasmaComponents3.ToolTip {
+            visible: subHover.containsMouse && sub.truncated
+            text: sub.text
+        }
+    }
+
     // Row: Multipath
     RowLayout {
         Layout.fillWidth: true
+        Layout.preferredHeight: Kirigami.Units.gridUnit * 2.2
+        visible: strip.showMultipath
         spacing: Kirigami.Units.smallSpacing
 
         ColumnLayout {
             Layout.fillWidth: true
             spacing: 0
-            PlasmaComponents3.Label {
+            RowTitle {
                 text: "Multipath"
-                font.bold: true
-                font.family: strip.app.monospaceFamily
             }
-            PlasmaComponents3.Label {
-                Layout.fillWidth: true
+            RowSubtitle {
                 text: strip.multipathSubtitle()
-                elide: Text.ElideRight
-                color: strip.mp.error ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.disabledTextColor
-                font.family: strip.app.monospaceFamily
-                font.pixelSize: Math.max(9, Kirigami.Theme.defaultFont.pixelSize - 1)
+                bad: strip.failed("multipath") || !!strip.mp.error
             }
         }
         PlasmaComponents3.BusyIndicator {
-            visible: strip.app.helperBusy.indexOf("multipath") === 0
-            implicitWidth: Kirigami.Units.iconSizes.medium
-            implicitHeight: implicitWidth
+            visible: strip.busy("multipath")
+            Layout.preferredWidth: Kirigami.Units.iconSizes.medium
+            Layout.preferredHeight: Kirigami.Units.iconSizes.medium
         }
         PlasmaComponents3.Switch {
-            id: mpSwitch
-            visible: strip.app.helperBusy.indexOf("multipath") !== 0
+            visible: !strip.busy("multipath")
             enabled: strip.app.helperBusy === ""
             checked: !!strip.mp.desired
             onToggled: {
@@ -93,34 +151,44 @@ ColumnLayout {
     // Row: Internal Wi-Fi (only when install.sh --manage-internal set it up)
     RowLayout {
         Layout.fillWidth: true
-        visible: !!strip.card.managed
+        Layout.preferredHeight: Kirigami.Units.gridUnit * 2.2
+        visible: strip.showInternal
         spacing: Kirigami.Units.smallSpacing
 
         ColumnLayout {
             Layout.fillWidth: true
             spacing: 0
-            PlasmaComponents3.Label {
+            RowTitle {
                 text: "Internal Wi-Fi"
-                font.bold: true
-                font.family: strip.app.monospaceFamily
             }
-            PlasmaComponents3.Label {
-                Layout.fillWidth: true
+            RowSubtitle {
                 text: strip.internalSubtitle()
-                elide: Text.ElideRight
-                color: Kirigami.Theme.disabledTextColor
-                font.family: strip.app.monospaceFamily
-                font.pixelSize: Math.max(9, Kirigami.Theme.defaultFont.pixelSize - 1)
+                warn: strip.confirmInternalOff
+                bad: strip.failed("internal")
             }
         }
         PlasmaComponents3.BusyIndicator {
-            visible: strip.app.helperBusy.indexOf("internal") === 0
-            implicitWidth: Kirigami.Units.iconSizes.medium
-            implicitHeight: implicitWidth
+            visible: strip.busy("internal")
+            Layout.preferredWidth: Kirigami.Units.iconSizes.medium
+            Layout.preferredHeight: Kirigami.Units.iconSizes.medium
+        }
+        // Confirmation replaces the switch in place (no extra row).
+        PlasmaComponents3.ToolButton {
+            visible: strip.confirmInternalOff
+            text: "Turn off"
+            onClicked: {
+                strip.confirmInternalOff = false;
+                strip.app.runHelper("internal", "disable");
+            }
+        }
+        PlasmaComponents3.ToolButton {
+            visible: strip.confirmInternalOff
+            text: "Cancel"
+            onClicked: strip.confirmInternalOff = false
         }
         PlasmaComponents3.Switch {
-            visible: strip.app.helperBusy.indexOf("internal") !== 0
-            enabled: strip.app.helperBusy === "" && !strip.confirmInternalOff
+            visible: !strip.busy("internal") && !strip.confirmInternalOff
+            enabled: strip.app.helperBusy === ""
             checked: !!strip.card.desired || !!strip.card.present
             onToggled: {
                 if (!checked && strip.app.onlyConnectedIsInternal) {
@@ -131,41 +199,5 @@ ColumnLayout {
                 checked = Qt.binding(() => !!strip.card.desired || !!strip.card.present);
             }
         }
-    }
-
-    // Guard: turning off the only connected radio disconnects you.
-    RowLayout {
-        Layout.fillWidth: true
-        visible: strip.confirmInternalOff
-        spacing: Kirigami.Units.smallSpacing
-
-        PlasmaComponents3.Label {
-            Layout.fillWidth: true
-            text: "It's your only connected radio. Turn it off anyway?"
-            wrapMode: Text.Wrap
-            color: Kirigami.Theme.neutralTextColor
-            font.family: strip.app.monospaceFamily
-        }
-        PlasmaComponents3.Button {
-            text: "Turn off"
-            onClicked: {
-                strip.confirmInternalOff = false;
-                strip.app.runHelper("internal", "disable");
-            }
-        }
-        PlasmaComponents3.Button {
-            text: "Cancel"
-            onClicked: strip.confirmInternalOff = false
-        }
-    }
-
-    PlasmaComponents3.Label {
-        Layout.fillWidth: true
-        visible: strip.app.helperError !== ""
-        text: strip.app.helperError
-        wrapMode: Text.Wrap
-        color: Kirigami.Theme.negativeTextColor
-        font.family: strip.app.monospaceFamily
-        font.pixelSize: Math.max(9, Kirigami.Theme.defaultFont.pixelSize - 1)
     }
 }

@@ -30,7 +30,7 @@ Item {
     readonly property real plotW: Math.max(1, width - leftPad - rightPad)
     readonly property real plotH: Math.max(1, height - bottomPad)
 
-    implicitHeight: Kirigami.Units.gridUnit * 6
+    implicitHeight: Kirigami.Units.gridUnit * 5
 
     function xFor(ts) {
         return (ts - (nowTs - windowS)) / windowS * plotW;

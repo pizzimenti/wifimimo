@@ -117,7 +117,7 @@ PlasmoidItem {
     readonly property string internalGhost: "@internal"  // selector id for a switched-off internal card
 
     // Schema v4: the whole document (multipath, internal_card, nm, every
-    // card) and a per-radio summary model for the graph / traffic / selector.
+    // card) and a per-radio summary model for the graph and the selector.
     property var doc: ({})
     property var radios: []
     readonly property var internalCard: doc && doc.internal_card ? doc.internal_card : ({})
@@ -125,14 +125,6 @@ PlasmoidItem {
     readonly property bool onlyConnectedIsInternal: {
         const up = radios.filter(r => r.connected);
         return up.length === 1 && up[0].internal;
-    }
-    readonly property string trafficCaption: {
-        const mp = doc && doc.multipath ? doc.multipath : {};
-        if (mp.active) {
-            return "multipath · " + (mp.members || []).length + " radios";
-        }
-        const primary = radios.find(r => r.iface === (doc ? doc.iface : ""));
-        return primary && primary.connected ? "single path · " + primary.name : "";
     }
 
     // Root helper (pkexec; polkit allows the active session without a prompt).
@@ -143,6 +135,7 @@ PlasmoidItem {
     })
     property string helperBusy: ""
     property string helperError: ""
+    property string helperErrorVerb: ""   // which row shows the error
 
     // Radio palette (validated for colour-vision-deficiency separation).
     // Red / yellow / green are left out: they mean good / warn / bad here.
@@ -460,8 +453,6 @@ PlasmoidItem {
                 color: radioColor(s.color_index),
                 connected: !!s.connected,
                 internal: !!s.internal,
-                rx: Number(s.rx_mbps) || 0,
-                tx: Number(s.tx_mbps) || 0,
                 history: Array.isArray(s.signal_history) ? s.signal_history : [],
                 worst: worstSeverity(s.flags),
                 selected: name === shownIface
@@ -479,6 +470,7 @@ PlasmoidItem {
         }
         helperBusy = verb + " " + action;
         helperError = "";
+        helperErrorVerb = verb;
         helperWatchdog.restart();
         helperSource.connectSource("pkexec " + helperPath + " " + verb + " " + action);
     }
@@ -908,7 +900,9 @@ PlasmoidItem {
         // change in content height would move every row above it — that's
         // what made the card buttons jump when a card went down. Everything
         // is pinned to the top; the per-card body scrolls if it's too tall.
-        readonly property real fixedHeight: Math.min(Kirigami.Units.gridUnit * 44,
+        // 36 grid units keeps the controls, graph, selector and the card's
+        // headline + SIGNAL in view; RATES / MCS / RETRIES scroll.
+        readonly property real fixedHeight: Math.min(Kirigami.Units.gridUnit * 36,
                                                      Screen.desktopAvailableHeight * 0.9)
         Layout.minimumWidth:  Kirigami.Units.gridUnit * 30
         Layout.maximumWidth:  Kirigami.Units.gridUnit * 30
@@ -980,13 +974,7 @@ PlasmoidItem {
 
             SignalGraph {
                 Layout.fillWidth: true
-                Layout.preferredHeight: Kirigami.Units.gridUnit * 6
-                app: root
-            }
-
-            TrafficShare {
-                Layout.fillWidth: true
-                Layout.topMargin: Kirigami.Units.smallSpacing
+                Layout.preferredHeight: Kirigami.Units.gridUnit * 5
                 app: root
             }
 
@@ -1003,10 +991,14 @@ PlasmoidItem {
                 Layout.fillWidth: true
                 spacing: Kirigami.Units.smallSpacing
 
+                // Unselected buttons are flat so the selected card (and
+                // "auto", when following the primary) stands out raised;
+                // `highlighted` alone is invisible under Breeze.
                 PlasmaComponents3.Button {
                     text: "auto"
                     font.family: root.monospaceFamily
                     highlighted: root.selectedIface === ""
+                    flat: !highlighted
                     onClicked: {
                         if (root.selectedIface !== "") {
                             root.selectedIface = "";
@@ -1024,6 +1016,7 @@ PlasmoidItem {
                         required property var modelData
                         font.family: root.monospaceFamily
                         highlighted: modelData.iface === root.shownIface
+                        flat: !highlighted
                         contentItem: Row {
                             spacing: 5
                             Rectangle {
@@ -1065,6 +1058,7 @@ PlasmoidItem {
                 PlasmaComponents3.Button {
                     visible: root.internalGhostShown
                     highlighted: root.selectedIface === root.internalGhost
+                    flat: !highlighted
                     font.family: root.monospaceFamily
                     contentItem: Row {
                         spacing: 5
@@ -1119,7 +1113,7 @@ PlasmoidItem {
                     font.family: root.monospaceFamily
                 }
                 PlasmaComponents3.Label {
-                    text: root.data.iface
+                    text: root.data.iface || ""
                     color: Kirigami.Theme.disabledTextColor
                     font.family: root.monospaceFamily
                 }

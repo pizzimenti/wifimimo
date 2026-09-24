@@ -28,7 +28,6 @@ Planned as 1.0.0.
   an access point or channel, ARP-flux risk, weak overall signal on MLD links,
   plus the existing link checks, as chips in the widget and lines in the monitor.
 - **Signal graph**: last 60 s of every radio's signal on a fixed −90…−30 dBm axis.
-- **Traffic share**: live per-radio throughput.
 - **Card names**: `A9000`, `A8000`, `Built-in`, vendor + chip otherwise; override in
   `~/.config/wifimimo/names.json`.
 - `install.sh --migrate-legacy-rules` and `--uninstall`.

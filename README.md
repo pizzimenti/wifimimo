@@ -118,7 +118,6 @@ goes down. From the top:
 - **All radios, last 60 s** — signal (dBm) for every radio on a fixed −90…−30 dBm
   axis with good / warn / bad bands, so link quality reads at a glance. The axis
   never rescales. Points are placed by time, and gaps (radio down) break the line.
-- **Traffic** — live per-radio throughput and share.
 - **Card selector** — `auto` follows the connected primary; each card shows a
   filled dot when up, a hollow one when down, and `!` when flagged. A switched-off
   internal card keeps a ghost button.
