@@ -1,0 +1,16 @@
+#!/bin/sh
+# wifimimo: rebuild wifi ECMP multipath after NetworkManager link events.
+# Installed root:root 0755 in /etc/NetworkManager/dispatcher.d (NM ignores
+# scripts with any other owner or mode). Always exits 0 so a routing hiccup
+# never blocks NM. The helper ignores $1 and rebuilds from live state, so a
+# stale or re-ordered event can't leave the wrong layout behind.
+[ -e /etc/wifimimo/multipath-enabled ] || exit 0
+case "$2" in
+    up|down|dhcp4-change|reapply|connectivity-change) ;;
+    *) exit 0 ;;
+esac
+case "$1" in
+    lo|tailscale*) exit 0 ;;
+esac
+timeout 20 /usr/local/lib/wifimimo/wifimimo-helper multipath apply >/dev/null 2>&1 || true
+exit 0

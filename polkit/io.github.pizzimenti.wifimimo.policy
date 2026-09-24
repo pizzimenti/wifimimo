@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  wifimimo: one action for the root helper's fixed verb set
+  (multipath enable|disable|apply|status, internal enable|disable|status|sync-rules).
+  The helper takes no caller-supplied names, paths or numbers.
+
+  allow_active=yes: any process in the active local session may run these
+  verbs without a password, which is what makes the widget toggles work on
+  an airplane. Inactive / remote sessions still need admin authentication.
+-->
+<policyconfig>
+  <vendor>wifimimo</vendor>
+  <vendor_url>https://github.com/pizzimenti/wifimimo</vendor_url>
+  <action id="io.github.pizzimenti.wifimimo.helper">
+    <description>Control wifimimo multipath routing and the internal Wi-Fi card</description>
+    <message>Authentication is required to change wifimimo routing or the internal Wi-Fi card</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/lib/wifimimo/wifimimo-helper</annotate>
+  </action>
+</policyconfig>

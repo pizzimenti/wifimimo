@@ -83,6 +83,33 @@ def proto_is_ours(value) -> bool:
     return str(value) in (str(RT_PROTO), RT_PROTO_NAME)
 
 
+def route_table(route: dict) -> int | None:
+    """Numeric table of an `ip -j route show table all` entry (None for main/local)."""
+    try:
+        return int(route.get("table", "main"))
+    except (TypeError, ValueError):
+        return None
+
+
+def ecmp_members(routes) -> list[str]:
+    """Interfaces in wifimimo's ECMP default route.
+
+    Accepts either `ip -j route show table all` output or `... table 100`
+    output (entries without a `table` key are taken to be from table 100).
+    """
+    devs: set[str] = set()
+    for route in routes if isinstance(routes, list) else []:
+        table = route_table(route) if "table" in route else ECMP_TABLE
+        if table != ECMP_TABLE or route.get("dst") != "default":
+            continue
+        if not proto_is_ours(route.get("protocol")):
+            continue
+        for hop in route.get("nexthops") or [route]:
+            if hop.get("dev"):
+                devs.add(hop["dev"])
+    return sorted(devs)
+
+
 # ---------------------------------------------------------------------------
 # Internal-card config
 #
@@ -133,3 +160,49 @@ def read_internal_conf(path: Path = INTERNAL_CONF) -> list[dict]:
 
 # PCI class 0x0280xx = "Network controller: other" — where 802.11 cards live.
 WIFI_PCI_CLASS_PREFIX = "0x0280"
+
+
+def _sysfs(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def find_internal_devices(entries: list[dict], sys_root: Path = Path("/sys")) -> list[dict]:
+    """PCI devices present right now that match a managed internal.conf entry.
+
+    Only wifi-class devices (0x0280xx) qualify, so a typo in internal.conf
+    can never target e.g. a disk controller that happens to share an id.
+    """
+    wanted = {e["id"]: e for e in entries}
+    found: list[dict] = []
+    devices = sys_root / "bus" / "pci" / "devices"
+    try:
+        candidates = sorted(devices.iterdir())
+    except OSError:
+        return found
+    for dev in candidates:
+        dev_id = f"{_sysfs(dev / 'vendor').removeprefix('0x')}:{_sysfs(dev / 'device').removeprefix('0x')}".lower()
+        entry = wanted.get(dev_id)
+        if entry is None or not _sysfs(dev / "class").startswith(WIFI_PCI_CLASS_PREFIX):
+            continue
+        driver_link = dev / "driver"
+        bound = ""
+        if driver_link.exists():
+            try:
+                bound = driver_link.resolve().name
+            except OSError:
+                bound = ""
+        try:
+            nets = sorted(p.name for p in (dev / "net").iterdir())
+        except OSError:
+            nets = []
+        found.append({
+            "addr": dev.name,
+            "id": dev_id,
+            "driver": entry["driver"],
+            "bound_driver": bound,
+            "iface": nets[0] if nets else "",
+        })
+    return found

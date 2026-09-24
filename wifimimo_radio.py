@@ -511,17 +511,9 @@ def parse_multipath_live(rules, table_routes) -> dict:
         int(r.get("priority", -1))
         for r in (rules if isinstance(rules, list) else [])
     }
-    members: list[str] = []
-    installed = False
-    for route in table_routes if isinstance(table_routes, list) else []:
-        if route.get("dst") != "default" or not shared.proto_is_ours(route.get("protocol")):
-            continue
-        installed = True
-        if route.get("dev"):
-            members.append(route["dev"])
-        members.extend(h["dev"] for h in route.get("nexthops", []) or [] if h.get("dev"))
-    active = installed and shared.PRIO_ECMP in rule_prios and shared.PRIO_SUPPRESS_MAIN in rule_prios
-    return {"active": active, "members": sorted(set(members))}
+    members = shared.ecmp_members(table_routes)
+    active = bool(members) and shared.PRIO_ECMP in rule_prios and shared.PRIO_SUPPRESS_MAIN in rule_prios
+    return {"active": active, "members": members}
 
 
 def read_multipath_status(etc_dir: Path = shared.ETC_DIR, run_dir: Path = shared.RUN_DIR,
@@ -568,34 +560,17 @@ def read_internal_status(sys_root: Path = SYS_ROOT, etc_dir: Path = shared.ETC_D
         "pci_addr": "",
         "iface": "",
     }
-    if not entries:
-        return status
-    ids = {e["id"] for e in entries}
-    devices = sys_root / "bus" / "pci" / "devices"
-    try:
-        candidates = sorted(devices.iterdir())
-    except OSError:
-        candidates = []
-    for dev in candidates:
-        vendor = _read(dev / "vendor").removeprefix("0x")
-        device = _read(dev / "device").removeprefix("0x")
-        if f"{vendor}:{device}".lower() not in ids:
-            continue
-        if not _read(dev / "class").startswith(shared.WIFI_PCI_CLASS_PREFIX):
-            continue
-        status["present"] = True
-        status["pci_addr"] = dev.name
-        driver = _resolve(dev / "driver")
-        status["bound"] = driver is not None
-        if driver is not None:
-            status["driver"] = driver.name
-        try:
-            nets = sorted((dev / "net").iterdir())
-        except OSError:
-            nets = []
-        if nets:
-            status["iface"] = nets[0].name
-        break
+    devices = shared.find_internal_devices(entries, sys_root)
+    if devices:
+        dev = devices[0]
+        status.update(
+            present=True,
+            pci_addr=dev["addr"],
+            bound=bool(dev["bound_driver"]),
+            driver=dev["bound_driver"] or dev["driver"],
+            iface=dev["iface"],
+            dev_id=dev["id"],
+        )
     return status
 
 
