@@ -26,11 +26,12 @@ RowLayout {
     readonly property var nm: app.doc && app.doc.nm ? app.doc.nm : ({})
     property bool confirmInternalOff: false
 
-    // Multipath needs two radios. A switched-off managed internal card counts
-    // (turning it on makes two), and the switch never hides while multipath
-    // is on, so it can always be turned off.
+    // Multipath needs two radios; with one it's meaningless, so the switch
+    // hides. A switched-off managed internal card counts (turning it on makes
+    // two). The setting itself persists: plug in a second radio and the
+    // switch reappears in the state it was left in.
     readonly property int possibleRadios: app.radios.length + (app.internalGhostShown ? 1 : 0)
-    readonly property bool showMultipath: possibleRadios >= 2 || !!mp.desired
+    readonly property bool showMultipath: possibleRadios >= 2
     // Shown whenever wifimimo manages an internal card, even while it's off
     // and absent from the PCI bus: this switch is the way back on.
     readonly property bool showInternal: !!card.managed
