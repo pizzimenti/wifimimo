@@ -961,21 +961,27 @@ class Liveness:
                 self.last_reply[dev] = self._clock()
 
     def update(self, states: dict) -> None:
-        """Probe every radio with an address and a gateway; stop the rest."""
-        want = {dev: s.get("gateway") for dev, s in states.items()
+        """Probe every radio with an address and a gateway; stop the rest.
+
+        A probe is keyed by (gateway, BSSID): every AP here shares one
+        gateway, so a radio that switched AP would otherwise keep its old
+        probe and its last reply from before the switch, and read dead the
+        moment it landed (live 16:28:41, "no traffic" after 2 s)."""
+        want = {dev: (s.get("gateway"), str(s.get("bssid") or "").lower())
+                for dev, s in states.items()
                 if s.get("connected") and s.get("ipv4") and s.get("gateway")}
         for dev in list(self._procs):
             proc, gw = self._procs[dev]
             if want.get(dev) != gw or (proc is not None and proc.poll() is not None):
                 self.stop(dev)
-        for dev, gw in want.items():
+        for dev, key in want.items():
             if dev in self._procs:
                 continue
             try:
-                proc = self._spawn(dev, gw)
+                proc = self._spawn(dev, key[0])
             except OSError:
                 continue
-            self._procs[dev] = (proc, gw)
+            self._procs[dev] = (proc, key)
             self.started[dev] = self._clock()
             self.last_reply.pop(dev, None)
             if proc is not None and getattr(proc, "stdout", None) is not None:

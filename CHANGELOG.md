@@ -7,6 +7,14 @@ Each version's heading says whether it was a major, minor or patch change.
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-09-25 (patch)
+
+### Fixed
+
+- The traffic check restarts, with its grace period, when a radio changes access
+  point. Every AP here shares one gateway, so a radio that switched AP kept its
+  pre-switch last reply and was called "no traffic" 2 s after landing.
+
 ## [1.5.0] - 2026-09-25 (minor)
 
 ### Changed

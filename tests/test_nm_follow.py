@@ -777,6 +777,21 @@ def test_liveness_restarts_when_the_gateway_changes():
     assert spawned == ["10.7.10.1", "10.3.0.1"]
 
 
+def test_liveness_restarts_with_a_fresh_grace_when_the_radio_changes_ap():
+    # live 16:28:41: same gateway on every AP, so a radio that switched AP kept
+    # its pre-switch last reply and read dead 2 s after landing
+    clock = FakeClock(100.0)
+    spawned = []
+    live = nm.Liveness(spawn=lambda dev, gw: spawned.append(gw), clock=clock)
+    up = {"connected": True, "ipv4": "a", "gateway": "10.7.10.1"}
+    live.update({"wifi2": dict(up, bssid="AA:00:00:00:00:01")})
+    live.last_reply["wifi2"] = 100.0
+    clock.t = 110.0                                   # 10 s switching, no replies
+    live.update({"wifi2": dict(up, bssid="aa:00:00:00:00:02")})
+    assert spawned == ["10.7.10.1", "10.7.10.1"]
+    assert live.alive("wifi2", 112.0) is None         # in its grace, not dead
+
+
 def dead_ctx(scans, dead=(), alive=(), now=100.0):
     ctx = ctx_for(scans, now=now)
     ctx.alive = {**{d: False for d in dead}, **{d: True for d in alive}}
