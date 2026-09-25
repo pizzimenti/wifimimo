@@ -53,7 +53,14 @@ FLAP_WINDOW_S = 600.0
 # connectivity or its AP is marked bad for that radio.
 JOIN_JUDGE_S = 180.0
 LIMITED_GRACE_S = 60.0       # joined but not fully connected for this long = bad AP
-BAD_AP_TTL_S = 1800.0        # how long a bad AP is avoided for that radio
+# Avoiding an AP after a failed join is two strikes: the first failure avoids
+# it for RETRY_AVOID_S, then it's tried again; failing that retry too avoids
+# it for good (until you choose the network again in the applet). A join
+# that works clears the strikes. (Live: the riverhouse AX1800 dropped DHCP
+# replies for a while, then was fixed; a long first avoid would have kept
+# radios off it after the fix.)
+RETRY_AVOID_S = 300.0
+AVOID_FOREVER = 1e12         # "until" timestamp of a permanent avoid
 # A radio's first connection this soon after it appeared (stick replugged,
 # internal card switched on) is NetworkManager's autoconnect, not a choice.
 # Live 2026-09-25: a replugged A9000 was autoconnected 3 s after it came
@@ -62,12 +69,10 @@ NEW_RADIO_GRACE_S = 60.0
 JOIN_START_S = 5.0           # a join isn't judged "didn't start" before this
 SWITCH_TIMEOUT_S = 30.0      # a switch in flight counts as busy up to this long
 SHARED_BAD_S = 120.0         # a strong AP that failed a join: avoided by every radio
-# A failed join counts against the AP (every radio avoids it) only when we
-# read it at SURE_DBM or better: below that it may be the AP's minimum-signal
-# floor refusing this one radio (the AP hears us ~10 dB weaker than we hear
-# it), which only that radio backs off from, for FLOOR_BACKOFF_S.
+# A failed join also counts against the AP for every radio (SHARED_BAD_S)
+# only when we read it at SURE_DBM or better: below that it may be the AP's
+# minimum-signal floor refusing this one radio.
 SURE_DBM = -50
-FLOOR_BACKOFF_S = 120.0
 JOIN_LOG = STATE_DIR / "joins.jsonl"
 # Traffic check (Liveness): a gateway ping per radio every 2 s; three misses
 # in a row (6 s) and the link is dead however good its signal reads.
@@ -530,8 +535,9 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
 
     # 3b. Judge recent pinned joins. A join that didn't stick (the radio is
     #     back to disconnected), or that stuck but hasn't reached full
-    #     connectivity after LIMITED_GRACE_S, marks that AP bad for that
-    #     radio for BAD_AP_TTL_S; the radio is re-pinned elsewhere below.
+    #     connectivity after LIMITED_GRACE_S, is a strike against that AP for
+    #     that radio (RETRY_AVOID_S, then for good on the second); the radio
+    #     is re-pinned elsewhere below.
     #     (Live 2026-09-24: one AP never gave the A8000 a DHCP lease, and
     #     without this the follower re-picked it forever.)
     #     A join to a strong AP that fails is the AP's doing (live 2026-09-25:
@@ -540,7 +546,13 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
     #     the one that tried. A radio that loses the AP it was on avoids that
     #     AP for LOST_AP_S (it was sent straight back to it, and failed).
     bad: dict = memory.setdefault("bad", {})
+    strikes: dict = memory.setdefault("strikes", {})
     shared_bad: dict = memory.setdefault("bad_all", {})
+    if fresh_leader:
+        # choosing the network in the applet is the retry for everything
+        bad.clear()
+        strikes.clear()
+        shared_bad.clear()
     for name in list(bad):
         bad[name] = {b: until for b, until in bad[name].items() if until > now}
         if not bad[name]:
@@ -585,7 +597,9 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
         if not (dropped or stalled or dead or limited):
             continue
         sure = mv.get("signal", -100) >= SURE_DBM
-        bad.setdefault(name, {})[bssid] = now + (BAD_AP_TTL_S if sure else FLOOR_BACKOFF_S)
+        count = strikes.setdefault(name, {}).get(bssid, 0) + 1
+        strikes[name][bssid] = count
+        bad.setdefault(name, {})[bssid] = AVOID_FOREVER if count >= 2 else now + RETRY_AVOID_S
         if sure:
             shared_bad[bssid] = now + SHARED_BAD_S
         # Only a join that never got past association / handshake says the AP
@@ -623,10 +637,12 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
             del held[name]
     for name, entries in bad.items():
         if name in by_dev:
+            parts = [f"{b} ({'until you choose the network again' if until >= AVOID_FOREVER else f'{int(until - now)} s more'})"
+                     for b, until in sorted(entries.items())]
             status["iface_flags"].setdefault(name, []).append(_flag(
                 "avoiding_ap", "info", "Avoiding an access point",
                 "Recently failed to give this radio a working connection: "
-                + ", ".join(sorted(entries)) + "."))
+                + ", ".join(parts) + "."))
 
     def avoid(name: str) -> set[str]:
         return set(bad.get(name, {})) | set(shared_bad)
@@ -727,6 +743,7 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
             held[view["dev"]] = view["slot"]["bssid"]
             if ctx.alive.get(view["dev"]) is True:
                 proven[view["slot"]["bssid"]] = now
+                strikes.get(view["dev"], {}).pop(view["slot"]["bssid"], None)   # it works now
 
     def finish(views: list[dict], joining: str) -> tuple[list[tuple], dict, dict]:
         # A join that timed out is cancelled; idle radios that aren't

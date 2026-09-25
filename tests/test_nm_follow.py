@@ -363,10 +363,51 @@ def test_a_marginal_join_that_drops_is_a_floor_refusal_not_a_bad_ap():
     mem = _pinned_mem(devices, "wifi2", A2, at=90.0)
     mem["moves"]["wifi2"]["signal"] = -70            # read -70: the AP may hear us at -80
     _, memory, status = plan(devices, mem, 100.0)
-    assert memory["bad"]["wifi2"][A2] == 100.0 + nm.FLOOR_BACKOFF_S
+    assert memory["bad"]["wifi2"][A2] == 100.0 + nm.RETRY_AVOID_S
     assert A2 not in memory.get("bad_all", {})
     (entry,) = [j for j in status["joins"] if j["outcome"] != "tried up"]
     assert entry["outcome"] == "refused (floor?)" and entry["signal"] == -70
+
+
+def test_avoid_is_retried_after_five_minutes_and_permanent_on_the_second_failure():
+    devices = [dev("wifi1", P), dev("wifi0")]
+    scans = {"wifi0": [ap(A1, 5180), ap(A2, 5745)]}
+    # strike 1
+    mem = _pinned_mem(devices, "wifi0", A2, at=90.0)
+    _, mem, status = plan(devices, mem, 100.0, lookup(scans=scans), scans=scans)
+    assert mem["bad"]["wifi0"][A2] == 100.0 + nm.RETRY_AVOID_S
+    assert "s more" in status["iface_flags"]["wifi0"][0]["detail"]
+    # still avoided within the 5 minutes, retried after
+    actions, mem, _ = plan(devices, mem, 100.0 + nm.RETRY_AVOID_S - 1, lookup(scans=scans), scans=scans)
+    assert A2 not in ups(actions).values()
+    t = 100.0 + nm.RETRY_AVOID_S + 1
+    actions, mem, _ = plan(devices, mem, t, lookup(scans=scans), scans=scans)
+    assert ups(actions) == {"wifi0": A2}
+    # the retry fails too: strike 2, avoided for good
+    _, mem, status = plan(devices, mem, t + nm.JOIN_START_S + 1, lookup(scans=scans), scans=scans)
+    assert mem["bad"]["wifi0"][A2] == nm.AVOID_FOREVER
+    assert "until you choose the network again" in status["iface_flags"]["wifi0"][0]["detail"]
+    actions, mem, _ = plan(devices, mem, t + 86_400, lookup(scans=scans), scans=scans)
+    assert A2 not in ups(actions).values()
+
+
+def test_choosing_the_network_again_clears_every_avoid():
+    before = [dev("wifi1", Q), dev("wifi0")]
+    mem = baseline(before)
+    mem.update(bad={"wifi0": {A2: nm.AVOID_FOREVER}}, strikes={"wifi0": {A2: 2}},
+               bad_all={A1: 500.0})
+    _, mem, _ = plan([dev("wifi1", P), dev("wifi0")], mem, 100.0)
+    assert mem["bad"] == {} and mem["strikes"] == {} and mem["bad_all"] == {}
+
+
+def test_a_join_that_works_clears_its_strike():
+    devices = [dev("wifi1", P), dev("wifi2", P)]
+    look = lookup(freqs={"wifi1": 5180, "wifi2": 5745}, bssids={"wifi1": A1, "wifi2": A2},
+                  signals={"wifi1": -50, "wifi2": -50})
+    mem = led(devices)
+    mem["strikes"] = {"wifi2": {A2: 1}}
+    _, mem, _ = plan(devices, mem, 100.0, look, ctx=dead_ctx(SCANS, alive=["wifi1", "wifi2"]))
+    assert A2 not in mem["strikes"].get("wifi2", {})
 
 
 def test_join_is_not_judged_before_it_could_start():

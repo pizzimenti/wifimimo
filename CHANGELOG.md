@@ -7,6 +7,17 @@ Each version's heading says whether it was a major, minor or patch change.
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-09-25 (minor)
+
+### Changed
+
+- **Avoiding an access point is two strikes**: the first failed join avoids it
+  for 5 min, then it's tried again; a second failure avoids it until you choose
+  the network again in the applet. A join that works clears the strikes. (Was a
+  flat 30 min, or 2 min below -50 dBm: long enough to keep radios off an AP
+  after it was fixed, short enough to keep retrying one that never works.)
+  The widget's flag says which avoids are timed and which are for good.
+
 ## [1.4.0] - 2026-09-25 (minor)
 
 ### Changed
