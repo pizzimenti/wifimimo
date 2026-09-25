@@ -6,7 +6,7 @@ the full per-MCS rate ladder for **Wi-Fi 4 / 5 / 6 / 6E / 7** links.
 
 ![wifimimo expanded panel](docs/wifimimo-panel.png)
 
-Current version: `1.5.1` · See [CHANGELOG.md](CHANGELOG.md) · Use GitHub Issues for bugs and feature requests.
+Current version: `1.5.2` · See [CHANGELOG.md](CHANGELOG.md) · Use GitHub Issues for bugs and feature requests.
 
 ## What it shows
 
@@ -212,9 +212,9 @@ Keeping links honest:
 - **No races.** While following a network, NetworkManager's autoconnect is
   blocked on every radio (in memory only, re-asserted every poll), so only the
   planner connects radios. If the network is gone for 2 min and no radio sees
-  it, NetworkManager takes over again; turning multipath off does too. If the
-  daemon ever dies while holding, reboot or
-  `nmcli device set <radio> autoconnect yes` restores it.
+  it, NetworkManager takes over again; turning multipath off does too, and so
+  does the daemon stopping for any reason, crash included (the service's
+  `ExecStopPost` runs `wifimimo-daemon --release`).
 - **Join log.** Every attempt and its outcome goes to
   `~/.local/state/wifimimo/joins.jsonl`.
 

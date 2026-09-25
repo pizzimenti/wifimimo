@@ -356,6 +356,13 @@ class WifimimoDaemon:
 
 
 def main() -> int:
+    if "--release" in sys.argv[1:]:
+        # systemd ExecStopPost: runs after every stop, crash included, so a
+        # dead daemon never leaves radios with NetworkManager autoconnect off.
+        import wifimimo_nm
+        released = wifimimo_nm.release_holds()
+        log(f"released NetworkManager autoconnect on: {', '.join(released) or '(none)'}")
+        return 0
     # WIFI_IFACE pins the daemon to one card; unset/empty auto-discovers
     # all wifi netdevs each poll (hotplug-friendly).
     iface = os.environ.get("WIFI_IFACE", "").strip()

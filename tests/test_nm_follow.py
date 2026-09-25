@@ -920,3 +920,17 @@ def test_liveness_fuse_is_shorter_for_a_card_at_the_lowest_rate():
     live.last_reply["wifi2"] = 100.0
     assert live.alive("wifi2", 104.5) is True
     assert live.alive("wifi2", 104.5, suspect=True) is False
+
+
+def test_stopping_the_daemon_hands_every_held_radio_back(tmp_path):
+    path = tmp_path / "follow.json"
+    path.write_text(json.dumps({"leader": {"uuid": P}, "held_ac": ["wifi1", "wifi2"],
+                                "parked": {"wifi0": 1.0}, "bad": {"wifi1": {A1: 5.0}}}))
+    calls = []
+    released = nm.release_holds(path, nmcli=lambda a: (calls.append(" ".join(a)), (0, ""))[1])
+    assert released == ["wifi0", "wifi1", "wifi2"]
+    assert calls == [f"device set {d} autoconnect yes" for d in ("wifi0", "wifi1", "wifi2")]
+    left = json.loads(path.read_text())
+    assert "held_ac" not in left and "parked" not in left
+    assert left["leader"] == {"uuid": P} and left["bad"] == {"wifi1": {A1: 5.0}}   # rest kept
+    assert nm.release_holds(tmp_path / "missing.json") == []

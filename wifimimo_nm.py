@@ -831,6 +831,36 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
     return finish(views, joining)
 
 
+def plan_release_holds(memory: dict) -> tuple[list[tuple], dict]:
+    """The daemon is stopping (or crashed): hand every radio we hold or parked
+    back to NetworkManager's autoconnect, so a dead daemon never leaves radios
+    unable to connect. The next start re-asserts the holds within a poll."""
+    memory = dict(memory or {})
+    radios = set(memory.pop("parked", {}) or {}) | set(memory.pop("held_ac", []) or [])
+    return [("release", name) for name in sorted(radios)], memory
+
+
+def release_holds(path: Path = FOLLOW_PATH, nmcli=None) -> list[str]:
+    """`wifimimo-daemon --release` (systemd ExecStopPost). Returns the radios."""
+    nmcli = nmcli or run_nmcli
+    try:
+        memory = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(memory, dict):
+        return []
+    actions, memory = plan_release_holds(memory)
+    for _, dev in actions:
+        nmcli(["device", "set", dev, "autoconnect", "yes"])
+    try:
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(memory, indent=1) + "\n", encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass
+    return [dev for _, dev in actions]
+
+
 SWAP_TIMEOUT_S = 60.0
 
 

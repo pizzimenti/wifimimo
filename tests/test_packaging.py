@@ -93,3 +93,8 @@ def test_versions_agree():
     changelog = (ROOT / "CHANGELOG.md").read_text()
     releases = re.findall(r"^## \[(\d+\.\d+\.\d+)\]", changelog, re.M)
     assert releases and releases[0] == version
+
+
+def test_service_releases_radios_after_every_stop():
+    unit = (ROOT / "services" / "wifimimo-daemon.service").read_text()
+    assert "ExecStopPost=/usr/local/bin/wifimimo-daemon --release" in unit

@@ -7,6 +7,15 @@ Each version's heading says whether it was a major, minor or patch change.
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-09-25 (patch)
+
+### Fixed
+
+- A stopped or crashed daemon no longer leaves radios with NetworkManager's
+  autoconnect blocked: the user service's `ExecStopPost` runs
+  `wifimimo-daemon --release`, which hands every held or parked radio back. The
+  next start re-holds them within a poll.
+
 ## [1.5.1] - 2026-09-25 (patch)
 
 ### Fixed
