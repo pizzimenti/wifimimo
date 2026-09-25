@@ -408,3 +408,14 @@ def test_a_working_radio_ignores_unproven_candidates():
     assert roam.plan_slots(radios)[0] is None
     radios[0]["cands"][0]["proven"] = True
     assert roam.plan_slots(radios)[0] == ("move", "wifi1", "bb:36")
+
+
+def test_predicted_uses_the_current_horizon_not_the_one_at_import():
+    t = roam.Trend()
+    feed(t, "wifi1", [-60, -61, -62, -63, -64, -65, -66, -67])
+    old = roam.HORIZON_S
+    try:
+        roam.HORIZON_S = 2.0
+        assert t.predicted("wifi1") == pytest.approx(t.level("wifi1") - 2.0)
+    finally:
+        roam.HORIZON_S = old

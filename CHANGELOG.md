@@ -7,6 +7,16 @@ Each version's heading says whether it was a major, minor or patch change.
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-09-25 (minor)
+
+### Added
+
+- **Per-site tuning**: `~/.config/wifimimo/roam.json` overrides the roaming
+  thresholds (join / keep / dead signal levels, look-ahead, upgrade margin, join
+  timeout, avoid time, traffic-check fuse, network-gone time). Validated against
+  safe ranges, re-read when it changes; removing a key restores its default.
+  Applied values and any problems show in the state file's `nm` block.
+
 ## [1.5.2] - 2026-09-25 (patch)
 
 ### Fixed

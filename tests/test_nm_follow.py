@@ -986,3 +986,39 @@ def test_a_swap_runs_end_to_end_through_the_follower():
     actions, mem, status = nm.plan_follow(on_net, mem, 106.0, look(where), "", ctx)
     assert "swap" not in mem and not ups(actions) and not kinds(actions, "park")
     assert status["plan"] == "placement already best"
+
+
+def test_site_tuning_file_overrides_validated_thresholds(tmp_path):
+    path = tmp_path / "roam.json"
+    tuning = nm.Tuning(path)
+    try:
+        path.write_text(json.dumps({"min_join_dbm": -68, "join_timeout_s": 20,
+                                    "strong_dbm": -10, "bogus": 1, "keep_dbm": "x"}))
+        tuning.refresh()
+        assert roam.MIN_JOIN_DBM == -68 and nm.JOIN_TIMEOUT_S == 20
+        assert roam.STRONG_DBM == -70                        # out of range: default kept
+        assert tuning.applied == {"min_join_dbm": -68.0, "join_timeout_s": 20.0}
+        assert len(tuning.problems) == 3
+        # removing a key restores its default on the next change
+        import os
+        path.write_text(json.dumps({"join_timeout_s": 20}))
+        os.utime(path, (1, 1))
+        tuning.refresh()
+        assert roam.MIN_JOIN_DBM == -72 and nm.JOIN_TIMEOUT_S == 20
+        path.unlink()
+        tuning.refresh()
+        assert nm.JOIN_TIMEOUT_S == 15.0 and tuning.applied == {}
+    finally:
+        nm.apply_tuning({})
+
+
+def test_broken_tuning_file_means_defaults(tmp_path):
+    path = tmp_path / "roam.json"
+    path.write_text("{not json")
+    tuning = nm.Tuning(path)
+    try:
+        tuning.refresh()
+        assert tuning.applied == {} and "unreadable" in tuning.problems[0]
+        assert roam.MIN_JOIN_DBM == -72
+    finally:
+        nm.apply_tuning({})

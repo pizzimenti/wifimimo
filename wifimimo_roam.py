@@ -310,12 +310,14 @@ class Trend:
             return 0.0
         return sum((t - mt) * (v - mv) for t, v in series) / var
 
-    def predicted(self, dev: str, horizon_s: float = HORIZON_S) -> float | None:
+    def predicted(self, dev: str, horizon_s: float | None = None) -> float | None:
         """Where the level is heading: only declines are projected, and at
         most MAX_EXTRAPOLATE_DB below the current level."""
         level = self.level(dev)
         if level is None:
             return None
+        if horizon_s is None:
+            horizon_s = HORIZON_S   # read at call time: it's tunable
         drop = min(0.0, self.slope(dev)) * horizon_s
         return level + max(drop, -MAX_EXTRAPOLATE_DB)
 

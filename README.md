@@ -6,7 +6,7 @@ the full per-MCS rate ladder for **Wi-Fi 4 / 5 / 6 / 6E / 7** links.
 
 ![wifimimo expanded panel](docs/wifimimo-panel.png)
 
-Current version: `1.5.2` · See [CHANGELOG.md](CHANGELOG.md) · Use GitHub Issues for bugs and feature requests.
+Current version: `1.6.0` · See [CHANGELOG.md](CHANGELOG.md) · Use GitHub Issues for bugs and feature requests.
 
 ## What it shows
 
@@ -217,6 +217,18 @@ Keeping links honest:
   `ExecStopPost` runs `wifimimo-daemon --release`).
 - **Join log.** Every attempt and its outcome goes to
   `~/.local/state/wifimimo/joins.jsonl`.
+
+The thresholds were tuned on one property. To tune another site, put overrides in
+`~/.config/wifimimo/roam.json` (re-read when it changes; unknown keys and
+out-of-range values are ignored and reported in the state file's `nm.tuning_problems`):
+
+```json
+{"strong_dbm": -70, "keep_dbm": -75, "dead_dbm": -82, "min_join_dbm": -72,
+ "horizon_s": 6, "upgrade_db": 6, "join_timeout_s": 15, "retry_avoid_s": 300,
+ "dead_after_s": 6, "leader_lost_s": 120}
+```
+
+(those are the defaults). The join log is the evidence for changing them.
 
 No per-card profile copies are needed, and NetworkManager's saved profiles are
 never modified (only an in-memory `multi-connect` change, reverted when multipath

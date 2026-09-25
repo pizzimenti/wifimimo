@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -331,6 +332,85 @@ def band_rank(freq: int) -> int:
     if freq >= 4900:
         return 1
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Per-site tuning: ~/.config/wifimimo/roam.json
+# ---------------------------------------------------------------------------
+
+TUNING_PATH = Path.home() / ".config" / "wifimimo" / "roam.json"
+# key -> (module, constant, min, max). The thresholds were tuned on one
+# property (Anglers Keep, 2026-09-25); another site may want others.
+TUNABLES = {
+    "strong_dbm": ("roam", "STRONG_DBM", -90.0, -40.0),
+    "keep_dbm": ("roam", "KEEP_DBM", -95.0, -45.0),
+    "dead_dbm": ("roam", "DEAD_DBM", -100.0, -50.0),
+    "min_join_dbm": ("roam", "MIN_JOIN_DBM", -95.0, -40.0),
+    "horizon_s": ("roam", "HORIZON_S", 0.0, 30.0),
+    "upgrade_db": ("roam", "UPGRADE_DB", 0.0, 30.0),
+    "join_timeout_s": ("nm", "JOIN_TIMEOUT_S", 5.0, 60.0),
+    "retry_avoid_s": ("nm", "RETRY_AVOID_S", 30.0, 86400.0),
+    "dead_after_s": ("nm", "DEAD_AFTER_S", 2.0, 60.0),
+    "leader_lost_s": ("nm", "LEADER_LOST_S", 30.0, 3600.0),
+}
+
+
+def _tunable_module(name: str):
+    return roam if name == "roam" else sys.modules[__name__]
+
+
+_TUNING_DEFAULTS = {key: getattr(_tunable_module(mod), const)
+                    for key, (mod, const, _lo, _hi) in TUNABLES.items()}
+
+
+def apply_tuning(overrides: dict) -> tuple[dict, list[str]]:
+    """Reset every tunable to its default, then apply `overrides` (validated:
+    known key, a number, inside its range). Returns (applied, problems)."""
+    applied, problems = {}, []
+    for key, (mod, const, _lo, _hi) in TUNABLES.items():
+        setattr(_tunable_module(mod), const, _TUNING_DEFAULTS[key])
+    if not isinstance(overrides, dict):
+        return applied, ["roam.json must be a JSON object"]
+    for key, value in overrides.items():
+        if key not in TUNABLES:
+            problems.append(f"unknown key '{key}'")
+            continue
+        mod, const, lo, hi = TUNABLES[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not lo <= value <= hi:
+            problems.append(f"'{key}' must be a number from {lo:g} to {hi:g}")
+            continue
+        setattr(_tunable_module(mod), const, float(value))
+        applied[key] = float(value)
+    return applied, problems
+
+
+class Tuning:
+    """Re-reads roam.json when it changes; a missing file means defaults."""
+
+    def __init__(self, path: Path = TUNING_PATH) -> None:
+        self.path = path
+        self._mtime: float | None = None
+        self.applied: dict = {}
+        self.problems: list[str] = []
+
+    def refresh(self) -> None:
+        try:
+            mtime = self.path.stat().st_mtime
+        except OSError:
+            mtime = None
+        if mtime == self._mtime:
+            return
+        self._mtime = mtime
+        if mtime is None:
+            self.applied, self.problems = apply_tuning({})
+            return
+        try:
+            overrides = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            self.applied, self.problems = apply_tuning({})
+            self.problems = [f"roam.json unreadable ({exc.__class__.__name__}); using defaults"]
+            return
+        self.applied, self.problems = apply_tuning(overrides)
 
 
 class RoamContext:
@@ -1143,6 +1223,7 @@ class Follower:
         self.heal_proc: subprocess.Popen | None = None
         self.ctx = RoamContext()
         self.liveness = Liveness()
+        self.tuning = Tuning()
         self.wants_fast = False     # read by the daemon's poll-interval logic
 
     def heal(self, devices: list[dict], now: float) -> list[str]:
@@ -1258,6 +1339,7 @@ class Follower:
             self.was_enabled = False
             return {}
         self.was_enabled = True
+        self.tuning.refresh()
         rc, out = run_nmcli(["-t", "-f", DEV_FIELDS, "device", "show"])
         if rc != 0:
             return {"error": "nmcli unavailable"}
@@ -1283,6 +1365,10 @@ class Follower:
                     "outcome": "tried " + action[0]})
         self._log_joins(status.get("joins", []))
         status["healed"] = self.heal(devices, now)
+        if self.tuning.applied:
+            status["tuning"] = self.tuning.applied
+        if self.tuning.problems:
+            status["tuning_problems"] = self.tuning.problems
         errors = [err for err in (self._run(a) for a in actions) if err]
         if memory != self.memory:
             self.memory = memory
