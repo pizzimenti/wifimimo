@@ -291,7 +291,9 @@ class WifimimoDaemon:
         return (time.time() - mtime) <= UI_ACTIVE_TTL_S
 
     def poll_interval_for_states(self, states: dict[str, dict], now: float) -> float:
-        fast = self.ui_expanded()
+        # The follower needs 1 s signal samples to see a decline coming and
+        # to place radios quickly while anything is moving or changing.
+        fast = self.ui_expanded() or bool(getattr(self.follower, "wants_fast", False))
         for iface, state in states.items():
             signature = self.state_signature(state)
             if self.last_state_signature.get(iface) != signature:

@@ -163,9 +163,29 @@ or just `sudo ip rule del pref 32090`.
 ### Following your network choice (NetworkManager)
 
 While multipath is on, the daemon makes one click in the Plasma network applet
-drive every radio: the network you pick becomes the leader and every other radio
-that can see it joins the same profile, preferring an access point on a different
-channel. Pick another network and they all follow; disconnect and they all drop.
+drive every radio: the network you pick becomes the leader and the other radios
+join the same profile. Pick another network and they all follow; disconnect and
+they all drop.
+
+Where each radio sits is planned continuously (`wifimimo_roam.py`), in this order
+of preference:
+
+1. **A channel of its own.** An access point (this one's other band, or another
+   one) whose channel doesn't overlap any other radio's, at −70 dBm or better.
+2. **Another access point** on an overlapping channel (shared airtime, but a
+   separate AP: separate per-client limits and backhaul).
+3. **Scouting.** No two radios ever share one access point on one channel. A
+   radio with neither of the above is parked (disconnected, autoconnect blocked
+   in memory only) and scans, so it can take a slot the moment one appears.
+   The widget shows it as "Scouting".
+
+A radio's signal is tracked as a trend: one heading below −75 dBm within about
+six seconds moves early to a fresh, stronger slot while its link still works.
+Scouts scan every 6 s while you're moving (30 s when still); without a scout, a
+weak or fading radio scans itself every 10 s. Cards hear the air differently
+(the built-in mt7925e reads ~20 dB below the A9000 on the same AP), so a reading
+one radio took is only used for another after a learned per-card correction.
+Changes happen one at a time, the next waiting until the last one has landed.
 No per-card profile copies are needed, and NetworkManager's saved profiles are
 never modified (only an in-memory `multi-connect` change, reverted when multipath
 is turned off). It runs as you, so passwords come from your own keyring.

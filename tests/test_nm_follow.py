@@ -1,21 +1,26 @@
-"""NetworkManager follow planner, nmcli parsing, and profile tidy."""
+"""NetworkManager follow: leader tracking, placement via the slot planner,
+nmcli parsing, and profile tidy."""
 
 import json
 
 import wifimimo_nm as nm
+import wifimimo_roam as roam
 
 P = "11111111-1111-1111-1111-111111111111"   # Central_Library
+P2 = "33333333-3333-3333-3333-333333333333"  # a second profile for the same network
 Q = "22222222-2222-2222-2222-222222222222"   # another network
 
 
 class FakeLookup:
-    def __init__(self, profiles=None, scans=None, freqs=None, cloned="", signals=None, bssids=None):
+    def __init__(self, profiles=None, scans=None, freqs=None, cloned="", signals=None, bssids=None,
+                 widths=None):
         self.profiles = profiles or {}
         self.scans = scans or {}
         self.freqs = freqs or {}
         self.cloned = cloned
         self.signals = signals or {}
         self.bssids = bssids or {}
+        self.widths = widths or {}
 
     def signal(self, dev):
         return self.signals.get(dev, 0)
@@ -35,6 +40,9 @@ class FakeLookup:
     def freq(self, dev):
         return self.freqs.get(dev, 0)
 
+    def width(self, dev):
+        return self.widths.get(dev, 20)
+
 
 def profile(uuid=P, ssid="Central_Library", **kw):
     base = {"uuid": uuid, "id": ssid, "type": "802-11-wireless", "ssid": ssid,
@@ -46,110 +54,259 @@ def profile(uuid=P, ssid="Central_Library", **kw):
 
 def ap(bssid, freq, signal=80, ssid="Central_Library", security="WPA2", chan=0):
     return {"ssid": ssid, "bssid": bssid, "chan": chan, "freq": freq, "signal": signal,
-            "security": security}
+            "security": security, "bandwidth": 20}
 
 
-def dev(name, uuid="", state=None, reason=0):
+def dev(name, uuid="", state=None, reason=0, connectivity=4):
     return {"device": name, "type": "wifi", "uuid": uuid,
-            "state": state if state is not None else (100 if uuid else 30), "reason": reason}
+            "state": state if state is not None else (100 if uuid else 30), "reason": reason,
+            "connectivity": connectivity}
 
 
-SCANS = {"wifi0": [ap("aa:00:00:00:00:01", 5180), ap("aa:00:00:00:00:02", 5745)],
-         "wifi2": [ap("aa:00:00:00:00:01", 5180), ap("aa:00:00:00:00:02", 5745, signal=60)]}
+A1, A2, A3 = "aa:00:00:00:00:01", "aa:00:00:00:00:02", "aa:00:00:00:00:03"
+SCANS = {"wifi0": [ap(A1, 5180), ap(A2, 5745)],
+         "wifi1": [ap(A1, 5180), ap(A2, 5745)],
+         "wifi2": [ap(A1, 5180), ap(A2, 5745, signal=60)]}
 
 
 def lookup(**kw):
-    kw.setdefault("profiles", {P: profile(), Q: profile(Q, "Home")})
+    kw.setdefault("profiles", {P: profile(), P2: profile(P2), Q: profile(Q, "Home")})
     kw.setdefault("scans", SCANS)
     kw.setdefault("freqs", {"wifi1": 5180})
+    kw.setdefault("bssids", {"wifi1": A1})
+    kw.setdefault("signals", {"wifi1": -50})
     return FakeLookup(**kw)
+
+
+def ctx_for(scans, age=1.0, now=0.0):
+    """A RoamContext whose scan tables hold a fresh dBm reading of every AP
+    in `scans` (NM % converted), as a scout or recent scan would give."""
+    ctx = nm.RoamContext()
+    for name, rows in scans.items():
+        ctx.dumps[name] = [{"bssid": r["bssid"], "ssid": r["ssid"], "freq": r["freq"],
+                            "signal": roam.pct_to_dbm(r["signal"]), "age_s": age,
+                            "width": 20, "span": roam.channel_span(r["freq"], 20),
+                            "util": None, "associated": False} for r in rows]
+    for name in scans:
+        ctx.last_scan[name] = now
+    return ctx
+
+
+def plan(devices, memory, now, look=None, primary="", ctx=None, scans=SCANS):
+    look = look or lookup()
+    return nm.plan_follow(devices, memory, now, look, primary, ctx or ctx_for(scans, now=now))
 
 
 def baseline(devices):
     """Memory as it looks after one quiet poll of `devices`."""
-    return {"last": {d["device"]: d["uuid"] for d in devices}, "moves": {}, "modified": {}}
+    return {"last": {d["device"]: d["uuid"] for d in devices}, "moves": {}, "modified": {},
+            "devices": sorted(d["device"] for d in devices)}
 
 
-def test_first_poll_only_records_baseline_and_joins_idle_radios():
+def led(devices, leader_dev="wifi1", uuid=P):
+    mem = baseline(devices)
+    mem["leader"] = {"uuid": uuid, "device": leader_dev, "at": 0}
+    return mem
+
+
+def ups(actions):
+    return {a[2]: a[3] for a in actions if a[0] == "up"}
+
+
+def kinds(actions, kind):
+    return [a[1] for a in actions if a[0] == kind]
+
+
+# --- leader tracking ---------------------------------------------------------
+
+
+def test_first_poll_joins_an_idle_radio_to_a_free_slot():
     devices = [dev("wifi1", P), dev("wifi0"), dev("wifi2", Q)]
-    actions, memory, status = nm.plan_follow(devices, {}, 100.0, lookup(), primary_device="wifi1")
-    # wifi2 is on another network: left alone; idle wifi0 joins the primary's profile
+    actions, memory, status = plan(devices, {}, 100.0, primary="wifi1")
+    # wifi1's AP (A1) is taken: never share a BSSID; wifi2 stays on its own network
     assert ("multi", P, "manual-multiple") in actions
-    assert [a for a in actions if a[0] == "up"] == [("up", P, "wifi0", "aa:00:00:00:00:02")]
+    assert ups(actions) == {"wifi0": A2}
     assert status["skipped"]["wifi2"] == "on another network"
     assert memory["modified"] == {P: "0"}
 
 
-def test_user_activation_becomes_leader_and_moves_everyone():
+def test_user_activation_becomes_leader_and_brings_radios_over_one_at_a_time():
     before = [dev("wifi1", Q), dev("wifi0", Q), dev("wifi2", Q)]
-    mem = baseline(before)
     after = [dev("wifi1", P), dev("wifi0", Q), dev("wifi2", Q)]
-    actions, memory, status = nm.plan_follow(after, mem, 200.0, lookup())
-    ups = sorted(a[2] for a in actions if a[0] == "up")
-    assert ups == ["wifi0", "wifi2"]
+    actions, memory, _ = plan(after, baseline(before), 200.0)
     assert memory["leader"]["device"] == "wifi1" and memory["leader"]["uuid"] == P
-    assert memory["moves"]["wifi0"] == {"target": P, "previous": Q, "at": 200.0,
-                                        "bssid": "aa:00:00:00:00:02"}
-
-
-def test_channel_diversity_between_followers():
-    mem = baseline([dev("wifi1", Q), dev("wifi0"), dev("wifi2")])
-    after = [dev("wifi1", P), dev("wifi0"), dev("wifi2")]
-    actions, _, _ = nm.plan_follow(after, mem, 1.0, lookup())
-    picks = {a[2]: a[3] for a in actions if a[0] == "up"}
-    # leader on 5180 -> first follower takes 5745; second has nothing unused -> NM picks
-    assert picks == {"wifi0": "aa:00:00:00:00:02", "wifi2": ""}
-
-
-def test_higher_band_beats_stronger_signal():
-    scan = [ap("aa:00:00:00:00:01", 2437, signal=90), ap("aa:00:00:00:00:02", 5700, signal=60),
-            ap("aa:00:00:00:00:03", 6295, signal=55)]
-    assert nm.pick_bssid(scan, "Central_Library", set())["bssid"] == "aa:00:00:00:00:03"
-    assert nm.pick_bssid(scan, "Central_Library", {6295})["bssid"] == "aa:00:00:00:00:02"
-
-
-def test_band_rank_uses_frequency_not_channel_number():
-    # 5 GHz ch 36 and 6 GHz ch 37 have near-identical channel numbers
-    assert nm.band_rank(5180) == 1 and nm.band_rank(6135) == 2 and nm.band_rank(2437) == 0
-
-
-def test_weak_candidates_are_ignored():
-    scan = [ap("aa:00:00:00:00:01", 6295, signal=nm.MIN_SIGNAL_PCT - 1)]
-    assert nm.pick_bssid(scan, "Central_Library", set()) is None
+    assert ups(actions) == {"wifi0": A2}                       # strongest free slot first
+    assert memory["moves"]["wifi0"] == {"target": P, "previous": Q, "at": 200.0, "bssid": A2}
+    assert not kinds(actions, "park")                        # never park another network's radio
 
 
 def test_our_own_join_is_not_a_new_leader():
-    mem = baseline([dev("wifi1", P), dev("wifi0", Q)])
-    mem["leader"] = {"uuid": P, "device": "wifi1", "at": 0}
-    mem["moves"] = {"wifi0": {"target": P, "previous": Q, "at": 5}}
-    actions, memory, _ = nm.plan_follow([dev("wifi1", P), dev("wifi0", P)], mem, 6.0, lookup())
-    assert actions == [] and memory["leader"]["device"] == "wifi1"
+    devices = [dev("wifi1", P), dev("wifi0", P)]
+    mem = led([dev("wifi1", P), dev("wifi0", Q)])
+    mem["moves"] = {"wifi0": {"target": P, "previous": Q, "at": 5, "bssid": A2}}
+    look = lookup(freqs={"wifi1": 5180, "wifi0": 5745}, bssids={"wifi1": A1, "wifi0": A2})
+    actions, memory, _ = plan(devices, mem, 6.0, look)
+    assert not ups(actions) and memory["leader"]["device"] == "wifi1"
 
 
 def test_fallback_to_previous_profile_is_ignored_and_cools_down():
-    mem = baseline([dev("wifi1", P), dev("wifi0", P)])
-    mem["leader"] = {"uuid": P, "device": "wifi1", "at": 0}
-    mem["moves"] = {"wifi0": {"target": P, "previous": Q, "at": 100}}
+    mem = led([dev("wifi1", P), dev("wifi0", P)])
+    mem["moves"] = {"wifi0": {"target": P, "previous": Q, "at": 100, "bssid": A2}}
     # NM autoconnect put wifi0 back on Q: not a user choice
-    actions, memory, status = nm.plan_follow([dev("wifi1", P), dev("wifi0", Q)], mem, 150.0, lookup())
+    actions, memory, status = plan([dev("wifi1", P), dev("wifi0", Q)], mem, 150.0)
     assert memory["leader"]["uuid"] == P
-    assert not [a for a in actions if a[0] == "up"]
+    assert not ups(actions)
     assert memory["moves"]["wifi0"]["failed_at"] == 150.0
-    assert status["skipped"]["wifi0"] == "cooling down after a failed join"
+
+
+def test_replugged_card_autoconnect_is_not_a_user_choice():
+    # live 2026-09-25: the A9000 dropped off USB, came back disconnected, and
+    # NM autoconnected it 3 s later; it must not become the leader
+    mem = led([dev("wifi1", P), dev("wifi2", P)], leader_dev="wifi2")
+    actions, mem, _ = plan([dev("wifi1", P), dev("wifi2", P), dev("wifi0")], mem, 10.0)
+    assert mem["appeared"]["wifi0"] == 10.0
+    _, mem, _ = plan([dev("wifi1", P), dev("wifi2", P), dev("wifi0", Q)], mem, 13.0)
+    assert mem["leader"]["uuid"] == P and mem["leader"]["device"] == "wifi2"
+    # well after it appeared, the same activation would be the user's
+    mem2 = led([dev("wifi1", P), dev("wifi2", P), dev("wifi0")], leader_dev="wifi2")
+    mem2["appeared"] = {"wifi0": 10.0}
+    _, mem2, _ = plan([dev("wifi1", P), dev("wifi2", P), dev("wifi0", Q)], mem2, 10.0 + nm.NEW_RADIO_GRACE_S + 1)
+    assert mem2["leader"]["uuid"] == Q
+
+
+def test_another_profile_for_the_same_network_is_not_a_new_choice():
+    mem = led([dev("wifi1", P), dev("wifi2", Q)], leader_dev="wifi1")
+    actions, mem, status = plan([dev("wifi1", P), dev("wifi2", P2)], mem, 50.0,
+                                lookup(freqs={"wifi1": 5180, "wifi2": 5745},
+                                       bssids={"wifi1": A1, "wifi2": A2}))
+    assert mem["leader"]["uuid"] == P
+    assert "wifi2" in status["followers"]                    # counts as on the network
+    assert not ups(actions)
 
 
 def test_user_disconnect_takes_followers_down():
-    mem = baseline([dev("wifi1", P), dev("wifi0", P)])
-    mem["leader"] = {"uuid": P, "device": "wifi1", "at": 0}
+    mem = led([dev("wifi1", P), dev("wifi0", P)])
     devices = [dev("wifi1", "", state=30, reason=nm.REASON_USER_REQUESTED), dev("wifi0", P)]
-    actions, memory, _ = nm.plan_follow(devices, mem, 10.0, lookup())
+    actions, memory, _ = plan(devices, mem, 10.0)
     assert actions == [("down", P, "wifi0")]
     assert memory["leader"] == {}
 
 
+def test_our_own_park_of_a_radio_is_not_a_user_disconnect():
+    mem = led([dev("wifi1", P), dev("wifi0", P)])
+    mem["parked"] = {"wifi1": 5.0}
+    devices = [dev("wifi1", "", state=30, reason=nm.REASON_USER_REQUESTED), dev("wifi0", P)]
+    look = lookup(freqs={"wifi0": 5745}, bssids={"wifi0": A2})
+    actions, memory, _ = plan(devices, mem, 10.0, look)
+    assert ("down", P, "wifi0") not in actions
+    assert memory["leader"]["device"] == "wifi0"             # the choice lives on
+
+
+def test_leader_losing_its_link_hands_over_and_is_placed_again():
+    devices = [dev("wifi1", "", state=30, reason=53), dev("wifi2", P)]
+    mem = led([dev("wifi1", P), dev("wifi2", P)])
+    look = lookup(freqs={"wifi2": 5745}, bssids={"wifi2": A2})
+    actions, memory, _ = plan(devices, mem, 60.0, look)
+    assert memory["leader"]["device"] == "wifi2"
+    assert ups(actions) == {"wifi1": A1}                      # A2 is wifi2's
+
+
+def test_all_radios_dropped_rejoin_one_at_a_time():
+    devices = [dev("wifi1", "", state=30, reason=53), dev("wifi2", "", state=30, reason=53)]
+    mem = led([dev("wifi1", P), dev("wifi2", P)])
+    actions, memory, _ = plan(devices, mem, 60.0, lookup(freqs={}, bssids={}))
+    assert memory["leader"] == {"uuid": P, "device": "wifi1", "at": 0}
+    assert len(ups(actions)) == 1
+    # the radio not joining this poll is parked, so NM can't autoconnect it
+    # onto the same AP; it joins its own slot on the next poll
+    (joined,) = ups(actions)
+    other = ({"wifi1", "wifi2"} - {joined}).pop()
+    assert kinds(actions, "park") == [other]
+
+
+# --- placement -----------------------------------------------------------------
+
+
+def test_two_radios_on_one_bssid_parks_one_and_it_scouts():
+    devices = [dev("wifi1", P), dev("wifi0", P)]
+    look = lookup(freqs={"wifi1": 5180, "wifi0": 5180}, bssids={"wifi1": A1, "wifi0": A1},
+                  signals={"wifi1": -30, "wifi0": -52},
+                  scans={"wifi0": [ap(A1, 5180)], "wifi1": [ap(A1, 5180)]})
+    actions, memory, status = plan(devices, led(devices), 100.0, look, scans=look.scans)
+    assert kinds(actions, "park") == ["wifi0"]                # the weaker card
+    assert memory["parked"] == {"wifi0": 100.0}
+    assert status["iface_flags"]["wifi0"][-1]["code"] == "scouting"
+
+
+def test_idle_radio_without_a_strong_free_slot_parks_and_scans():
+    devices = [dev("wifi1", P), dev("wifi0")]
+    scans = {"wifi0": [ap(A1, 5180), ap(A2, 5745, signal=40)]}    # A2 is -76 dBm: too weak
+    look = lookup(scans=scans)
+    actions, memory, status = plan(devices, led(devices), 100.0, look,
+                                   ctx=ctx_for(scans, now=0.0))
+    assert not ups(actions)
+    assert kinds(actions, "park") == ["wifi0"]
+    assert ("scan", "wifi0") in actions                       # scouts scan right away
+    assert status["parked"] == ["wifi0"]
+
+
+def test_parked_radio_joins_when_a_slot_opens_and_is_unparked():
+    devices = [dev("wifi1", P), dev("wifi0", "", state=30, reason=39)]
+    mem = led(devices)
+    mem["parked"] = {"wifi0": 50.0}
+    actions, memory, _ = plan(devices, mem, 100.0)
+    assert ups(actions) == {"wifi0": A2}
+    assert ("unpark", "wifi0") in actions
+    assert actions.index(("unpark", "wifi0")) > [a[0] for a in actions].index("up")
+    assert "wifi0" not in memory["parked"]
+
+
+def test_stale_scan_data_is_not_acted_on_but_triggers_a_scan():
+    devices = [dev("wifi1", P), dev("wifi0")]
+    ctx = ctx_for(SCANS, age=roam.FRESH_S + 5)
+    ctx.last_scan = {}
+    actions, _, _ = plan(devices, led(devices), 100.0, ctx=ctx)
+    assert not ups(actions)
+    assert ("scan", "wifi0") in actions
+
+
+def test_declining_radio_moves_early_to_a_fresh_strong_slot():
+    devices = [dev("wifi1", P), dev("wifi2", P)]
+    look = lookup(freqs={"wifi1": 5180, "wifi2": 2412}, bssids={"wifi1": A1, "wifi2": A3},
+                  signals={"wifi1": -45, "wifi2": -67},
+                  scans={"wifi2": [ap(A1, 5180), ap(A2, 5745, signal=60), ap(A3, 2412)]})
+    ctx = ctx_for(look.scans, now=100.0)
+    for i, level in enumerate(range(-55, -70, -2)):          # -2 dB/s: heading below -75
+        ctx.trend.add("wifi2", 92.0 + i, level, A3)
+        ctx.trend.add("wifi1", 92.0 + i, -45, A1)
+    actions, _, status = plan(devices, led(devices), 100.0, look, ctx=ctx)
+    assert ups(actions) == {"wifi2": A2}                      # A2 -64 dBm, a free channel
+    assert status["wants_fast"] is True
+
+
+def test_steady_radio_stays_put():
+    devices = [dev("wifi1", P), dev("wifi2", P)]
+    look = lookup(freqs={"wifi1": 5180, "wifi2": 5745}, bssids={"wifi1": A1, "wifi2": A2},
+                  signals={"wifi1": -45, "wifi2": -55})
+    actions, _, status = plan(devices, led(devices), 100.0, look)
+    assert not ups(actions) and not kinds(actions, "park")
+    assert status["plan"] == "placement already best"
+
+
+def test_nothing_starts_while_a_radio_is_connecting():
+    devices = [dev("wifi1", P), dict(dev("wifi2", P), state=70), dev("wifi0")]
+    mem = led(devices)
+    mem["moves"] = {"wifi2": {"target": P, "previous": "", "at": 99.0, "bssid": A2}}
+    mem["parked"] = {"wifi0": 1.0}
+    look = lookup(scans={**SCANS, "wifi0": [ap(A1, 5180), ap(A2, 5745), ap(A3, 2412)]})
+    actions, _, status = plan(devices, mem, 100.0, look, scans=look.scans)
+    assert not ups(actions)
+    assert "land" in status["plan"]
+
+
 def test_locked_profile_is_skipped_and_flagged():
     look = lookup(profiles={P: profile(mac_address="28:94:01:BB:F8:96")})
-    actions, _, status = nm.plan_follow([dev("wifi1", P), dev("wifi0")], {}, 1.0, look, "wifi1")
+    actions, _, status = plan([dev("wifi1", P), dev("wifi0")], {}, 1.0, look, "wifi1")
     assert actions == []
     assert status["iface_flags"]["wifi1"][0]["code"] == "profile_locked"
     assert status["skipped"]["wifi0"] == "profile_locked"
@@ -165,270 +322,97 @@ def test_stable_cloned_mac_is_a_duplicate_mac_risk():
     assert nm.followability(profile(), global_cloned="stable")[0] == "duplicate_mac"
 
 
-def test_out_of_range_radio_is_skipped():
-    look = lookup(scans={"wifi0": [ap("bb:00:00:00:00:01", 11, ssid="Other")]})
-    actions, _, status = nm.plan_follow([dev("wifi1", P), dev("wifi0")], {}, 1.0, look, "wifi1")
-    assert not [a for a in actions if a[0] == "up"]
-    assert status["skipped"]["wifi0"] == "network not in range"
-
-
-def test_owe_transition_beacon_without_twin_is_not_pinned():
-    scan = [ap("aa:00:00:00:00:01", 5180, security="OWE-TM"), ap("aa:00:00:00:00:02", 5745, security="OWE-TM")]
-    assert nm.pick_bssid(scan, "Central_Library", set()) is None
-
-
-# Shape of the 2026-09-24 Bend library scan: 6 GHz is pure OWE (pinnable as
-# is); 2.4 / 5 GHz advertise an open OWE-TM beacon plus a hidden OWE twin on
-# the same radio (same channel, same first five octets).
-LIBRARY_SCAN = [
-    ap("04:cd:c0:18:0b:c4", 6855, 72, security="OWE"),                          # leader's AP
-    ap("04:cd:c0:18:0b:04", 6295, 59, security="OWE"),
-    ap("04:cd:c0:18:0b:14", 5700, 59, security="OWE-TM"),
-    ap("04:cd:c0:18:0b:1f", 5700, 60, ssid="Central_Library", security="OWE"),  # its twin
-    ap("04:cd:c0:18:0b:24", 2437, 87, security="OWE-TM"),
-    ap("04:cd:c0:18:0b:2f", 2437, 85, ssid="", security="OWE"),                 # hidden twin
-    ap("04:cd:c0:18:0b:21", 2437, 85, ssid="dpl-iot", security="WPA2 WPA3"),
-]
-
-
-def test_library_scan_spreads_radios_across_bands():
-    used = {6855}
-    first = nm.pick_bssid(LIBRARY_SCAN, "Central_Library", used)
-    assert first["bssid"] == "04:cd:c0:18:0b:04"          # other 6 GHz AP
-    used.add(first["freq"])
-    second = nm.pick_bssid(LIBRARY_SCAN, "Central_Library", used)
-    assert second["bssid"] == "04:cd:c0:18:0b:1f"         # 5 GHz via the twin
-    used.add(second["freq"])
-    third = nm.pick_bssid(LIBRARY_SCAN, "Central_Library", used)
-    assert third["bssid"] == "04:cd:c0:18:0b:2f"          # 2.4 GHz hidden twin, never the beacon
-
-
-def test_twin_must_share_channel_and_prefix():
-    scan = [ap("04:cd:c0:18:0b:24", 2437, 87, security="OWE-TM"),
-            ap("04:cd:c0:18:0b:2f", 2462, 85, ssid="", security="OWE"),   # wrong channel
-            ap("04:cd:c0:99:0b:2e", 2437, 85, ssid="", security="OWE")]   # wrong radio
-    assert nm.pick_bssid(scan, "Central_Library", set()) is None
-
-
 def test_already_multi_profile_isnt_modified():
     look = lookup(profiles={P: profile(multi_connect="manual-multiple")})
-    actions, memory, _ = nm.plan_follow([dev("wifi1", P), dev("wifi0")], {}, 1.0, look, "wifi1")
+    actions, memory, _ = plan([dev("wifi1", P), dev("wifi0")], {}, 1.0, look, "wifi1")
     assert not [a for a in actions if a[0] == "multi"]
     assert memory["modified"] == {}
 
 
-# --- rebalancing (enable / topology change) ---------------------------------
-
-SIX_A, SIX_B, FIVE, TWO = 6855, 6295, 5700, 2437
-SPREAD_SCAN = [ap("aa:00:00:00:00:61", SIX_A, 80, security="OWE"),
-               ap("aa:00:00:00:00:62", SIX_B, 60, security="OWE"),
-               ap("aa:00:00:00:00:51", FIVE, 60, security="WPA2"),
-               ap("aa:00:00:00:00:21", TWO, 90, security="WPA2")]
-
-
-def spread_lookup(freqs, **kw):
-    kw.setdefault("scans", {d: SPREAD_SCAN for d in ("wifi0", "wifi1", "wifi2", "wifi3")})
-    return lookup(freqs=freqs, **kw)
-
-
-def ups(actions):
-    return {a[2]: a[3] for a in actions if a[0] == "up"}
-
-
-def test_enabling_multipath_spreads_radios_sharing_a_frequency():
-    # all three landed on the strongest 6 GHz AP (what NM does on its own)
-    devices = [dev("wifi1", P), dev("wifi2", P), dev("wifi0", P)]
-    look = spread_lookup({"wifi1": SIX_A, "wifi2": SIX_A, "wifi0": SIX_A})
-    actions, memory, status = nm.plan_follow(devices, {}, 1.0, look, primary_device="wifi1")
-    assert ups(actions) == {"wifi0": "aa:00:00:00:00:62", "wifi2": "aa:00:00:00:00:51"}
-    assert sorted(status["moved"]) == ["wifi0", "wifi2"]
-    assert memory["devices"] == ["wifi0", "wifi1", "wifi2"]
-
-
-def test_no_reshuffle_without_a_topology_change():
-    devices = [dev("wifi1", P), dev("wifi2", P)]
-    mem = baseline(devices)
-    mem.update(devices=["wifi1", "wifi2"], leader={"uuid": P, "device": "wifi1", "at": 0})
-    look = spread_lookup({"wifi1": SIX_A, "wifi2": SIX_A})
-    actions, _, _ = nm.plan_follow(devices, mem, 50.0, look)
+def test_user_pinned_profile_is_left_alone():
+    look = lookup(profiles={P: profile(bssid=A1)})
+    actions, _, status = plan([dev("wifi1", P), dev("wifi0")], {}, 1.0, look, "wifi1")
     assert actions == []
+    assert status["skipped"]["wifi0"] == "profile pinned to one access point"
 
 
-def test_yanking_a_radio_lets_the_rest_step_up_a_band():
-    before = ["wifi0", "wifi1", "wifi2"]
-    devices = [dev("wifi1", P), dev("wifi2", P)]          # wifi0 (was on 6 GHz B) yanked
-    mem = baseline(devices)
-    mem.update(devices=before, leader={"uuid": P, "device": "wifi1", "at": 0})
-    look = spread_lookup({"wifi1": SIX_A, "wifi2": TWO})
-    actions, _, status = nm.plan_follow(devices, mem, 60.0, look)
-    assert ups(actions) == {"wifi2": "aa:00:00:00:00:62"}  # 2.4 GHz -> freed 6 GHz
-    assert status["moved"] == ["wifi2"]
-
-
-def test_diverse_followers_are_left_alone_on_topology_change():
-    devices = [dev("wifi1", P), dev("wifi2", P)]
-    mem = baseline(devices)
-    mem.update(devices=["wifi1", "wifi2", "wifi9"], leader={"uuid": P, "device": "wifi1", "at": 0})
-    look = spread_lookup({"wifi1": SIX_A, "wifi2": SIX_B})   # already the best free band
-    actions, _, _ = nm.plan_follow(devices, mem, 60.0, look)
-    assert actions == []
-
-
-def test_leader_radio_yanked_best_band_follower_inherits():
-    devices = [dev("wifi2", P), dev("wifi0", P)]
-    mem = baseline(devices)
-    mem.update(devices=["wifi0", "wifi1", "wifi2"], leader={"uuid": P, "device": "wifi1", "at": 0})
-    look = spread_lookup({"wifi2": FIVE, "wifi0": SIX_B})
-    actions, memory, _ = nm.plan_follow(devices, mem, 60.0, look)
-    assert memory["leader"]["device"] == "wifi0"
-    assert memory["leader"]["uuid"] == P
-    assert ups(actions) == {"wifi2": "aa:00:00:00:00:61"}  # 5 GHz -> freed 6 GHz A
-
-
-def test_added_card_joins_even_if_nm_autoconnected_it_elsewhere():
-    devices = [dev("wifi1", P), dev("wifi2", P), dev("wifi0", Q)]   # internal just switched on
-    mem = baseline([dev("wifi1", P), dev("wifi2", P)])
-    mem.update(devices=["wifi1", "wifi2"], leader={"uuid": P, "device": "wifi1", "at": 0})
-    look = spread_lookup({"wifi1": SIX_A, "wifi2": SIX_B, "wifi0": TWO})
-    actions, _, _ = nm.plan_follow(devices, mem, 60.0, look)
-    assert ups(actions) == {"wifi0": "aa:00:00:00:00:51"}  # the free 5 GHz AP
-
-
-def test_existing_other_network_radio_is_not_touched_on_topology_change():
-    devices = [dev("wifi1", P), dev("wifi2", Q)]
-    mem = baseline(devices)
-    mem.update(devices=["wifi1", "wifi2", "wifi0"], leader={"uuid": P, "device": "wifi1", "at": 0})
-    actions, _, status = nm.plan_follow(devices, mem, 60.0, spread_lookup({"wifi1": SIX_A}))
-    assert actions == []
-    assert status["skipped"]["wifi2"] == "on another network"
-
-
-def test_user_pinned_profile_is_never_rebalanced():
-    devices = [dev("wifi1", P), dev("wifi2", P)]
-    look = spread_lookup({"wifi1": SIX_A, "wifi2": SIX_A},
-                         profiles={P: profile(bssid="aa:00:00:00:00:61")})
-    actions, _, _ = nm.plan_follow(devices, {}, 1.0, look, primary_device="wifi1")
-    assert actions == []
+def test_owe_transition_network_joins_through_the_hidden_twin():
+    scan = [ap("04:cd:c0:18:0b:24", 2437, 87, security="OWE-TM"),
+            ap("04:cd:c0:18:0b:2f", 2437, 85, ssid="", security="OWE")]
+    look = lookup(scans={"wifi0": scan})
+    actions, _, _ = plan([dev("wifi1", P), dev("wifi0")], {}, 1.0, look, "wifi1",
+                         scans={"wifi0": scan})
+    assert ups(actions) == {"wifi0": "04:cd:c0:18:0b:2f"}
 
 
 # --- bad-AP avoidance --------------------------------------------------------
 
 
 def _pinned_mem(devices, name, bssid, at, previous=""):
-    mem = baseline(devices)
-    mem.update(devices=sorted(d["device"] for d in devices),
-               leader={"uuid": P, "device": "wifi1", "at": 0},
-               moves={name: {"target": P, "previous": previous, "at": at, "bssid": bssid}})
+    mem = led(devices)
+    mem["moves"] = {name: {"target": P, "previous": previous, "at": at, "bssid": bssid}}
     return mem
 
 
-def test_join_that_did_not_stick_marks_ap_bad_and_repicks():
-    # wifi2 was pinned to 6 GHz B but DHCP failed: NM dropped it to disconnected
+def test_join_that_did_not_stick_marks_ap_bad_and_picks_another():
     devices = [dev("wifi1", P), dev("wifi2")]
-    mem = _pinned_mem(devices, "wifi2", "aa:00:00:00:00:62", at=100.0)
-    look = spread_lookup({"wifi1": SIX_A})
-    actions, memory, status = nm.plan_follow(devices, mem, 150.0, look)
-    assert "aa:00:00:00:00:62" in memory["bad"]["wifi2"]
-    assert ups(actions) == {"wifi2": "aa:00:00:00:00:51"}           # next best: 5 GHz
+    scans = {"wifi2": [ap(A1, 5180), ap(A2, 5745), ap(A3, 2412)]}
+    mem = _pinned_mem(devices, "wifi2", A2, at=100.0)
+    actions, memory, status = plan(devices, mem, 150.0, lookup(scans=scans), scans=scans)
+    assert A2 in memory["bad"]["wifi2"]
+    assert ups(actions) == {"wifi2": A3}
     assert status["iface_flags"]["wifi2"][0]["code"] == "avoiding_ap"
 
 
-def test_join_stuck_at_limited_connectivity_is_repinned():
-    limited = dict(dev("wifi2", P), connectivity=3)
+def test_join_stuck_at_limited_connectivity_is_moved_off_it():
+    limited = dev("wifi2", P, connectivity=3)
     devices = [dev("wifi1", P), limited]
-    mem = _pinned_mem(devices, "wifi2", "aa:00:00:00:00:62", at=100.0, previous=P)
-    look = spread_lookup({"wifi1": SIX_A, "wifi2": SIX_B})
-    # within the grace period: leave it alone
-    actions, _, _ = nm.plan_follow(devices, mem, 130.0, look)
-    assert actions == []
-    # past the grace period: bad AP, re-pinned elsewhere
-    actions, memory, status = nm.plan_follow(devices, mem, 100.0 + nm.LIMITED_GRACE_S + 1, look)
-    assert ups(actions) == {"wifi2": "aa:00:00:00:00:51"}
-    assert status["moved"] == ["wifi2"]
+    scans = {"wifi2": [ap(A1, 5180), ap(A2, 5745), ap(A3, 2412)]}
+    look = lookup(scans=scans, freqs={"wifi1": 5180, "wifi2": 5745},
+                  bssids={"wifi1": A1, "wifi2": A2}, signals={"wifi1": -50, "wifi2": -50})
+    mem = _pinned_mem(devices, "wifi2", A2, at=100.0, previous=P)
+    actions, _, _ = plan(devices, mem, 130.0, look, scans=scans)        # within the grace
+    assert not ups(actions) and not kinds(actions, "park")
+    actions, memory, _ = plan(devices, mem, 100.0 + nm.LIMITED_GRACE_S + 1, look, scans=scans)
+    assert ups(actions) == {"wifi2": A3}
+    assert A2 in memory["bad"]["wifi2"]
 
 
 def test_bad_ap_marks_expire():
-    devices = [dev("wifi1", P), dev("wifi2")]
-    mem = baseline(devices)
-    mem.update(devices=["wifi1", "wifi2"], leader={"uuid": P, "device": "wifi1", "at": 0},
-               bad={"wifi2": {"aa:00:00:00:00:62": 500.0}})
-    look = spread_lookup({"wifi1": SIX_A})
-    actions, memory, _ = nm.plan_follow(devices, mem, 400.0, look)
-    assert ups(actions) == {"wifi2": "aa:00:00:00:00:51"}           # still avoided
-    actions, memory, _ = nm.plan_follow(devices, mem, 600.0, look)
-    assert ups(actions) == {"wifi2": "aa:00:00:00:00:62"}           # expired: best again
-    assert "wifi2" not in memory["bad"]
+    devices = [dev("wifi1", P), dev("wifi0")]
+    mem = led(devices)
+    mem["bad"] = {"wifi0": {A2: 500.0}}
+    actions, memory, _ = plan(devices, mem, 400.0)
+    assert not ups(actions)                                   # A2 avoided, A1 taken
+    actions, memory, _ = plan(devices, mem, 600.0)
+    assert ups(actions) == {"wifi0": A2}
+    assert "wifi0" not in memory["bad"]
 
 
-# --- walking: lost links and fading APs (found on the 2026-09-24 walk) -------
+# --- speed and release -------------------------------------------------------
 
 
-def test_leader_losing_its_link_hands_over_and_rejoins():
-    # the A9000 (leader) walked out of range: NM failed it (ssid-not-found);
-    # nobody reconnected it because the follower skipped the leader's radio
-    devices = [dev("wifi1", "", state=30, reason=53), dev("wifi2", P), dev("wifi0", P)]
-    mem = baseline([dev("wifi1", P), dev("wifi2", P), dev("wifi0", P)])
-    mem.update(devices=["wifi0", "wifi1", "wifi2"], leader={"uuid": P, "device": "wifi1", "at": 0})
-    look = spread_lookup({"wifi2": SIX_B, "wifi0": FIVE})
-    actions, memory, _ = nm.plan_follow(devices, mem, 60.0, look)
-    assert memory["leader"]["device"] == "wifi2"          # best band still on the network
-    assert ups(actions) == {"wifi1": "aa:00:00:00:00:61"}  # dropped radio rejoins, free 6 GHz A
+def test_wants_fast_while_moving_but_not_for_a_still_scout():
+    devices = [dev("wifi1", P), dev("wifi0")]
+    mem = led(devices)
+    mem["parked"] = {"wifi0": 1.0}
+    mem["moves"] = {"wifi0": {"target": "", "previous": "", "at": 1.0, "bssid": ""}}
+    scans = {"wifi0": [ap(A1, 5180)]}
+    ctx = ctx_for(scans, now=100.0)
+    for i in range(8):
+        ctx.trend.add("wifi1", 92.0 + i, -50, A1)
+    _, _, status = plan(devices, mem, 100.0, lookup(scans=scans), ctx=ctx)
+    assert status["wants_fast"] is False
+    for i in range(4):
+        ctx.trend.add("wifi1", 100.0 + i, -50 - 3 * i, A1)
+    _, _, status = plan(devices, mem, 104.0, lookup(scans=scans), ctx=ctx)
+    assert status["wants_fast"] is True
 
 
-def test_all_radios_dropped_leader_radio_still_rejoins():
-    devices = [dev("wifi1", "", state=30, reason=53), dev("wifi2", "", state=30, reason=53)]
-    mem = baseline([dev("wifi1", P), dev("wifi2", P)])
-    mem.update(devices=["wifi1", "wifi2"], leader={"uuid": P, "device": "wifi1", "at": 0})
-    actions, memory, _ = nm.plan_follow(devices, mem, 60.0, spread_lookup({}))
-    assert memory["leader"] == {"uuid": P, "device": "wifi1", "at": 0}
-    assert set(ups(actions)) == {"wifi1", "wifi2"}
-    assert len(set(ups(actions).values())) == 2             # still spread
-
-
-def test_user_disconnect_of_leader_still_takes_everyone_down():
-    devices = [dev("wifi1", "", state=30, reason=nm.REASON_USER_REQUESTED), dev("wifi2", P)]
-    mem = baseline([dev("wifi1", P), dev("wifi2", P)])
-    mem.update(devices=["wifi1", "wifi2"], leader={"uuid": P, "device": "wifi1", "at": 0})
-    actions, _, _ = nm.plan_follow(devices, mem, 60.0, spread_lookup({}))
-    assert actions == [("down", P, "wifi2")]
-
-
-def _fade_setup(signals, bssids=None, states=None):
-    states = states or {}
-    devices = [dict(dev("wifi1", P), state=states.get("wifi1", 100)),
-               dict(dev("wifi2", P), state=states.get("wifi2", 100))]
-    mem = baseline(devices)
-    mem.update(devices=["wifi1", "wifi2"], leader={"uuid": P, "device": "wifi1", "at": 0})
-    look = spread_lookup({"wifi1": SIX_A, "wifi2": SIX_B}, signals=signals,
-                         bssids=bssids or {"wifi2": "aa:00:00:00:00:62"})
-    return devices, mem, look
-
-
-def test_fading_radio_is_repinned_to_a_clearly_stronger_free_ap():
-    # wifi2 at -80 dBm (40 %) on 6 GHz B; 5 GHz AP is 60 % on a free freq
-    devices, mem, look = _fade_setup({"wifi1": -55, "wifi2": -80})
-    actions, _, status = nm.plan_follow(devices, mem, 100.0, look)
-    assert ups(actions) == {"wifi2": "aa:00:00:00:00:51"}
-    assert status["fading"] == ["wifi2"]
-
-
-def test_fading_needs_a_real_margin():
-    devices, mem, look = _fade_setup({"wifi1": -55, "wifi2": -73})   # 54 % vs 60 %: not enough
-    actions, _, _ = nm.plan_follow(devices, mem, 100.0, look)
-    assert actions == []
-
-
-def test_no_fade_move_while_another_radio_is_connecting():
-    devices, mem, look = _fade_setup({"wifi1": -55, "wifi2": -80}, states={"wifi1": 70})
-    actions, _, _ = nm.plan_follow(devices, mem, 100.0, look)
-    assert actions == []
-
-
-def test_fade_move_holds_off_after_a_recent_move():
-    devices, mem, look = _fade_setup({"wifi1": -55, "wifi2": -80})
-    mem["moves"] = {"wifi2": {"target": P, "previous": P, "at": 90.0, "bssid": ""}}
-    actions, _, _ = nm.plan_follow(devices, mem, 100.0, look)
-    assert actions == []
+def test_release_restores_multi_connect_and_unparks():
+    assert nm.plan_release({"modified": {P: "0"}, "parked": {"wifi0": 1.0}}) == [
+        ("multi", P, "0"), ("unpark", "wifi0")]
+    assert nm.plan_release({}) == []
 
 
 def test_activate_pinned_sets_then_clears_bssid_around_activation():
@@ -468,15 +452,16 @@ def test_activate_without_pick_is_plain_up():
     assert calls == [f"-w 0 connection up uuid {P} ifname wifi2"]
 
 
-def test_user_pinned_bssid_is_respected():
-    look = lookup(profiles={P: profile(bssid="aa:00:00:00:00:01")})
-    actions, _, _ = nm.plan_follow([dev("wifi1", P), dev("wifi0")], {}, 1.0, look, "wifi1")
-    assert [a for a in actions if a[0] == "up"] == [("up", P, "wifi0", "")]
-
-
-def test_release_restores_original_multi_connect():
-    assert nm.plan_release({"modified": {P: "0"}}) == [("multi", P, "0")]
-    assert nm.plan_release({}) == []
+def test_feed_context_tracks_levels_and_scan_tables():
+    ctx = nm.RoamContext()
+    states = {"wifi1": {"connected": True, "signal_avg_dbm": -50, "bssid": "AA:00:00:00:00:01"},
+              "wifi0": {"connected": False}}
+    tables = {"wifi1": [], "wifi0": [{"bssid": "aa:00:00:00:00:01", "signal": -70.0, "age_s": 0.2,
+                                       "freq": 5180, "associated": False}]}
+    nm.feed_context(ctx, states, 10.0, dump=lambda d: tables[d])
+    assert ctx.trend.level("wifi1") == -50
+    assert ctx.dumps["wifi0"][0]["signal"] == -70.0
+    assert ctx.offsets.get("wifi0", "wifi1", "5") == -20.0   # learned from the live level
 
 
 # ---------------------------------------------------------------------------
@@ -545,10 +530,12 @@ def test_split_terse_unescapes_colons():
         ["Cafe:Net", "AA:BB:CC:DD:EE:FF", "36", "80", "WPA2"]
 
 
-def test_parse_wifi_list_lowercases_bssid():
-    rows = nm.parse_wifi_list(r"Central_Library:04\:CD\:C0\:18\:0B\:24:6:2437 MHz:87:OWE-TM")
+def test_parse_wifi_list_lowercases_bssid_and_reads_width():
+    rows = nm.parse_wifi_list(r"Central_Library:04\:CD\:C0\:18\:0B\:24:6:2437 MHz:87:OWE-TM:40 MHz")
     assert rows == [{"ssid": "Central_Library", "bssid": "04:cd:c0:18:0b:24", "chan": 6,
-                     "freq": 2437, "signal": 87, "security": "OWE-TM"}]
+                     "freq": 2437, "signal": 87, "security": "OWE-TM", "bandwidth": 40}]
+    # older nmcli without BANDWIDTH
+    assert nm.parse_wifi_list(r"X:04\:CD\:C0\:18\:0B\:24:6:2437 MHz:87:WPA2")[0]["bandwidth"] == 20
 
 
 def test_primary_wifi_device_is_lowest_metric():
@@ -569,15 +556,15 @@ def prof(uuid, pid, ssid, mac="", ts=0, key="owe"):
 
 
 def test_tidy_collapses_card_copies_keeping_the_original_name():
-    plan = nm.plan_tidy([
+    plan_ = nm.plan_tidy([
         prof("u1", "Central_Library", "Central_Library", mac="28:94:01:BB:F8:96", ts=1),
         prof("u2", "Central_Library-a8000", "Central_Library", mac="28:94:01:B7:B9:1A", ts=3),
         prof("u3", "Central_Library-internal", "Central_Library", mac="3C:3B:AD:16:B7:30", ts=5),
     ])
-    assert plan == [{"ssid": "Central_Library",
-                     "keep": {"uuid": "u1", "id": "Central_Library", "clear_binding": True},
-                     "delete": [{"uuid": "u2", "id": "Central_Library-a8000"},
-                                {"uuid": "u3", "id": "Central_Library-internal"}]}]
+    assert plan_ == [{"ssid": "Central_Library",
+                      "keep": {"uuid": "u1", "id": "Central_Library", "clear_binding": True},
+                      "delete": [{"uuid": "u2", "id": "Central_Library-a8000"},
+                                 {"uuid": "u3", "id": "Central_Library-internal"}]}]
 
 
 def test_tidy_leaves_plain_duplicates_alone():
@@ -585,10 +572,10 @@ def test_tidy_leaves_plain_duplicates_alone():
 
 
 def test_tidy_prefers_unbound_keeper_and_spares_plain_duplicates():
-    plan = nm.plan_tidy([prof("a", "Net", "Net"), prof("b", "Net", "Net"),
-                         prof("c", "Net-stick", "Net", mac="aa:bb:cc:dd:ee:ff", ts=9)])
-    assert plan[0]["keep"]["clear_binding"] is False
-    assert [d["uuid"] for d in plan[0]["delete"]] == ["c"]
+    plan_ = nm.plan_tidy([prof("a", "Net", "Net"), prof("b", "Net", "Net"),
+                          prof("c", "Net-stick", "Net", mac="aa:bb:cc:dd:ee:ff", ts=9)])
+    assert plan_[0]["keep"]["clear_binding"] is False
+    assert [d["uuid"] for d in plan_[0]["delete"]] == ["c"]
 
 
 def test_tidy_ignores_different_security():

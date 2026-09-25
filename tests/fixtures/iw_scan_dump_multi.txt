@@ -1,0 +1,85 @@
+BSS 02:00:00:00:00:52(on wifi1) -- associated
+	last seen: 326728.298s [boottime]
+	freq: 5260.0
+	signal: -29.00 dBm
+	last seen: 15544 ms ago
+	SSID: example-home
+	RSN:	 * Version: 1
+		 * Authentication suites: PSK
+	BSS Load:
+		 * station count: 2
+		 * channel utilisation: 0/255
+	HT operation:
+		 * primary channel: 52
+		 * secondary channel offset: above
+		 * STA channel width: any
+	VHT operation:
+		 * channel width: 1 (80 MHz)
+		 * center freq segment 1: 58
+		 * center freq segment 2: 0
+BSS 02:00:00:00:00:11(on wifi1)
+	last seen: 326721.760s [boottime]
+	freq: 2462.0
+	signal: -33.00 dBm
+	last seen: 22082 ms ago
+	SSID: example-home
+	RSN:	 * Version: 1
+		 * Authentication suites: PSK
+	BSS Load:
+		 * station count: 1
+		 * channel utilisation: 51/255
+	HT operation:
+		 * primary channel: 11
+		 * secondary channel offset: no secondary
+		 * STA channel width: 20 MHz
+BSS 02:00:00:00:01:36(on wifi1)
+	last seen: 326721.806s [boottime]
+	freq: 5180.0
+	signal: -72.00 dBm
+	last seen: 22036 ms ago
+	SSID: example-home
+	RSN:	 * Version: 1
+		 * Authentication suites: PSK
+	HT operation:
+		 * primary channel: 36
+		 * secondary channel offset: above
+		 * STA channel width: any
+	VHT operation:
+		 * channel width: 1 (80 MHz)
+		 * center freq segment 1: 42
+		 * center freq segment 2: 0
+	HE Operation:
+		HE Operation Parameters: (0x003ff4)
+			Default PE Duration: 4
+		BSS Color: 1
+BSS 02:00:00:00:01:49(on wifi1)
+	last seen: 326725.580s [boottime]
+	freq: 5745.0
+	signal: -67.00 dBm
+	last seen: 18263 ms ago
+	HT operation:
+		 * primary channel: 149
+		 * secondary channel offset: above
+		 * STA channel width: any
+	VHT operation:
+		 * channel width: 1 (80 MHz)
+		 * center freq segment 1: 155
+		 * center freq segment 2: 0
+	RSN:	 * Version: 1
+		 * Authentication suites: PSK
+BSS 02:00:00:00:06:37(on wifi1)
+	last seen: 326727.100s [boottime]
+	freq: 6135.0
+	signal: -61.00 dBm
+	last seen: 4100 ms ago
+	SSID: example-home
+	RSN:	 * Version: 1
+		 * Authentication suites: SAE
+	HE Operation:
+		HE Operation Parameters: (0x023ff4)
+			6 GHz Operation Information Present
+		6 GHz Operation Information: 0x...
+			Primary Channel: 37
+			Channel Width: 160 MHz
+			Center Frequency Segment 0: 39
+			Center Frequency Segment 1: 47

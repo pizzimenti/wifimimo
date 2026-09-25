@@ -36,7 +36,7 @@ WIFIMIMO_BLACKLIST="/etc/modprobe.d/wifimimo-internal.conf"
 LEGACY_DIR="$ETC_DIR/legacy"
 USER_SERVICE_NAME="wifimimo-daemon.service"
 PLASMOID_PLUGIN_ID="org.kde.plasma.wifimimo"
-PY_MODULES=(phy_modes.py wifimimo_core.py wifimimo_shared.py wifimimo_radio.py wifimimo_nm.py)
+PY_MODULES=(phy_modes.py wifimimo_core.py wifimimo_shared.py wifimimo_radio.py wifimimo_nm.py wifimimo_roam.py)
 PY_SCRIPTS=(wifimimo-daemon.py wifimimo-mon.py wifimimo-plasmoid-source.py wifimimo-nm-tidy.py)
 
 MANAGE_INTERNAL=""

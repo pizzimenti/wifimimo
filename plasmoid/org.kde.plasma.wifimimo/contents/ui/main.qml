@@ -507,6 +507,10 @@ PlasmoidItem {
         if (data.operstate === "dormant") {
             return "Connecting…";
         }
+        // Parked by multipath: no strong free channel or other AP for it.
+        if (doc && doc.nm && (doc.nm.parked || []).indexOf(data.iface) >= 0) {
+            return "Scouting: scanning for a free channel";
+        }
         return "Not associated";
     }
 

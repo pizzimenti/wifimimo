@@ -75,7 +75,7 @@ def test_install_targets_match_shared():
 def test_install_ships_every_module_the_daemon_imports():
     text = (ROOT / "install.sh").read_text()
     for module in ("phy_modes.py", "wifimimo_core.py", "wifimimo_shared.py",
-                   "wifimimo_radio.py", "wifimimo_nm.py"):
+                   "wifimimo_radio.py", "wifimimo_nm.py", "wifimimo_roam.py"):
         assert module in text, module
 
 

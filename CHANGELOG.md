@@ -19,6 +19,14 @@ Planned as 1.0.0.
   Plasma applet joins every radio to it (in-memory `multi-connect` only; saved
   profiles untouched), and disconnecting drops them all. `wifimimo-nm-tidy`
   removes hand-made per-card profile copies.
+- **Slot planning and early roaming** (`wifimimo_roam.py`): radios spread across
+  non-overlapping channels first, then across access points; a radio with no
+  strong slot of its own scouts (parked and scanning) instead of sharing another
+  radio's access point. Signal trends move a fading radio before it crosses
+  −75 dBm; scan tables give dBm, age, channel width and BSS load; per-card
+  signal offsets are learned. The daemon polls every second while anything is
+  moving. A replugged card's autoconnect, or a second saved profile for the
+  same network, is no longer taken for a new network choice.
 - **Internal card toggle** (`install.sh --manage-internal`): switch a built-in PCI
   card off (removed from the bus) or on (rescan + driver load) from the widget;
   persists across reboots via a generated udev rule.
