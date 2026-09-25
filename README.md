@@ -185,7 +185,39 @@ Scouts scan every 6 s while you're moving (30 s when still); without a scout, a
 weak or fading radio scans itself every 10 s. Cards hear the air differently
 (the built-in mt7925e reads ~20 dB below the A9000 on the same AP), so a reading
 one radio took is only used for another after a learned per-card correction.
-Changes happen one at a time, the next waiting until the last one has landed.
+Changes happen one at a time, the next waiting until the last one has landed;
+a move drops the old link first, then joins.
+
+Keeping links honest:
+
+- **Traffic check.** Every connected radio pings its gateway every 2 s, bound to
+  that radio. Three misses (two if the card has fallen to the lowest transmit
+  rate) and the link is dead however good its signal: it's taken off that AP and
+  out of multipath routing within seconds. (Live: a card sat associated at
+  −55 dBm passing nothing for minutes.)
+- **Fast give-up.** A join not fully up within 15 s is cancelled, instead of
+  waiting out NetworkManager's 45 s DHCP timeout.
+- **Two strikes.** A failed join avoids that AP for that card for 5 min, then
+  it's tried again; a second failure avoids it until you choose the network
+  again. A working join clears the strikes.
+- **Signal floors.** Nothing below −72 dBm is ever tried (some APs drop clients
+  they hear below −75, and they hear us weaker than we hear them). A join that
+  fails before authentication completes raises that card's minimum for that AP
+  by 6 dB for 30 min; a join stuck waiting for an address doesn't (that's a
+  network problem, not signal).
+- **Proven APs.** A working radio moves for speed only to an AP some radio has
+  carried traffic on in the last 30 min; the only working radio never moves for
+  speed at all. Two working radios may trade APs, but only while a third
+  carries traffic.
+- **No races.** While following a network, NetworkManager's autoconnect is
+  blocked on every radio (in memory only, re-asserted every poll), so only the
+  planner connects radios. If the network is gone for 2 min and no radio sees
+  it, NetworkManager takes over again; turning multipath off does too. If the
+  daemon ever dies while holding, reboot or
+  `nmcli device set <radio> autoconnect yes` restores it.
+- **Join log.** Every attempt and its outcome goes to
+  `~/.local/state/wifimimo/joins.jsonl`.
+
 No per-card profile copies are needed, and NetworkManager's saved profiles are
 never modified (only an in-memory `multi-connect` change, reverted when multipath
 is turned off). It runs as you, so passwords come from your own keyring.
