@@ -1,0 +1,11 @@
+[Unit]
+Description=wifimimo dead-man: re-check multipath routing, hand it to NetworkManager if anything fails
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/wifimimo/wifimimo-helper multipath check
+TimeoutStartSec=30
+# Every 20 s: log only problems (also silences systemd's own start/stop lines
+# about this unit); the helper syslogs a routing change or a hand-back itself.
+LogLevelMax=notice

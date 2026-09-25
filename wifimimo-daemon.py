@@ -6,6 +6,7 @@ from __future__ import annotations
 import csv
 import os
 import signal
+import socket
 import sys
 import time
 from collections import deque
@@ -45,6 +46,23 @@ UI_ACTIVE_TTL_S = 3.0
 
 def log(message: str) -> None:
     print(message, flush=True)
+
+
+def sd_notify(message: str) -> None:
+    """Tell systemd we're alive (WatchdogSec in the unit). A loop that stops
+    reaching this for the watchdog period gets the daemon killed, which runs
+    ExecStopPost (radios back to NetworkManager) and a restart."""
+    target = os.environ.get("NOTIFY_SOCKET", "")
+    if not target:
+        return
+    if target.startswith("@"):
+        target = "\0" + target[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+            sock.connect(target)
+            sock.sendall(message.encode())
+    except OSError:
+        pass
 
 
 class WifimimoDaemon:
@@ -97,6 +115,7 @@ class WifimimoDaemon:
             write_state(self.state_path, doc)
             for state in states.values():
                 self.write_history(state)
+            sd_notify("WATCHDOG=1")
             elapsed = time.monotonic() - loop_start
             time.sleep(max(0.05, poll_interval - elapsed))
 

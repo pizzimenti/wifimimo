@@ -28,6 +28,8 @@ TARGET_POLICY="/usr/share/polkit-1/actions/io.github.pizzimenti.wifimimo.policy"
 TARGET_DISPATCHER_DIR="/etc/NetworkManager/dispatcher.d"
 TARGET_DISPATCHER="$TARGET_DISPATCHER_DIR/90-wifimimo"
 TARGET_RT_PROTOS="/etc/iproute2/rt_protos.d/wifimimo.conf"
+DEADMAN_UNIT="wifimimo-deadman"
+TARGET_DEADMAN_DIR="/etc/systemd/system"
 ETC_DIR="/etc/wifimimo"
 INTERNAL_CONF="$ETC_DIR/internal.conf"
 INTERNAL_FLAG="$ETC_DIR/internal-enabled"
@@ -221,6 +223,9 @@ if [[ $UNINSTALL == 1 ]]; then
             "$TARGET_HELPER" internal enable || true
         fi
     fi
+    systemctl disable --now "$DEADMAN_UNIT.timer" 2>/dev/null || true
+    rm -f -- "$TARGET_DEADMAN_DIR/$DEADMAN_UNIT.service" "$TARGET_DEADMAN_DIR/$DEADMAN_UNIT.timer"
+    systemctl daemon-reload
     rm -f -- "$TARGET_DISPATCHER" "$TARGET_POLICY" "$INTERNAL_RULE" "$WIFIMIMO_BLACKLIST" "$TARGET_RT_PROTOS"
     udevadm control --reload 2>/dev/null || true
     run_as_user systemctl --user disable --now "$USER_SERVICE_NAME" 2>/dev/null || true
@@ -297,7 +302,15 @@ if [[ -e "$ETC_DIR/multipath-enabled" ]]; then
     "$TARGET_HELPER" multipath apply || true
 fi
 
+# Dead-man timer (root): re-checks routing every 20 s independently of the
+# user daemon, and hands routing back to NetworkManager if anything fails.
+for unit in "$DEADMAN_UNIT.service" "$DEADMAN_UNIT.timer"; do
+    install -Dm644 -o root -g root "$SERVICE_DIR/$unit" "$TARGET_DEADMAN_DIR/$unit"
+    systemd-analyze verify "$TARGET_DEADMAN_DIR/$unit" >/dev/null 2>&1 \
+        || echo "Note: systemd-analyze verify reported problems in $unit" >&2
+done
 systemctl daemon-reload
+systemctl enable --now "$DEADMAN_UNIT.timer"
 
 USER_SYSTEMD_DIR="$HOME/.config/systemd/user"
 USER_SERVICE_PATH="$USER_SYSTEMD_DIR/$USER_SERVICE_NAME"
@@ -318,6 +331,7 @@ printf 'Installed:\n'
 printf '  %s\n' "$TARGET_LIB_DIR/" "$TARGET_HELPER" "$TARGET_DAEMON" "$TARGET_MON" \
     "$TARGET_PLASMOID_SOURCE" "$TARGET_TIDY" "$TARGET_DESKTOP" "$TARGET_POLICY" "$TARGET_RT_PROTOS"
 [[ -e "$TARGET_DISPATCHER" ]] && printf '  %s\n' "$TARGET_DISPATCHER"
+printf '  %s\n' "$TARGET_DEADMAN_DIR/$DEADMAN_UNIT.timer"
 [[ -e "$INTERNAL_RULE" ]] && printf '  %s\n' "$INTERNAL_RULE"
 printf '  %s\n' "$USER_SERVICE_PATH"
 printf '\nUser service status:\n'

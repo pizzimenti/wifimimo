@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import wifimimo_shared as shared  # noqa: E402
 
 VERBS = {
-    "multipath": ("enable", "disable", "apply", "status"),
+    "multipath": ("enable", "disable", "apply", "check", "status"),
     "internal": ("enable", "disable", "status", "sync-rules"),
 }
 READ_ONLY_ACTIONS = {"status"}
@@ -575,8 +575,55 @@ def multipath_apply(ctx: Ctx, desired: bool) -> dict:
     return result
 
 
+def multipath_check(ctx: Ctx, desired: bool) -> dict:
+    """Dead-man (root timer, every 20 s, independent of the user daemon):
+    re-run the membership check with fresh gateway pings so a radio that
+    stopped passing traffic leaves the ECMP route even if nothing else
+    notices; if checking or applying fails for any reason, tear our routing
+    down so NetworkManager's own routes carry everything. The on-switch
+    stays on: the next good check rebuilds it."""
+    try:
+        result = multipath_apply(ctx, desired)
+        failure = result["error"]
+    except Exception as exc:  # the dead-man must not die with the thing it guards
+        result = {"desired": desired, "active": False, "members": [], "excluded": [],
+                  "reason": "", "error": "", "applied_at": int(time.time()), "plan": []}
+        failure = f"{exc.__class__.__name__}: {exc}"
+    if failure:
+        rules, routes_all = multipath_snapshot(ctx)
+        plan = plan_teardown(rules, routes_all)
+        errors = execute(ctx, plan)
+        result.update(plan=result.get("plan", []) + plan, active=False, members=[],
+                      reason=f"dead-man: routing handed back to NetworkManager ({failure})",
+                      error="; ".join(errors))
+    result["quiet"] = not failure
+    return result
+
+
+def _check_changed(prev: dict, result: dict) -> bool:
+    """Apply always re-issues its idempotent `replace` commands, so the plan
+    is never empty; what matters is whether membership or the verdict moved."""
+    def key(r: dict) -> tuple:
+        return (tuple(r.get("members") or []),
+                tuple(sorted(e.get("iface", "") for e in r.get("excluded") or [])),
+                r.get("reason", ""), bool(r.get("error")), bool(r.get("desired")))
+    return not isinstance(prev, dict) or key(prev) != key(result)
+
+
 def cmd_multipath(ctx: Ctx, action: str) -> tuple[int, dict]:
     flag = ctx.etc_dir / shared.MULTIPATH_FLAG.name
+    if action == "check":
+        result = multipath_check(ctx, flag.exists())
+        try:
+            prev = json.loads((ctx.run_dir / shared.MULTIPATH_STATUS.name).read_text())
+        except (OSError, ValueError):
+            prev = None
+        result["quiet"] = result["quiet"] and not _check_changed(prev, result)
+        if not ctx.dry_run and not result["quiet"]:
+            status = {k: v for k, v in result.items() if k not in ("plan", "quiet")}
+            _write_json(ctx, ctx.run_dir / shared.MULTIPATH_STATUS.name, status)
+        result["plan"] = [list(s) for s in result["plan"]] if ctx.dry_run else len(result["plan"])
+        return (EXIT_FAILED if result["error"] else EXIT_OK), result
     if action == "status":
         _, routes_all = multipath_snapshot(ctx)
         members = shared.ecmp_members(routes_all)
@@ -807,7 +854,10 @@ def main(argv: list[str]) -> int:
         else:
             with Lock(ctx.run_dir / shared.HELPER_LOCK.name):
                 code, result = handler(ctx, action)
-                syslog(f"{verb} {action}: {'ok' if code == 0 else result.get('error', code)}")
+                if not result.pop("quiet", False):   # the 20 s dead-man logs only changes
+                    syslog(f"{verb} {action}: {'ok' if code == 0 else result.get('error', code)}"
+                           + (f" ({result['reason']})" if result.get("reason", "").startswith("dead-man")
+                              else ""))
     except Refused as exc:
         return emit(EXIT_REFUSED, {"error": str(exc)})
     result.update(verb=verb, action=action, dry_run=dry_run)

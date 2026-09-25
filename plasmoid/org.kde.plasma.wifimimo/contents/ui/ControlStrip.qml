@@ -57,6 +57,12 @@ RowLayout {
         if (!mp.desired) {
             return "Off. Turn on to balance connections across all connected radios.";
         }
+        if (nm.failsafe) {
+            return "Fail-safe: " + (nm.plan || "NetworkManager has the radios for now") + ".";
+        }
+        if ((mp.reason || "").indexOf("dead-man") === 0) {
+            return mp.reason + ".";
+        }
         if (mp.active) {
             let text = "Active on " + (mp.members || []).join(", ") + " (per-connection balancing)";
             if (nm.leader && nm.leader.id) {
@@ -106,7 +112,7 @@ RowLayout {
         visible: strip.showMultipath
         text: "Multipath"
         detail: strip.multipathDetail()
-        waiting: !!strip.mp.desired && !strip.mp.active
+        waiting: !!strip.mp.desired && (!strip.mp.active || !!strip.nm.failsafe)
         bad: strip.failed("multipath") || !!strip.mp.error
     }
     PlasmaComponents3.BusyIndicator {

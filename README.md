@@ -6,7 +6,7 @@ the full per-MCS rate ladder for **Wi-Fi 4 / 5 / 6 / 6E / 7** links.
 
 ![wifimimo expanded panel](docs/wifimimo-panel.png)
 
-Current version: `1.6.1` · See [CHANGELOG.md](CHANGELOG.md) · Use GitHub Issues for bugs and feature requests.
+Current version: `1.7.0` · See [CHANGELOG.md](CHANGELOG.md) · Use GitHub Issues for bugs and feature requests.
 
 ## What it shows
 
@@ -217,6 +217,20 @@ Keeping links honest:
   `ExecStopPost` runs `wifimimo-daemon --release`).
 - **Join log.** Every attempt and its outcome goes to
   `~/.local/state/wifimimo/joins.jsonl`.
+
+Dead-man switches — if any part of wifimimo's control fails, NetworkManager gets
+everything back:
+
+| What fails | What happens |
+|---|---|
+| The daemon stops or crashes | the service's `ExecStopPost` hands every radio's autoconnect back to NetworkManager |
+| The daemon hangs | systemd watchdog (45 s without a heartbeat) kills it; the same hand-back runs, then a restart |
+| The daemon is gone while routing is active | a root timer (`wifimimo-deadman.timer`, every 20 s) re-checks routing with fresh gateway pings on its own |
+| The helper can't check or apply routing | that timer tears wifimimo's routing down; NetworkManager's own routes carry everything (the switch stays on, so the next good check rebuilds it) |
+| The planner gets nothing through for a minute | every radio goes back to NetworkManager for 5 min, then wifimimo tries again (shown in the widget) |
+
+A gateway that never answers pings (common on public networks) doesn't make a
+radio "dead" while NetworkManager's own connectivity check passes.
 
 The thresholds were tuned on one property. To tune another site, put overrides in
 `~/.config/wifimimo/roam.json` (re-read when it changes; unknown keys and

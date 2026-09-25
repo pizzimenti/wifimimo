@@ -1022,3 +1022,50 @@ def test_broken_tuning_file_means_defaults(tmp_path):
         assert roam.MIN_JOIN_DBM == -72
     finally:
         nm.apply_tuning({})
+
+
+def test_traffic_ok_trusts_a_ping_reply_or_nm_full_connectivity():
+    assert nm.traffic_ok([dev("wifi1", P, connectivity=3)], {"wifi1": True})
+    assert nm.traffic_ok([dev("wifi1", P, connectivity=4)], {"wifi1": None})
+    assert not nm.traffic_ok([dev("wifi1", P, connectivity=3)], {"wifi1": False})
+
+
+def test_a_gateway_that_never_answers_pings_is_not_a_dead_link():
+    devices = [dev("wifi1", P, connectivity=4), dev("wifi2", P, connectivity=3)]
+    raw = {"wifi1": False, "wifi2": False}
+    # never replied, but NM says wifi1 reaches the internet: unknown, not dead
+    assert nm.settle_alive(raw, set(), devices) == {"wifi1": None, "wifi2": False}
+    # it did answer before and went quiet: dead however NM rates it
+    assert nm.settle_alive(raw, {"wifi1"}, devices) == {"wifi1": False, "wifi2": False}
+
+
+def test_failsafe_hands_every_radio_to_nm_after_a_minute_without_traffic(tmp_path, monkeypatch):
+    flag = tmp_path / "multipath-enabled"
+    flag.touch()
+    monkeypatch.setattr(nm.shared, "MULTIPATH_FLAG", flag)
+    calls = []
+    show = ("GENERAL.DEVICE:wifi1\nGENERAL.TYPE:wifi\nGENERAL.STATE:100 (connected)\n"
+            "GENERAL.CON-UUID:" + P + "\nGENERAL.IP4-CONNECTIVITY:1 (none)\n")
+
+    def fake_nmcli(args, timeout=5):
+        calls.append(" ".join(args))
+        return 0, show if "show" in args else ""
+
+    monkeypatch.setattr(nm, "run_nmcli", fake_nmcli)
+    path = tmp_path / "follow.json"
+    path.write_text(json.dumps({"held_ac": ["wifi1", "wifi2"], "parked": {"wifi2": 1.0}}))
+    follower = nm.Follower(path)
+    follower.tuning = nm.Tuning(tmp_path / "none.json")
+    assert "failsafe" not in follower.step({}, 1000.0)
+    assert "failsafe" not in follower.step({}, 1000.0 + nm.FAILSAFE_AFTER_S - 1)
+    status = follower.step({}, 1000.0 + nm.FAILSAFE_AFTER_S)
+    assert status["failsafe"] and "handed to NetworkManager" in status["plan"]
+    assert "device set wifi1 autoconnect yes" in calls and "device set wifi2 autoconnect yes" in calls
+    saved = json.loads(path.read_text())
+    assert "held_ac" not in saved and "parked" not in saved
+    # hands off for the hold-off, then tries again
+    calls.clear()
+    status = follower.step({}, 1000.0 + nm.FAILSAFE_AFTER_S + 10)
+    assert status["failsafe"] and not [c for c in calls if "autoconnect no" in c]
+    later = follower.step({}, 1000.0 + nm.FAILSAFE_AFTER_S + nm.FAILSAFE_HOLDOFF_S + 1)
+    assert "failsafe" not in later

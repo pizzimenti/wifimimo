@@ -327,3 +327,73 @@ def test_legacy_rule_detected(tmp_path):
         'ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x14c3", ATTR{device}=="0x7925", ATTR{remove}="1"\n')
     status = helper.internal_status(ctx, ENTRIES)
     assert status["legacy_rules"] == [str(ctx.udev_rules_dir / "99-remove-mt7925-pci.rules")]
+
+
+# ---------------------------------------------------------------------------
+# dead-man check (root timer)
+# ---------------------------------------------------------------------------
+
+
+def test_check_is_an_accepted_verb():
+    assert helper.parse_argv(["multipath", "check"]) == (False, "multipath", "check")
+
+
+def _live_snapshot(monkeypatch):
+    rules, routes = _as_live(MEMBERS)
+    monkeypatch.setattr(helper, "multipath_snapshot", lambda ctx: (rules, routes))
+
+
+def test_check_hands_routing_back_when_applying_raises(tmp_path, monkeypatch):
+    ctx = FakeCtx(tmp_path)
+    _live_snapshot(monkeypatch)
+
+    def boom(ctx, desired):
+        raise RuntimeError("ip -j rule show returned garbage")
+
+    monkeypatch.setattr(helper, "multipath_apply", boom)
+    result = helper.multipath_check(ctx, True)
+    assert ctx.ran[0] == "ip -4 route del default table 100"      # ECMP route first
+    assert any("rule del priority 32090" in line for line in ctx.ran)
+    assert result["reason"].startswith("dead-man: routing handed back to NetworkManager")
+    assert "RuntimeError" in result["reason"] and not result["active"] and not result["quiet"]
+
+
+def test_check_hands_routing_back_when_applying_fails(tmp_path, monkeypatch):
+    ctx = FakeCtx(tmp_path)
+    _live_snapshot(monkeypatch)
+    monkeypatch.setattr(helper, "multipath_apply", lambda ctx, desired: {
+        "desired": True, "active": False, "members": [], "excluded": [], "reason": "",
+        "error": "RTNETLINK answers: No such process", "applied_at": 0, "plan": [("cmd", ["x"])]})
+    result = helper.multipath_check(ctx, True)
+    assert "ip -4 route del default table 100" in ctx.ran
+    assert "No such process" in result["reason"]
+
+
+def test_a_healthy_check_is_quiet_and_touches_nothing(tmp_path, monkeypatch):
+    ctx = FakeCtx(tmp_path)
+    monkeypatch.setattr(helper, "multipath_apply", lambda ctx, desired: {
+        "desired": True, "active": True, "members": ["wifi1", "wifi2"], "excluded": [],
+        "reason": "", "error": "", "applied_at": 0, "plan": []})
+    result = helper.multipath_check(ctx, True)
+    assert result["quiet"] and ctx.ran == []
+
+
+def test_the_20s_check_logs_and_writes_status_only_when_something_changed(tmp_path, monkeypatch):
+    # apply always re-issues idempotent `replace`s, so a non-empty plan is not a change
+    ctx = FakeCtx(tmp_path)
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc" / shared.MULTIPATH_FLAG.name).touch()
+    members = ["wifi2", "wifi1"]
+    monkeypatch.setattr(helper, "multipath_apply", lambda ctx, desired: {
+        "desired": True, "active": True, "members": list(members), "excluded": [],
+        "reason": "", "error": "", "applied_at": 0, "plan": [("cmd", ["ip", "x"])]})
+    status = tmp_path / "run" / shared.MULTIPATH_STATUS.name
+    _, result = helper.cmd_multipath(ctx, "check")
+    assert result["quiet"] is False and status.exists()            # first run: no baseline
+    status.write_text(status.read_text())
+    mtime = status.stat().st_mtime_ns
+    _, result = helper.cmd_multipath(ctx, "check")
+    assert result["quiet"] is True and status.stat().st_mtime_ns == mtime
+    members.remove("wifi1")                                       # a radio dropped out
+    _, result = helper.cmd_multipath(ctx, "check")
+    assert result["quiet"] is False and '"wifi1"' not in status.read_text()

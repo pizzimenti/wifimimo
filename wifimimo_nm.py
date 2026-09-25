@@ -942,6 +942,30 @@ def release_holds(path: Path = FOLLOW_PATH, nmcli=None) -> list[str]:
 
 
 SWAP_TIMEOUT_S = 60.0
+# Dead-man for the planner itself: if no radio has passed traffic for
+# FAILSAFE_AFTER_S while wifimimo manages the radios, whatever it is doing
+# isn't working: every radio goes back to NetworkManager for
+# FAILSAFE_HOLDOFF_S, then wifimimo tries again.
+FAILSAFE_AFTER_S = 60.0
+FAILSAFE_HOLDOFF_S = 300.0
+
+
+def traffic_ok(devices: list[dict], alive: dict) -> bool:
+    """Is anything getting through? A radio whose gateway ping answers, or
+    one NetworkManager rates fully connected (its own internet check)."""
+    return (any(v is True for v in alive.values())
+            or any(d.get("type") == "wifi" and d.get("connectivity") == CONNECTIVITY_FULL
+                   for d in devices))
+
+
+def settle_alive(raw: dict, ever_replied: set, devices: list[dict]) -> dict:
+    """A link whose gateway has never answered a ping may simply not answer
+    pings (public networks often don't): it only counts as dead if
+    NetworkManager's connectivity check also fails. A link that did answer
+    and went quiet is dead regardless (the mute-card case)."""
+    full = {d["device"] for d in devices if d.get("connectivity") == CONNECTIVITY_FULL}
+    return {dev: (None if v is False and dev not in ever_replied and dev in full else v)
+            for dev, v in raw.items()}
 
 
 def swap_step(swap: dict, by_dev: dict, ctx: RoamContext, now: float) -> tuple | None:
@@ -1224,6 +1248,8 @@ class Follower:
         self.ctx = RoamContext()
         self.liveness = Liveness()
         self.tuning = Tuning()
+        self.no_traffic_since: float | None = None
+        self.failsafe_until = 0.0
         self.wants_fast = False     # read by the daemon's poll-interval logic
 
     def heal(self, devices: list[dict], now: float) -> list[str]:
@@ -1347,11 +1373,35 @@ class Follower:
         devices = parse_dev_show(out)
         feed_context(self.ctx, states, now)
         self.liveness.update(states)
-        self.ctx.alive = {
-            dev: self.liveness.alive(
-                dev, time.time(),
-                suspect=0 < float(s.get("tx_rate_mbps") or 0) <= SUSPECT_TX_MBPS)
-            for dev, s in states.items()}
+        raw = {dev: self.liveness.alive(
+                   dev, time.time(),
+                   suspect=0 < float(s.get("tx_rate_mbps") or 0) <= SUSPECT_TX_MBPS)
+               for dev, s in states.items()}
+        self.ctx.alive = settle_alive(raw, set(self.liveness.last_reply), devices)
+
+        # Dead-man for the planner: nothing through for FAILSAFE_AFTER_S ->
+        # every radio back to NetworkManager for FAILSAFE_HOLDOFF_S.
+        if now < self.failsafe_until:
+            self.wants_fast = False
+            return {"failsafe": True, "plan": (
+                f"failsafe: NetworkManager has the radios for {int(self.failsafe_until - now)} s more "
+                "(nothing passed traffic for a minute)")}
+        if traffic_ok(devices, self.ctx.alive) or not any(d.get("type") == "wifi" for d in devices):
+            self.no_traffic_since = None
+        elif self.no_traffic_since is None:
+            self.no_traffic_since = now
+        elif now - self.no_traffic_since >= FAILSAFE_AFTER_S:
+            actions, self.memory = plan_release_holds(self.memory)
+            for action in actions:
+                self._run(action)
+            self._save()
+            self.failsafe_until = now + FAILSAFE_HOLDOFF_S
+            self.no_traffic_since = None
+            log_line = (f"failsafe: no traffic for {int(FAILSAFE_AFTER_S)} s; radios "
+                        f"({', '.join(a[1] for a in actions) or 'none held'}) handed to NetworkManager")
+            print(log_line, flush=True)
+            return {"failsafe": True, "plan": log_line}
+
         actions, memory, status = plan_follow(devices, self.memory, now, _Lookup(states),
                                               primary_wifi_device(states), self.ctx)
         self.wants_fast = bool(status.pop("wants_fast", False))

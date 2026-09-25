@@ -98,3 +98,19 @@ def test_versions_agree():
 def test_service_releases_radios_after_every_stop():
     unit = (ROOT / "services" / "wifimimo-daemon.service").read_text()
     assert "ExecStopPost=/usr/local/bin/wifimimo-daemon --release" in unit
+
+
+def test_deadman_timer_runs_the_helper_check():
+    service = (ROOT / "services" / "wifimimo-deadman.service").read_text()
+    timer = (ROOT / "services" / "wifimimo-deadman.timer").read_text()
+    assert f"ExecStart={shared.HELPER_PATH} multipath check" in service
+    assert "OnUnitActiveSec=20" in timer and "WantedBy=timers.target" in timer
+    install = (ROOT / "install.sh").read_text()
+    assert 'systemctl enable --now "$DEADMAN_UNIT.timer"' in install
+    assert 'systemctl disable --now "$DEADMAN_UNIT.timer"' in install      # uninstall too
+
+
+def test_daemon_has_a_watchdog_and_feeds_it():
+    unit = (ROOT / "services" / "wifimimo-daemon.service").read_text()
+    assert "WatchdogSec=" in unit and "NotifyAccess=main" in unit
+    assert 'sd_notify("WATCHDOG=1")' in (ROOT / "wifimimo-daemon.py").read_text()

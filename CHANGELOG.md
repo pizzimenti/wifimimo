@@ -7,6 +7,26 @@ Each version's heading says whether it was a major, minor or patch change.
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-09-25 (minor)
+
+### Added
+
+- **Dead-man switches**, so any failure of wifimimo's control returns the radios
+  and routing to NetworkManager:
+  - a systemd watchdog on the daemon (45 s without a heartbeat → killed, radios
+    handed back by `ExecStopPost`, restarted);
+  - a root timer, `wifimimo-deadman.timer`, running `wifimimo-helper multipath
+    check` every 20 s: re-checks routing with fresh gateway pings independently of
+    the daemon, and tears wifimimo's routing down if checking or applying fails
+    (quiet unless membership or the verdict changes);
+  - a planner fail-safe: nothing through for 60 s → every radio back to
+    NetworkManager for 5 min, then retry; shown in the widget's Multipath tooltip.
+
+### Fixed
+
+- A gateway that never answers pings no longer marks a radio dead while
+  NetworkManager's connectivity check passes (public networks often drop ping).
+
 ## [1.6.1] - 2026-09-25 (patch)
 
 ### Fixed
