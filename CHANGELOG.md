@@ -7,6 +7,19 @@ Each version's heading says whether it was a major, minor or patch change.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-09-25 (minor)
+
+### Changed
+
+- **No races with NetworkManager**: while following a network, NetworkManager's
+  autoconnect is blocked (in memory only) on every radio and re-asserted every
+  poll, so only the planner connects radios. Live, a flickering radio was
+  reconnected by NM to the access point the planner had just given another
+  radio. If no radio has been on the network for 2 min and none can see it, the
+  block is lifted and NetworkManager picks again; turning multipath off lifts it
+  too. (If the daemon ever dies while holding, reboot or
+  `nmcli device set <radio> autoconnect yes` restores NM's behaviour.)
+
 ## [1.3.1] - 2026-09-25 (patch)
 
 ### Fixed

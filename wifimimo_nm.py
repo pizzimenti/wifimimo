@@ -91,6 +91,13 @@ FLOOR_TTL_S = 1800.0
 PROVEN_S = 1800.0
 LOST_AP_S = 60.0             # the AP a radio just lost: avoided by that radio
 FAST_AFTER_MOVE_S = 30.0     # keep 1 s polling this long after any change
+# While following a network, NetworkManager's autoconnect is blocked on every
+# radio (in memory only) so it never races the planner: live 15:18:46, the
+# built-in's link flickered, NM reconnected it to the AP the planner had just
+# given another radio. If no radio has been on the network for LEADER_LOST_S
+# and none can see it, the network is gone (you left): the block is lifted
+# and NM picks again.
+LEADER_LOST_S = 120.0
 REGION_SETTLE_S = 2.0        # no joins this soon after the regulatory domain changed
 REASON_USER_REQUESTED = 39
 STATE_DISCONNECTED = 30
@@ -154,6 +161,8 @@ def parse_dev_show(text: str) -> list[dict]:
             cur["uuid"] = value
         elif key == "GENERAL.IP4-CONNECTIVITY":
             cur["connectivity"] = _lead_int(value)
+        elif key == "GENERAL.AUTOCONNECT":
+            cur["autoconnect"] = value.strip().lower().startswith("yes")
     if cur:
         devices.append(cur)
     for dev in devices:
@@ -166,7 +175,7 @@ def parse_dev_show(text: str) -> list[dict]:
 
 
 DEV_FIELDS = ("GENERAL.DEVICE,GENERAL.TYPE,GENERAL.STATE,GENERAL.REASON,"
-              "GENERAL.CON-UUID,GENERAL.IP4-CONNECTIVITY")
+              "GENERAL.CON-UUID,GENERAL.IP4-CONNECTIVITY,GENERAL.AUTOCONNECT")
 CONNECTIVITY_FULL = 4
 # Helper exclusion reasons that clear up on their own once NM's per-device
 # connectivity check passes (which fires no dispatcher event of its own).
@@ -365,7 +374,8 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
     ctx      : RoamContext (trends, offsets, scan tables)
     Returns (actions, new_memory, status). Actions:
       ("multi", uuid, value) | ("up", uuid, dev, bssid) | ("down", uuid, dev)
-      | ("park", dev) | ("unpark", dev) | ("scan", dev)
+      | ("move", uuid, dev, bssid) | ("park", dev) | ("hold", dev) | ("release", dev)
+      | ("scan", dev)
     """
     ctx = ctx or RoamContext()
     memory = json.loads(json.dumps(memory or {}))
@@ -507,8 +517,7 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
             actions.append(("multi", leader["uuid"], "manual-multiple"))
             need_multi = False
         actions.append((kind, leader["uuid"], name, bssid))
-        if parked.pop(name, None) is not None:
-            actions.append(("unpark", name))
+        parked.pop(name, None)   # stays held: the join is ours, reconnects are too
         moves[name] = {"target": leader["uuid"], "previous": previous, "at": now, "bssid": bssid,
                        "signal": round(float(signal), 1)}
 
@@ -624,6 +633,25 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
 
     status["followers"] = [d["device"] for d in wifi
                            if d["device"] != leader["device"] and on_network(d)]
+
+    # No races with NetworkManager: every radio's autoconnect stays blocked
+    # while we follow a network. If the network is gone, hand back.
+    held_ac: list = memory.setdefault("held_ac", [])
+    if any(on_network(d) and d.get("state") == STATE_ACTIVATED for d in wifi):
+        memory["leader_seen"] = now
+    seen_at = memory.setdefault("leader_seen", now)
+    visible = any(a.get("ssid") == ssid for d in wifi for a in lookup.scan(d["device"]))
+    if now - seen_at > LEADER_LOST_S and not visible:
+        actions.extend(("release", name) for name in sorted(set(held_ac) | set(parked)))
+        memory.update(leader={}, held_ac=[], parked={}, leader_seen=now)
+        status["plan"] = f"'{ssid}' gone for {int(now - seen_at)} s: NetworkManager picks again"
+        return actions, memory, status
+    for d in wifi:
+        if d.get("autoconnect") is True:
+            actions.append(("hold", d["device"]))
+        if d["device"] not in held_ac:
+            held_ac.append(d["device"])
+    memory["held_ac"] = [n for n in held_ac if n in by_dev]
     if user_pinned:
         # The user locked the profile to one AP: every radio would share it.
         for d in wifi:
@@ -822,11 +850,12 @@ def swap_step(swap: dict, by_dev: dict, ctx: RoamContext, now: float) -> tuple |
 
 def plan_release(memory: dict) -> list[tuple]:
     """Multipath switched off: restore multi-connect on profiles we touched
-    and hand parked radios back to NetworkManager's autoconnect."""
+    and hand every radio we held or parked back to NetworkManager."""
     memory = memory or {}
+    radios = set(memory.get("parked", {})) | set(memory.get("held_ac", []))
     return ([("multi", uuid, original or "default")
              for uuid, original in sorted(memory.get("modified", {}).items())]
-            + [("unpark", name) for name in sorted(memory.get("parked", {}))])
+            + [("release", name) for name in sorted(radios)])
 
 
 # ---------------------------------------------------------------------------
@@ -1145,7 +1174,12 @@ class Follower:
             _, dev = action
             rc, _ = run_nmcli(["device", "set", dev, "autoconnect", "no"])
             run_nmcli(["device", "disconnect", dev])
-        elif kind == "unpark":
+        elif kind == "hold":
+            # in memory only (NM forgets it on restart); explicit activations
+            # still work, and re-enable it, so it's re-asserted every poll
+            _, dev = action
+            rc, _ = run_nmcli(["device", "set", dev, "autoconnect", "no"])
+        elif kind == "release":
             _, dev = action
             rc, _ = run_nmcli(["device", "set", dev, "autoconnect", "yes"])
         elif kind == "scan":
@@ -1162,7 +1196,8 @@ class Follower:
         if not enabled:
             self.wants_fast = False
             self.liveness.update({})    # stops every probe
-            if self.was_enabled or self.memory.get("modified") or self.memory.get("parked"):
+            if (self.was_enabled or self.memory.get("modified") or self.memory.get("parked")
+                    or self.memory.get("held_ac")):
                 for action in plan_release(self.memory):
                     self._run(action)
                 self.memory = {}

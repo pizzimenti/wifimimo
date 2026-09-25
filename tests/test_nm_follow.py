@@ -252,15 +252,44 @@ def test_idle_radio_without_a_strong_free_slot_parks_and_scans():
     assert status["parked"] == ["wifi0"]
 
 
-def test_parked_radio_joins_when_a_slot_opens_and_is_unparked():
+def test_parked_radio_joins_when_a_slot_opens_and_stays_held():
     devices = [dev("wifi1", P), dev("wifi0", "", state=30, reason=39)]
     mem = led(devices)
     mem["parked"] = {"wifi0": 50.0}
     actions, memory, _ = plan(devices, mem, 100.0)
     assert ups(actions) == {"wifi0": A2}
-    assert ("unpark", "wifi0") in actions
-    assert actions.index(("unpark", "wifi0")) > [a[0] for a in actions].index("up")
+    assert not kinds(actions, "release")         # autoconnect stays blocked: no races
     assert "wifi0" not in memory["parked"]
+
+
+def test_every_radio_is_held_from_nm_autoconnect_while_following():
+    # live 15:18:46: NM reconnected a flickering radio to the AP the planner
+    # had just given another radio
+    devices = [dict(dev("wifi1", P), autoconnect=True), dict(dev("wifi0"), autoconnect=False),
+               dict(dev("wifi2", P), autoconnect=True)]
+    look = lookup(freqs={"wifi1": 5180, "wifi2": 5745}, bssids={"wifi1": A1, "wifi2": A2})
+    actions, memory, _ = plan(devices, led(devices), 100.0, look)
+    assert kinds(actions, "hold") == ["wifi1", "wifi2"]
+    assert sorted(memory["held_ac"]) == ["wifi0", "wifi1", "wifi2"]
+
+
+def test_holds_are_released_when_the_network_is_gone():
+    # walked away from home: nothing on the network for 2 min and it's out of range
+    devices = [dict(dev("wifi1"), autoconnect=False), dict(dev("wifi0"), autoconnect=False)]
+    mem = led(devices)
+    mem.update(held_ac=["wifi0", "wifi1"], parked={"wifi0": 1.0}, leader_seen=100.0)
+    look = lookup(scans={"wifi0": [ap(A1, 5180, ssid="Library")], "wifi1": []})
+    actions, memory, status = plan(devices, mem, 100.0 + nm.LEADER_LOST_S - 1, look, scans={})
+    assert not kinds(actions, "release")                   # not yet
+    actions, memory, status = plan(devices, mem, 100.0 + nm.LEADER_LOST_S + 1, look, scans={})
+    assert kinds(actions, "release") == ["wifi0", "wifi1"]
+    assert memory["leader"] == {} and memory["held_ac"] == [] and "gone" in status["plan"]
+
+
+def test_parse_dev_show_reads_autoconnect():
+    text = ("GENERAL.DEVICE:wifi2\nGENERAL.TYPE:wifi\nGENERAL.STATE:30 (disconnected)\n"
+            "GENERAL.AUTOCONNECT:no\n")
+    assert nm.parse_dev_show(text)[0]["autoconnect"] is False
 
 
 def test_stale_scan_data_is_not_acted_on_but_triggers_a_scan():
@@ -494,9 +523,10 @@ def test_wants_fast_while_moving_but_not_for_a_still_scout():
     assert status["wants_fast"] is True
 
 
-def test_release_restores_multi_connect_and_unparks():
-    assert nm.plan_release({"modified": {P: "0"}, "parked": {"wifi0": 1.0}}) == [
-        ("multi", P, "0"), ("unpark", "wifi0")]
+def test_release_restores_multi_connect_and_hands_every_radio_back():
+    assert nm.plan_release({"modified": {P: "0"}, "parked": {"wifi0": 1.0},
+                            "held_ac": ["wifi1", "wifi0"]}) == [
+        ("multi", P, "0"), ("release", "wifi0"), ("release", "wifi1")]
     assert nm.plan_release({}) == []
 
 
