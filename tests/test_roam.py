@@ -1,8 +1,9 @@
 """Slot planner: channel geometry, scan tables, trends, and placement.
 
-Scenarios follow the Anglers Keep walk (2026-09-25): three radios, one
-access point near the house with 2.4 GHz ch 11 + 5 GHz ch 52/80, weaker
-APs on ch 36/80 and ch 100/80. Names and addresses are anonymised.
+Scenarios follow the Anglers Keep walk (2026-09-25): three radios, three
+buildings: the workshed AP (2.4 GHz ch 11 + 5 GHz ch 52/80), the
+riverhouse AP (5 GHz ch 36/80) and the lavenderhouse AP (2.4 GHz ch 6 +
+5 GHz ch 100/80). Names and addresses are anonymised.
 """
 
 from pathlib import Path
@@ -218,8 +219,8 @@ def free(dev, cands=(), locked=False):
     return {"dev": dev, "status": "free", "slot": None, "cands": list(cands), "locked": locked}
 
 
-H52 = ("aa:52", 5260)     # house AP, 5 GHz ch 52/80
-H11 = ("aa:11", 2462)     # house AP, 2.4 GHz ch 11
+H52 = ("aa:52", 5260)     # workshed AP, 5 GHz ch 52/80
+H11 = ("aa:11", 2462)     # workshed AP, 2.4 GHz ch 11
 F36 = ("bb:36", 5180)     # far AP, ch 36/80
 G52 = ("cc:52", 5260)     # another AP, also ch 52/80
 

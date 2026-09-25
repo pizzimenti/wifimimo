@@ -743,7 +743,7 @@ def dead_ctx(scans, dead=(), alive=(), now=100.0):
 
 
 def test_a_held_radio_passing_no_traffic_is_taken_off_its_ap():
-    # live 14:32: the A8000 at -55 on the house 2.4 GHz passed nothing for minutes
+    # live 14:32: the A8000 at -55 on the workshed 2.4 GHz passed nothing for minutes
     devices = [dev("wifi1", P), dev("wifi2", P)]
     scans = {"wifi2": [ap(A1, 5180), ap(A2, 5745), ap(A3, 2412)]}
     look = lookup(scans=scans, freqs={"wifi1": 5180, "wifi2": 2412},
@@ -796,7 +796,7 @@ def test_the_learned_floor_keeps_that_card_off_that_ap_until_stronger():
 
 
 def test_a_working_radio_only_moves_to_a_proven_ap():
-    # live 14:34:41: the A9000 left a working house 5 GHz (-64) for an AP
+    # live 14:34:41: the A9000 left a working workshed 5 GHz (-64) for an AP
     # that had just refused two radios, and lost 56 s
     devices = [dev("wifi1", P), dev("wifi2", P)]
     scans = {"wifi1": [ap(A1, 2412), ap(A2, 5745, signal=95)], "wifi2": []}
