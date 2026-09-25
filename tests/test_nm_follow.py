@@ -934,3 +934,55 @@ def test_stopping_the_daemon_hands_every_held_radio_back(tmp_path):
     assert "held_ac" not in left and "parked" not in left
     assert left["leader"] == {"uuid": P} and left["bad"] == {"wifi1": {A1: 5.0}}   # rest kept
     assert nm.release_holds(tmp_path / "missing.json") == []
+
+
+def test_a_swap_runs_end_to_end_through_the_follower():
+    """The stronger card sits on 2.4 GHz and the weaker on the same AP's
+    80 MHz 5 GHz only because of who got there first; a third radio carries
+    traffic. Poll by poll: park b, move a, join b, then the planner resumes."""
+    L24, L5, W11 = "ee:00:00:00:00:24", "ee:00:00:00:00:05", "dd:00:00:00:00:11"
+
+    def row(bssid, freq, signal, width):
+        return {"bssid": bssid, "ssid": "Central_Library", "freq": freq, "signal": float(signal),
+                "age_s": 1.0, "width": width, "span": roam.channel_span(freq, width),
+                "util": None, "associated": False}
+
+    ctx = nm.RoamContext()
+    ctx.dumps = {"wifi1": [row(L24, 2437, -30, 20), row(L5, 5500, -40, 80)],
+                 "wifi0": [row(L24, 2437, -50, 20), row(L5, 5500, -60, 80)],
+                 "wifi2": [row(W11, 2462, -45, 20)]}
+    ctx.last_scan = {d: 1e9 for d in ctx.dumps}
+    ctx.alive = {"wifi0": True, "wifi1": True, "wifi2": True}
+    scans = {"wifi1": [ap(L24, 2437), ap(L5, 5500)], "wifi0": [ap(L24, 2437), ap(L5, 5500)],
+             "wifi2": [ap(W11, 2462)]}
+
+    def look(where):
+        freq = {L24: 2437, L5: 5500, W11: 2462}
+        width = {L24: 20, L5: 80, W11: 20}
+        sig = {("wifi1", L24): -30, ("wifi1", L5): -40, ("wifi0", L24): -50,
+               ("wifi0", L5): -60, ("wifi2", W11): -45}
+        return lookup(scans=scans, freqs={d: freq[b] for d, b in where.items()},
+                      widths={d: width[b] for d, b in where.items()},
+                      bssids=where, signals={d: sig[(d, b)] for d, b in where.items()})
+
+    on_net = [dev("wifi1", P), dev("wifi0", P), dev("wifi2", P)]
+    mem = led(on_net)
+
+    # poll 1: the swap is chosen and b (the built-in on 5 GHz) is parked
+    where = {"wifi1": L24, "wifi0": L5, "wifi2": W11}
+    actions, mem, status = nm.plan_follow(on_net, mem, 100.0, look(where), "", ctx)
+    assert kinds(actions, "park") == ["wifi0"] and mem["swap"]["a_to"] == L5, status["plan"]
+    # poll 2: b is down, so a moves to b's old slot
+    devices = [dev("wifi1", P), dev("wifi0"), dev("wifi2", P)]
+    where = {"wifi1": L24, "wifi2": W11}
+    actions, mem, _ = nm.plan_follow(devices, mem, 101.0, look(where), "", ctx)
+    assert [(a[0], a[2], a[3]) for a in actions if a[0] in ("up", "move")] == [("move", "wifi1", L5)]
+    # poll 3: a is up on 5 GHz, so b joins a's old slot
+    where = {"wifi1": L5, "wifi2": W11}
+    actions, mem, _ = nm.plan_follow(devices, mem, 104.0, look(where), "", ctx)
+    assert [(a[0], a[2], a[3]) for a in actions if a[0] in ("up", "move")] == [("up", "wifi0", L24)]
+    # poll 4: both landed: the swap is done and the planner is content
+    where = {"wifi1": L5, "wifi0": L24, "wifi2": W11}
+    actions, mem, status = nm.plan_follow(on_net, mem, 106.0, look(where), "", ctx)
+    assert "swap" not in mem and not ups(actions) and not kinds(actions, "park")
+    assert status["plan"] == "placement already best"
