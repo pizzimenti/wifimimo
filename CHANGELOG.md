@@ -3,10 +3,90 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/).
+Each version's heading says whether it was a major, minor or patch change.
 
 ## [Unreleased]
 
-Planned as 1.0.0.
+## [1.3.1] - 2026-09-25 (patch)
+
+### Fixed
+
+- A per-card signal floor is learned only from joins that never got past
+  association / handshake (the AP couldn't hear us). A join stuck waiting for
+  an address is logged as "no address" and cancelled, and teaches no floor:
+  the riverhouse AP heard us at -70 and every DHCP request was answered, the
+  answers never reached the card.
+- A card transmitting at the lowest legacy rate (the mute A8000 sat at 6 Mb/s)
+  is declared dead after two missed gateway pings (4 s) instead of three.
+
+## [1.3.0] - 2026-09-25 (minor)
+
+### Added
+
+- **Traffic check per radio**: a gateway ping bound to each connected radio every
+  2 s; three misses (6 s) and the link is dead however strong its signal. A dead
+  radio is taken off its access point, no longer counts as a working radio, and
+  triggers a multipath re-apply (at most every 5 s).
+- **Fast join give-up**: a join not fully up within 15 s is cancelled instead of
+  waiting out NetworkManager's 45 s DHCP timeout.
+- **Per-card signal floors**: a failed join raises the signal that card needs from
+  that access point (reading + 6 dB) for 30 min.
+- **Proven access points**: a working radio moves for capacity only to an access
+  point some radio carried traffic on in the last 30 min.
+- **Swaps**: two working radios trade access points when clearly better, only
+  while a third radio carries traffic.
+
+### Fixed
+
+- The root helper's gateway check always pings through the radio; the neighbour
+  cache kept a dead link's gateway "reachable" and it stayed a multipath member.
+
+## [1.2.0] - 2026-09-25 (minor)
+
+### Added
+
+- Every join attempt and its outcome (target signal, landed / failed / refused /
+  timed out, seconds, NetworkManager state and reason) is logged to
+  `~/.local/state/wifimimo/joins.jsonl`.
+
+### Changed
+
+- No access point read below -72 dBm is ever tried (access points with a
+  minimum-signal floor, e.g. the EAP720 at -75, refuse it). A failed join counts
+  against an access point for every radio only at -50 dBm or better.
+
+## [1.1.1] - 2026-09-25 (patch)
+
+### Fixed
+
+- One switch at a time: a radio mid-switch counts as busy until it lands or is
+  judged failed (two overlapping switches left all three radios down for 66 s).
+- A move drops the current link before joining (switching in place failed
+  "no secrets").
+- A strong access point that fails a join is avoided by every radio for a while;
+  a radio that loses its access point avoids it for 60 s; joins aren't judged in
+  their first 5 s; the only working radio is never moved for an upgrade.
+- Radar (DFS) channels aren't joined while the regulatory domain is the world
+  default, and nothing is joined within 2 s of a change.
+
+## [1.1.0] - 2026-09-25 (minor)
+
+### Added
+
+- **Slot planning and early roaming** (`wifimimo_roam.py`): radios spread across
+  non-overlapping channels first, then across access points; a radio with no
+  strong slot of its own scouts (parked and scanning) instead of sharing another
+  radio's access point. Signal trends move a fading radio before it crosses
+  −75 dBm; scan tables give dBm, age, channel width and BSS load; per-card
+  signal offsets are learned. The daemon polls every second while anything is
+  moving.
+
+### Fixed
+
+- A replugged card's autoconnect, or a second saved profile for the same
+  network, is no longer taken for a new network choice.
+
+## [1.0.0] - 2026-09-25 (major)
 
 ### Added
 
@@ -19,14 +99,6 @@ Planned as 1.0.0.
   Plasma applet joins every radio to it (in-memory `multi-connect` only; saved
   profiles untouched), and disconnecting drops them all. `wifimimo-nm-tidy`
   removes hand-made per-card profile copies.
-- **Slot planning and early roaming** (`wifimimo_roam.py`): radios spread across
-  non-overlapping channels first, then across access points; a radio with no
-  strong slot of its own scouts (parked and scanning) instead of sharing another
-  radio's access point. Signal trends move a fading radio before it crosses
-  −75 dBm; scan tables give dBm, age, channel width and BSS load; per-card
-  signal offsets are learned. The daemon polls every second while anything is
-  moving. A replugged card's autoconnect, or a second saved profile for the
-  same network, is no longer taken for a new network choice.
 - **Internal card toggle** (`install.sh --manage-internal`): switch a built-in PCI
   card off (removed from the bus) or on (rescan + driver load) from the widget;
   persists across reboots via a generated udev rule.
