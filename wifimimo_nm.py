@@ -61,6 +61,13 @@ NEW_RADIO_GRACE_S = 60.0
 JOIN_START_S = 5.0           # a join isn't judged "didn't start" before this
 SWITCH_TIMEOUT_S = 30.0      # a switch in flight counts as busy up to this long
 SHARED_BAD_S = 300.0         # a strong AP that failed a join: avoided by every radio
+# A failed join counts against the AP (every radio avoids it) only when we
+# read it at SURE_DBM or better: below that it may be the AP's minimum-signal
+# floor refusing this one radio (the AP hears us ~10 dB weaker than we hear
+# it), which only that radio backs off from, for FLOOR_BACKOFF_S.
+SURE_DBM = -62
+FLOOR_BACKOFF_S = 120.0
+JOIN_LOG = STATE_DIR / "joins.jsonl"
 LOST_AP_S = 60.0             # the AP a radio just lost: avoided by that radio
 FAST_AFTER_MOVE_S = 30.0     # keep 1 s polling this long after any change
 REGION_SETTLE_S = 2.0        # no joins this soon after the regulatory domain changed
@@ -515,9 +522,15 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
             and dev.get("connectivity") in (1, 2, 3)
             and now - mv.get("at", 0) > LIMITED_GRACE_S)
         if failed:
-            bad.setdefault(name, {})[bssid] = now + BAD_AP_TTL_S
-            if mv.get("signal", -100) >= roam.STRONG_DBM:
+            sure = mv.get("signal", -100) >= SURE_DBM
+            bad.setdefault(name, {})[bssid] = now + (BAD_AP_TTL_S if sure else FLOOR_BACKOFF_S)
+            if sure:
                 shared_bad[bssid] = now + SHARED_BAD_S
+            status.setdefault("joins", []).append({
+                "t": round(now, 1), "dev": name, "bssid": bssid, "signal": mv.get("signal"),
+                "outcome": "limited" if on_target else ("failed" if sure else "refused (floor?)"),
+                "secs": round(now - mv.get("at", now), 1), "nm_state": dev.get("state"),
+                "nm_reason": dev.get("reason")})
             mv["bssid"] = ""
             mv["settled"] = True
             if on_target:
@@ -562,8 +575,12 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
             cands = [c for c in cands if not roam.is_radar(c["freq"])]
         view = {"dev": name, "slot": None, "locked": False, "cands": cands}
         landed = on_network(d) and state == STATE_ACTIVATED
-        if landed and move.get("target") == leader["uuid"]:
+        if landed and move.get("target") == leader["uuid"] and not move.get("settled"):
             move["settled"] = True
+            status.setdefault("joins", []).append({
+                "t": round(now, 1), "dev": name, "bssid": move.get("bssid", ""),
+                "signal": move.get("signal"), "outcome": "landed",
+                "secs": round(now - move.get("at", now), 1)})
         # A switch in flight is busy until it lands or is judged failed: in
         # between, the radio reads deactivating / disconnected, and treating
         # it as free let two switches overlap (live: 66 s with no link).
@@ -857,6 +874,19 @@ class Follower:
                 self.heal_proc = None
         return ready
 
+    def _log_joins(self, joins: list[dict]) -> None:
+        """Append join attempts and outcomes to JOIN_LOG (for tuning
+        thresholds against what really happened on a walk)."""
+        if not joins or self.path != FOLLOW_PATH:
+            return
+        try:
+            JOIN_LOG.parent.mkdir(parents=True, exist_ok=True)
+            with JOIN_LOG.open("a", encoding="utf-8") as f:
+                for entry in joins:
+                    f.write(json.dumps(entry) + "\n")
+        except OSError:
+            pass
+
     def _save(self) -> None:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -931,6 +961,15 @@ class Follower:
         actions, memory, status = plan_follow(devices, self.memory, now, _Lookup(states),
                                               primary_wifi_device(states), self.ctx)
         self.wants_fast = bool(status.pop("wants_fast", False))
+        for action in actions:
+            if action[0] in ("up", "move"):
+                dev = action[2]
+                bssid = action[3]
+                mv = memory.get("moves", {}).get(dev, {})
+                status.setdefault("joins", []).append({
+                    "t": round(now, 1), "dev": dev, "bssid": bssid, "signal": mv.get("signal"),
+                    "outcome": "tried " + action[0]})
+        self._log_joins(status.get("joins", []))
         status["healed"] = self.heal(devices, now)
         errors = [err for err in (self._run(a) for a in actions) if err]
         if memory != self.memory:

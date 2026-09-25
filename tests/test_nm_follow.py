@@ -329,6 +329,17 @@ def test_a_strong_ap_that_fails_a_join_is_avoided_by_every_radio():
     assert A2 not in memory.get("bad_all", {})
 
 
+def test_a_marginal_join_that_drops_is_a_floor_refusal_not_a_bad_ap():
+    devices = [dev("wifi1", P), dev("wifi2")]
+    mem = _pinned_mem(devices, "wifi2", A2, at=90.0)
+    mem["moves"]["wifi2"]["signal"] = -70            # read -70: the AP may hear us at -80
+    _, memory, status = plan(devices, mem, 100.0)
+    assert memory["bad"]["wifi2"][A2] == 100.0 + nm.FLOOR_BACKOFF_S
+    assert A2 not in memory.get("bad_all", {})
+    (entry,) = [j for j in status["joins"] if j["outcome"] != "tried up"]
+    assert entry["outcome"] == "refused (floor?)" and entry["signal"] == -70
+
+
 def test_join_is_not_judged_before_it_could_start():
     devices = [dev("wifi1", P), dev("wifi2")]
     mem = _pinned_mem(devices, "wifi2", A2, at=99.0)

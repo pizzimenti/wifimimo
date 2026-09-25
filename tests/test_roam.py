@@ -303,10 +303,15 @@ def test_a_dead_only_radio_keeps_its_link():
     assert roam.plan_slots([on("wifi1", slot(*H52, -88))])[0] is None
 
 
-def test_weak_slot_is_joined_only_when_nothing_else_is_up():
-    assert roam.plan_slots([free("wifi1", [cand(*F36, -78)])])[0] == ("join", "wifi1", "bb:36")
-    radios = [on("wifi2", slot(*H11, -40, width=20)), free("wifi1", [cand(*F36, -78)])]
+def test_marginal_slot_is_joined_only_when_nothing_else_is_up():
+    assert roam.plan_slots([free("wifi1", [cand(*F36, -71)])])[0] == ("join", "wifi1", "bb:36")
+    radios = [on("wifi2", slot(*H11, -40, width=20)), free("wifi1", [cand(*F36, -71)])]
     assert roam.plan_slots(radios)[0] is None
+
+
+def test_nothing_below_the_join_floor_is_ever_tried():
+    # live 14:09: an AP read at -70..-74 heard the A8000 at -84 (EAP720 floor: -75)
+    assert roam.plan_slots([free("wifi1", [cand(*F36, -78)])])[0] is None
 
 
 def test_nothing_new_starts_while_a_radio_is_connecting():

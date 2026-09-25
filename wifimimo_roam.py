@@ -30,7 +30,10 @@ import math
 import re
 from collections import deque
 
-STRONG_DBM = -70        # a slot is only joined at or above this
+STRONG_DBM = -70        # a slot is only joined at or above this while any radio is up
+MIN_JOIN_DBM = -72      # never tried below this: APs with a minimum-signal floor
+                        # (the EAP720 drops clients it hears below -75) refuse it,
+                        # and the AP hears our weaker transmit (A8000: ~10 dB less)
 KEEP_DBM = -75          # a held slot keeps counting as strong down to here
 DEAD_DBM = -82          # a held slot below this is dead weight
 FRESH_S = 10.0          # scan data older than this isn't acted on
@@ -578,6 +581,8 @@ def plan_slots(radios: list[dict]) -> tuple[tuple | None, str]:
         if not settling and not sole_and_fine:
             for cand in radio.get("cands", []):
                 if cand["age"] > FRESH_S or cand["bssid"] == (radio.get("slot") or {}).get("bssid"):
+                    continue
+                if cand["signal"] < MIN_JOIN_DBM:
                     continue
                 if cand["signal"] < STRONG_DBM and anyone_up:
                     continue  # weak slots are only joined when nothing is up at all
