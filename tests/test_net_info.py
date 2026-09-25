@@ -60,6 +60,11 @@ def test_multipath_live_active():
     assert parse_multipath_live(RULES_ACTIVE, TABLE100) == {"active": True, "members": ["wifi1", "wifi2"]}
 
 
+def test_single_nexthop_failover_route_is_not_multipath():
+    single = [{"dst": "default", "protocol": "wifimimo", "gateway": "172.20.176.1", "dev": "wifi1"}]
+    assert parse_multipath_live(RULES_ACTIVE, single) == {"active": False, "members": ["wifi1"]}
+
+
 def test_multipath_live_route_without_rules_is_inactive():
     assert parse_multipath_live(RULES_ACTIVE[:2], TABLE100)["active"] is False
 

@@ -397,9 +397,13 @@ def plan_apply(members: list[dict], rules, routes_all, sysctl_now: dict[str, str
         if sysctl_now.get(key) != value:
             plan.append(("sysctl", key, value))
 
-    # 4. the one change that moves new flows: atomic ECMP swap (or, with
-    #    fewer than two healthy radios, removal; NM's defaults take over)
-    if len(ecmp) >= 2:
+    # 4. the one change that moves new flows: atomic swap of the table-100
+    #    default. Two or more healthy radios: multipath. Exactly one: a
+    #    single-nexthop route, i.e. failover: all new flows go to the one
+    #    radio that works, instead of NM's lowest-metric default, which may
+    #    point at a radio that's associated but broken (seen on the walk).
+    #    None: removal, so NM's defaults take over.
+    if len(ecmp) >= 1:
         swap = ["ip", "-4", "route", "replace", "default", "table", str(shared.ECMP_TABLE),
                 "proto", str(shared.RT_PROTO)]
         for m in ecmp:
@@ -551,7 +555,10 @@ def multipath_apply(ctx: Ctx, desired: bool) -> dict:
             return plan_teardown(rules, routes_all), [], excluded, "needs ≥2 connected radios"
         sysctl_now = read_sysctls(ctx, desired_sysctls(routable).keys())
         plan = plan_apply(routable, rules, routes_all, sysctl_now, ecmp=healthy)
-        if len(healthy) < 2:
+        if len(healthy) == 1:
+            return (plan, [], excluded,
+                    f"failover: only {healthy[0]['iface']} is healthy, all new connections use it")
+        if not healthy:
             return plan, [], excluded, "waiting for radios to reach full connectivity"
         return plan, [m["iface"] for m in healthy], excluded, ""
 

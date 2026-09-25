@@ -50,6 +50,18 @@ MIN_SIGNAL_PCT = 40          # nmcli SIGNAL is 0-100; ~40 is roughly -70 dBm
 JOIN_JUDGE_S = 180.0
 LIMITED_GRACE_S = 60.0       # joined but not fully connected for this long = bad AP
 BAD_AP_TTL_S = 1800.0        # how long a bad AP is avoided for that radio
+# Pinned radios can't roam on their own (the BSSID lock is in their applied
+# connection), so the follower roams for them: a radio fading below FADE_DBM
+# is re-pinned to a free-frequency AP at least FADE_MARGIN_PCT stronger
+# (nmcli signal %, ~2 %/dB), one radio at a time while the others are up.
+FADE_DBM = -72
+FADE_MARGIN_PCT = 16
+FADE_HOLD_S = 30.0           # no second fade move for a radio within this window
+
+
+def dbm_to_pct(dbm: int) -> int:
+    """NetworkManager's signal % for a dBm reading (clamped linear, 2 %/dB)."""
+    return max(0, min(100, 2 * (int(dbm) + 100)))
 REASON_USER_REQUESTED = 39
 STATE_DISCONNECTED = 30
 STATE_ACTIVATED = 100
@@ -129,14 +141,24 @@ CONNECTIVITY_FULL = 4
 # connectivity check passes (which fires no dispatcher event of its own).
 HEALABLE_REASONS = frozenset({"no connectivity", "limited connectivity", "captive portal",
                               "gateway unreachable"})
-HEAL_INTERVAL_S = 30.0
+HEAL_INTERVAL_S = 10.0
+DEGRADED_CONNECTIVITY = (1, 2, 3)   # none / portal / limited
 
 
-def heal_candidates(excluded: list[dict], devices: list[dict]) -> list[str]:
-    """Radios the helper left out that NM now rates fully connected."""
+def heal_candidates(excluded: list[dict], devices: list[dict],
+                    members: list[str] | None = None) -> list[str]:
+    """Radios whose health changed without a dispatcher event.
+
+    Either left out by the helper but now rated fully connected by NM, or
+    carrying multipath traffic but no longer fully connected (walking away
+    from an AP: associated, but its share of new connections blackholes).
+    """
     waiting = {e.get("iface") for e in excluded or [] if e.get("reason") in HEALABLE_REASONS}
-    return sorted(d["device"] for d in devices
-                  if d.get("device") in waiting and d.get("connectivity") == CONNECTIVITY_FULL)
+    serving = set(members or [])
+    return sorted(
+        d["device"] for d in devices
+        if (d.get("device") in waiting and d.get("connectivity") == CONNECTIVITY_FULL)
+        or (d.get("device") in serving and d.get("connectivity") in DEGRADED_CONNECTIVITY))
 
 
 SCAN_FIELDS = "SSID,BSSID,CHAN,FREQ,SIGNAL,SECURITY"
@@ -309,7 +331,8 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
     memory   : persisted {"last": {dev: uuid}, "leader": {...}, "moves": {dev: {...}},
                           "modified": {uuid: original multi-connect}}
     lookup   : object with .profile(uuid) -> dict, .scan(dev) -> list,
-               .global_cloned() -> str, .freq(dev) -> MHz (0 if unknown)
+               .global_cloned() -> str, .freq(dev) -> MHz (0 if unknown),
+               .signal(dev) -> dBm (0 if unknown), .bssid(dev) -> str
     Returns (actions, new_memory, status). Actions:
       ("multi", uuid, value) | ("up", uuid, dev, bssid) | ("down", uuid, dev)
     """
@@ -374,9 +397,12 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
     rebalance = first_poll or topology_changed or fresh_leader
     memory["devices"] = devices_now
 
-    # The leader's radio vanished (yanked / switched off): the best-band
-    # radio still on that network takes over, so the choice survives.
-    if leader and leader.get("device") not in by_dev:
+    # The leader's radio vanished (yanked / switched off) or lost its link
+    # (walked out of range; the user didn't disconnect it, that returned
+    # above): the best-band radio still on that network takes over, so the
+    # choice survives and the dropped radio rejoins as a follower below.
+    lead_dev = by_dev.get(leader.get("device", "")) if leader else None
+    if leader and (lead_dev is None or lead_dev.get("uuid") != leader["uuid"]):
         heirs = [d for d in wifi if d.get("uuid") == leader["uuid"]]
         if heirs:
             heir = max(heirs, key=lambda d: (band_rank(lookup.freq(d["device"])), d["device"]))
@@ -478,12 +504,37 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
             used.add(cur)
     used.discard(0)
 
+    # 5b. Roam for pinned radios: one fading radio per poll (below FADE_DBM,
+    #     with a clearly stronger AP free) is re-pinned while the others keep
+    #     traffic flowing. Skipped while any radio on the network is still
+    #     connecting or another move is already planned this poll.
+    settling = any(40 <= d.get("state", 0) < STATE_ACTIVATED
+                   for d in wifi if d.get("uuid") == leader["uuid"])
+    if not user_pinned and not settling and not any(a[0] == "up" for a in actions):
+        on_p = [d for d in wifi if d.get("uuid") == leader["uuid"] and d.get("state") == STATE_ACTIVATED]
+        fading = sorted(
+            (d for d in on_p if (lookup.signal(d["device"]) or 0) < 0
+             and lookup.signal(d["device"]) < FADE_DBM
+             and now - moves.get(d["device"], {}).get("at", -1e18) > FADE_HOLD_S),
+            key=lambda d: lookup.signal(d["device"]))
+        for dev in fading:
+            name = dev["device"]
+            others = {lookup.freq(d["device"]) for d in on_p if d["device"] != name} - {0}
+            current = lookup.bssid(name)
+            pick = pick_bssid(lookup.scan(name), ssid, others, avoid(name) | ({current} - {""}))
+            if pick and pick["signal"] >= dbm_to_pct(lookup.signal(name)) + FADE_MARGIN_PCT:
+                join(name, pick["bssid"], leader["uuid"])
+                status["moved"].append(name)
+                status.setdefault("fading", []).append(name)
+                break
+
     # 5. Radios not on the network: idle ones join; ones on another network
     #    only when the user just chose this one, or the radio just appeared
-    #    (NM may have auto-connected a freshly added card elsewhere).
+    #    (NM may have auto-connected a freshly added card elsewhere). This
+    #    includes the leader's own radio when every radio dropped at once.
     for dev in wifi:
         name = dev["device"]
-        if name == leader["device"] or dev.get("uuid") == leader["uuid"]:
+        if dev.get("uuid") == leader["uuid"]:
             continue
         if 40 <= dev.get("state", 0) < STATE_ACTIVATED:
             status["skipped"][name] = "connecting"
@@ -527,11 +578,21 @@ def run_nmcli(args: list[str], timeout: float = 5) -> tuple[int, str]:
 
 
 class _Lookup:
-    def __init__(self, freq_of) -> None:
+    def __init__(self, states: dict) -> None:
         self._profiles: dict[str, dict] = {}
         self._scans: dict[str, list] = {}
         self._global: str | None = None
-        self._freq_of = freq_of
+        self._states = states
+
+    def _state(self, dev: str, key: str, default):
+        value = self._states.get(dev, {}).get(key, default)
+        return default if value is None else value
+
+    def signal(self, dev: str) -> int:
+        return int(self._state(dev, "signal_dbm", 0) or 0)
+
+    def bssid(self, dev: str) -> str:
+        return str(self._state(dev, "bssid", "")).lower()
 
     def profile(self, uuid: str) -> dict:
         if uuid not in self._profiles:
@@ -552,7 +613,7 @@ class _Lookup:
         return self._global
 
     def freq(self, dev: str) -> int:
-        return self._freq_of(dev)
+        return int(self._state(dev, "freq_mhz", 0) or 0)
 
 
 def activate_pinned(uuid: str, dev: str, bssid: str, nmcli=None) -> int:
@@ -632,7 +693,9 @@ class Follower:
             status = json.loads(shared.MULTIPATH_STATUS.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return []
-        ready = heal_candidates(status.get("excluded", []) if isinstance(status, dict) else [], devices)
+        if not isinstance(status, dict):
+            return []
+        ready = heal_candidates(status.get("excluded", []), devices, status.get("members", []))
         if ready:
             self.last_heal = now
             try:
@@ -692,12 +755,9 @@ class Follower:
         if rc != 0:
             return {"error": "nmcli unavailable"}
 
-        def freq_of(dev: str) -> int:
-            return int(states.get(dev, {}).get("freq_mhz", 0) or 0)
-
         devices = parse_dev_show(out)
         actions, memory, status = plan_follow(devices, self.memory, now,
-                                              _Lookup(freq_of), primary_wifi_device(states))
+                                              _Lookup(states), primary_wifi_device(states))
         status["healed"] = self.heal(devices, now)
         errors = [err for err in (self._run(a) for a in actions) if err]
         if memory != self.memory:

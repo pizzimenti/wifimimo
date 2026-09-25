@@ -155,13 +155,24 @@ def test_unhealthy_radio_gets_routing_but_no_nexthop():
     assert "dev wifi0" not in swap and "dev wifi1" in swap and "dev wifi2" in swap
 
 
-def test_fewer_than_two_healthy_removes_ecmp_but_keeps_radio_routing():
+def test_one_healthy_radio_gets_all_new_flows():
+    # failover: a single-nexthop route beats NM's default, which may point
+    # at an associated-but-broken radio
     rules, routes = _as_live(MEMBERS)
-    plan = helper.plan_apply(MEMBERS, rules, routes, GOOD_SYSCTLS, ecmp=MEMBERS[:1])
+    plan = helper.plan_apply(MEMBERS, rules, routes, GOOD_SYSCTLS, ecmp=MEMBERS[1:])
+    cmds = argvs(plan)
+    assert ("ip -4 route replace default table 100 proto 211 "
+            "nexthop via 172.20.176.1 dev wifi1 weight 1") in cmds
+    assert not [c for c in cmds if " rule del " in c]      # radio rules stay
+
+
+def test_no_healthy_radio_removes_the_route_but_keeps_radio_routing():
+    rules, routes = _as_live(MEMBERS)
+    plan = helper.plan_apply(MEMBERS, rules, routes, GOOD_SYSCTLS, ecmp=[])
     cmds = argvs(plan)
     assert "ip -4 route del default table 100" in cmds
     assert not [c for c in cmds if "replace default table 100" in c]
-    assert not [c for c in cmds if " rule del " in c]      # radio rules stay
+    assert not [c for c in cmds if " rule del " in c]
 
 
 def test_foreign_table_100_route_is_refused():

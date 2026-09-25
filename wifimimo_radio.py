@@ -514,7 +514,8 @@ def parse_multipath_live(rules, table_routes) -> dict:
         for r in (rules if isinstance(rules, list) else [])
     }
     members = shared.ecmp_members(table_routes)
-    active = bool(members) and shared.PRIO_ECMP in rule_prios and shared.PRIO_SUPPRESS_MAIN in rule_prios
+    # One member is the helper's failover route, not multipath.
+    active = len(members) >= 2 and shared.PRIO_ECMP in rule_prios and shared.PRIO_SUPPRESS_MAIN in rule_prios
     return {"active": active, "members": members}
 
 

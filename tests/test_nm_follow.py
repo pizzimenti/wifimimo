@@ -9,11 +9,19 @@ Q = "22222222-2222-2222-2222-222222222222"   # another network
 
 
 class FakeLookup:
-    def __init__(self, profiles=None, scans=None, freqs=None, cloned=""):
+    def __init__(self, profiles=None, scans=None, freqs=None, cloned="", signals=None, bssids=None):
         self.profiles = profiles or {}
         self.scans = scans or {}
         self.freqs = freqs or {}
         self.cloned = cloned
+        self.signals = signals or {}
+        self.bssids = bssids or {}
+
+    def signal(self, dev):
+        return self.signals.get(dev, 0)
+
+    def bssid(self, dev):
+        return self.bssids.get(dev, "")
 
     def profile(self, uuid):
         return self.profiles.get(uuid, {})
@@ -352,6 +360,77 @@ def test_bad_ap_marks_expire():
     assert "wifi2" not in memory["bad"]
 
 
+# --- walking: lost links and fading APs (found on the 2026-09-24 walk) -------
+
+
+def test_leader_losing_its_link_hands_over_and_rejoins():
+    # the A9000 (leader) walked out of range: NM failed it (ssid-not-found);
+    # nobody reconnected it because the follower skipped the leader's radio
+    devices = [dev("wifi1", "", state=30, reason=53), dev("wifi2", P), dev("wifi0", P)]
+    mem = baseline([dev("wifi1", P), dev("wifi2", P), dev("wifi0", P)])
+    mem.update(devices=["wifi0", "wifi1", "wifi2"], leader={"uuid": P, "device": "wifi1", "at": 0})
+    look = spread_lookup({"wifi2": SIX_B, "wifi0": FIVE})
+    actions, memory, _ = nm.plan_follow(devices, mem, 60.0, look)
+    assert memory["leader"]["device"] == "wifi2"          # best band still on the network
+    assert ups(actions) == {"wifi1": "aa:00:00:00:00:61"}  # dropped radio rejoins, free 6 GHz A
+
+
+def test_all_radios_dropped_leader_radio_still_rejoins():
+    devices = [dev("wifi1", "", state=30, reason=53), dev("wifi2", "", state=30, reason=53)]
+    mem = baseline([dev("wifi1", P), dev("wifi2", P)])
+    mem.update(devices=["wifi1", "wifi2"], leader={"uuid": P, "device": "wifi1", "at": 0})
+    actions, memory, _ = nm.plan_follow(devices, mem, 60.0, spread_lookup({}))
+    assert memory["leader"] == {"uuid": P, "device": "wifi1", "at": 0}
+    assert set(ups(actions)) == {"wifi1", "wifi2"}
+    assert len(set(ups(actions).values())) == 2             # still spread
+
+
+def test_user_disconnect_of_leader_still_takes_everyone_down():
+    devices = [dev("wifi1", "", state=30, reason=nm.REASON_USER_REQUESTED), dev("wifi2", P)]
+    mem = baseline([dev("wifi1", P), dev("wifi2", P)])
+    mem.update(devices=["wifi1", "wifi2"], leader={"uuid": P, "device": "wifi1", "at": 0})
+    actions, _, _ = nm.plan_follow(devices, mem, 60.0, spread_lookup({}))
+    assert actions == [("down", P, "wifi2")]
+
+
+def _fade_setup(signals, bssids=None, states=None):
+    states = states or {}
+    devices = [dict(dev("wifi1", P), state=states.get("wifi1", 100)),
+               dict(dev("wifi2", P), state=states.get("wifi2", 100))]
+    mem = baseline(devices)
+    mem.update(devices=["wifi1", "wifi2"], leader={"uuid": P, "device": "wifi1", "at": 0})
+    look = spread_lookup({"wifi1": SIX_A, "wifi2": SIX_B}, signals=signals,
+                         bssids=bssids or {"wifi2": "aa:00:00:00:00:62"})
+    return devices, mem, look
+
+
+def test_fading_radio_is_repinned_to_a_clearly_stronger_free_ap():
+    # wifi2 at -80 dBm (40 %) on 6 GHz B; 5 GHz AP is 60 % on a free freq
+    devices, mem, look = _fade_setup({"wifi1": -55, "wifi2": -80})
+    actions, _, status = nm.plan_follow(devices, mem, 100.0, look)
+    assert ups(actions) == {"wifi2": "aa:00:00:00:00:51"}
+    assert status["fading"] == ["wifi2"]
+
+
+def test_fading_needs_a_real_margin():
+    devices, mem, look = _fade_setup({"wifi1": -55, "wifi2": -73})   # 54 % vs 60 %: not enough
+    actions, _, _ = nm.plan_follow(devices, mem, 100.0, look)
+    assert actions == []
+
+
+def test_no_fade_move_while_another_radio_is_connecting():
+    devices, mem, look = _fade_setup({"wifi1": -55, "wifi2": -80}, states={"wifi1": 70})
+    actions, _, _ = nm.plan_follow(devices, mem, 100.0, look)
+    assert actions == []
+
+
+def test_fade_move_holds_off_after_a_recent_move():
+    devices, mem, look = _fade_setup({"wifi1": -55, "wifi2": -80})
+    mem["moves"] = {"wifi2": {"target": P, "previous": P, "at": 90.0, "bssid": ""}}
+    actions, _, _ = nm.plan_follow(devices, mem, 100.0, look)
+    assert actions == []
+
+
 def test_activate_pinned_sets_then_clears_bssid_around_activation():
     calls = []
 
@@ -432,6 +511,12 @@ def test_heal_candidates_only_waiting_radios_now_fully_connected():
     assert nm.heal_candidates(excluded, devices) == ["wifi2"]
 
 
+def test_degraded_member_triggers_reapply():
+    # walking away: still associated, but NM rates it limited
+    devices = [{"device": "wifi1", "connectivity": 3}, {"device": "wifi2", "connectivity": 4}]
+    assert nm.heal_candidates([], devices, members=["wifi1", "wifi2"]) == ["wifi1"]
+
+
 def test_follower_heal_is_rate_limited(tmp_path, monkeypatch):
     status = tmp_path / "multipath.json"
     status.write_text(json.dumps({"excluded": [{"iface": "wifi2", "reason": "no connectivity"}]}))
@@ -449,8 +534,8 @@ def test_follower_heal_is_rate_limited(tmp_path, monkeypatch):
     follower = nm.Follower(tmp_path / "follow.json")
     devices = [{"device": "wifi2", "connectivity": 4}]
     assert follower.heal(devices, 100.0) == ["wifi2"]
-    assert follower.heal(devices, 110.0) == []            # within 30 s
-    assert follower.heal(devices, 131.0) == ["wifi2"]
+    assert follower.heal(devices, 105.0) == []            # within the interval
+    assert follower.heal(devices, 100.0 + nm.HEAL_INTERVAL_S + 1) == ["wifi2"]
     assert launched[0] == ["pkexec", "/usr/local/lib/wifimimo/wifimimo-helper", "multipath", "apply"]
     assert len(launched) == 2
 
