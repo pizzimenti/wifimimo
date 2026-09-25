@@ -110,7 +110,8 @@ def led(devices, leader_dev="wifi1", uuid=P):
 
 
 def ups(actions):
-    return {a[2]: a[3] for a in actions if a[0] == "up"}
+    """Joins and moves: {dev: bssid}."""
+    return {a[2]: a[3] for a in actions if a[0] in ("up", "move")}
 
 
 def kinds(actions, kind):
@@ -136,7 +137,8 @@ def test_user_activation_becomes_leader_and_brings_radios_over_one_at_a_time():
     actions, memory, _ = plan(after, baseline(before), 200.0)
     assert memory["leader"]["device"] == "wifi1" and memory["leader"]["uuid"] == P
     assert ups(actions) == {"wifi0": A2}                       # strongest free slot first
-    assert memory["moves"]["wifi0"] == {"target": P, "previous": Q, "at": 200.0, "bssid": A2}
+    assert memory["moves"]["wifi0"] == {"target": P, "previous": Q, "at": 200.0, "bssid": A2,
+                                        "signal": roam.pct_to_dbm(80)}
     assert not kinds(actions, "park")                        # never park another network's radio
 
 
@@ -281,7 +283,79 @@ def test_declining_radio_moves_early_to_a_fresh_strong_slot():
         ctx.trend.add("wifi1", 92.0 + i, -45, A1)
     actions, _, status = plan(devices, led(devices), 100.0, look, ctx=ctx)
     assert ups(actions) == {"wifi2": A2}                      # A2 -64 dBm, a free channel
+    assert kinds(actions, "move") == [P]                      # drop, then join
     assert status["wants_fast"] is True
+
+
+def test_the_only_working_radio_is_not_moved_for_an_upgrade():
+    devices = [dev("wifi1", P), dev("wifi0")]
+    mem = led(devices)
+    mem["parked"] = {"wifi0": 1.0}
+    scans = {"wifi1": [ap(A1, 2412), ap(A2, 5745, signal=95)], "wifi0": []}
+    look = lookup(freqs={"wifi1": 2412}, bssids={"wifi1": A1}, signals={"wifi1": -60}, scans=scans)
+    actions, _, _ = plan(devices, mem, 100.0, look, scans=scans)
+    assert not ups(actions)
+
+
+def test_a_switch_in_flight_is_busy_so_nothing_overlaps_it():
+    # live 13:55:15-16: wifi0 was mid-switch (reads disconnected), and the
+    # next poll both joined wifi2 and parked wifi0, cancelling its switch
+    devices = [dev("wifi1", P), dev("wifi0"), dev("wifi2")]
+    mem = led(devices)
+    mem["moves"] = {"wifi0": {"target": P, "previous": P, "at": 99.0, "bssid": A2, "signal": -50}}
+    mem["parked"] = {"wifi2": 1.0}
+    scans = {**SCANS, "wifi2": [ap(A1, 5180), ap(A2, 5745), ap(A3, 2412)]}
+    actions, memory, status = plan(devices, mem, 100.0, lookup(scans=scans), scans=scans)
+    assert not ups(actions) and "wifi0" not in kinds(actions, "park")
+    assert "land" in status["plan"]
+    # after the switch window it is judged and the planner moves on
+    actions, memory, _ = plan(devices, memory, 99.0 + nm.SWITCH_TIMEOUT_S + 1, lookup(scans=scans),
+                              scans=scans)
+    assert A2 in memory["bad"]["wifi0"]
+
+
+def test_a_strong_ap_that_fails_a_join_is_avoided_by_every_radio():
+    devices = [dev("wifi1", P), dev("wifi2"), dev("wifi0")]
+    mem = _pinned_mem(devices, "wifi2", A2, at=90.0)
+    mem["moves"]["wifi2"]["signal"] = -43
+    scans = {"wifi2": [ap(A1, 5180), ap(A2, 5745)], "wifi0": [ap(A1, 5180), ap(A2, 5745)]}
+    actions, memory, _ = plan(devices, mem, 100.0, lookup(scans=scans), scans=scans)
+    assert A2 in memory["bad_all"]
+    assert A2 not in ups(actions).values()                     # wifi0 won't try it either
+    # a weak join failing is the radio's problem, not the AP's
+    mem = _pinned_mem(devices, "wifi2", A2, at=90.0)
+    mem["moves"]["wifi2"]["signal"] = -78
+    _, memory, _ = plan(devices, mem, 100.0, lookup(scans=scans), scans=scans)
+    assert A2 not in memory.get("bad_all", {})
+
+
+def test_join_is_not_judged_before_it_could_start():
+    devices = [dev("wifi1", P), dev("wifi2")]
+    mem = _pinned_mem(devices, "wifi2", A2, at=99.0)
+    _, memory, _ = plan(devices, mem, 100.0)
+    assert "wifi2" not in memory.get("bad", {})
+
+
+def test_a_radio_that_lost_its_ap_avoids_it_for_a_minute():
+    mem = led([dev("wifi1", P), dev("wifi2", P)])
+    mem["held"] = {"wifi2": A2}
+    devices = [dev("wifi1", P), dev("wifi2", "", state=30, reason=65)]
+    _, memory, _ = plan(devices, mem, 100.0)
+    assert memory["bad"]["wifi2"][A2] == 100.0 + nm.LOST_AP_S
+
+
+def test_radar_channels_wait_for_the_country_rules():
+    devices = [dev("wifi1", P), dev("wifi0")]
+    scans = {"wifi0": [ap(A1, 5180), ap(A3, 5500)]}
+    ctx = ctx_for(scans, now=100.0)
+    ctx.set_region("00", 100.0)
+    actions, _, _ = plan(devices, led(devices), 100.0, lookup(scans=scans), ctx=ctx)
+    assert not ups(actions)                                    # 5500 is radar, A1 taken
+    ctx.set_region("US", 101.0)
+    actions, _, status = plan(devices, led(devices), 102.0, lookup(scans=scans), ctx=ctx)
+    assert not ups(actions) and "regulatory" in status["plan"]   # still settling
+    actions, _, _ = plan(devices, led(devices), 104.0, lookup(scans=scans), ctx=ctx)
+    assert ups(actions) == {"wifi0": A3}
 
 
 def test_steady_radio_stays_put():

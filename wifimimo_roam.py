@@ -94,6 +94,26 @@ def spans_overlap(a: tuple[int, int], b: tuple[int, int]) -> bool:
     return a[0] < b[1] and b[0] < a[1]
 
 
+def is_radar(freq: int) -> bool:
+    """5 GHz channels 52-144 (U-NII-2A / 2C): DFS, radar detection rules."""
+    return 5250 <= freq <= 5730
+
+
+def parse_reg_country(text: str) -> str:
+    """The global country from `iw reg get` ("global" block first)."""
+    in_global = False
+    for line in text.splitlines():
+        if line.strip() == "global":
+            in_global = True
+            continue
+        m = re.match(r"country (\w\w):", line)
+        if m and in_global:
+            return m.group(1)
+        if line.startswith("phy#"):
+            in_global = False
+    return ""
+
+
 def band_of(freq: int) -> str:
     if freq >= 5925:
         return "6"
@@ -550,7 +570,12 @@ def plan_slots(radios: list[dict]) -> tuple[tuple | None, str]:
         options: list[tuple] = []
         if opt[0] == "stay" and (dead or radio["slot"].get("bssid") in stacked):
             options.append(("scan",))
-        if not settling:
+        # The only working link is never dropped for an upgrade: a move is a
+        # few seconds offline. It still moves once it's in trouble.
+        others_up = any(o[0] == "stay" and _grade(o, by_dev[d]) in ("strong", "usable")
+                        for d, o in current.items() if d != dev)
+        sole_and_fine = opt[0] == "stay" and not others_up and _grade(opt, radio) == "strong"
+        if not settling and not sole_and_fine:
             for cand in radio.get("cands", []):
                 if cand["age"] > FRESH_S or cand["bssid"] == (radio.get("slot") or {}).get("bssid"):
                     continue

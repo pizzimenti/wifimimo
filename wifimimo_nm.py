@@ -58,7 +58,12 @@ BAD_AP_TTL_S = 1800.0        # how long a bad AP is avoided for that radio
 # Live 2026-09-25: a replugged A9000 was autoconnected 3 s after it came
 # back, on a duplicate profile, and was taken for a new user choice.
 NEW_RADIO_GRACE_S = 60.0
+JOIN_START_S = 5.0           # a join isn't judged "didn't start" before this
+SWITCH_TIMEOUT_S = 30.0      # a switch in flight counts as busy up to this long
+SHARED_BAD_S = 300.0         # a strong AP that failed a join: avoided by every radio
+LOST_AP_S = 60.0             # the AP a radio just lost: avoided by that radio
 FAST_AFTER_MOVE_S = 30.0     # keep 1 s polling this long after any change
+REGION_SETTLE_S = 2.0        # no joins this soon after the regulatory domain changed
 REASON_USER_REQUESTED = 39
 STATE_DISCONNECTED = 30
 STATE_ACTIVATED = 100
@@ -289,6 +294,23 @@ class RoamContext:
         self.offsets = roam.Offsets()
         self.dumps: dict[str, list[dict]] = {}
         self.last_scan: dict[str, float] = {}
+        self.region = ""               # `iw reg get` global country, "" unknown
+        self.region_changed_at = -1e18
+
+    @property
+    def region_ok(self) -> bool:
+        """Not on the "00" world default (unknown counts as fine: nothing to
+        go on, and the kernel still enforces its own rules)."""
+        return self.region != "00"
+
+    def region_settling(self, now: float) -> bool:
+        return now - self.region_changed_at < REGION_SETTLE_S
+
+    def set_region(self, region: str, now: float) -> None:
+        if region != self.region:
+            if self.region:
+                self.region_changed_at = now
+            self.region = region
 
 
 def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
@@ -438,16 +460,21 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
     user_pinned = bool(profile.get("bssid"))
     need_multi = profile.get("multi_connect", "") not in MULTI_OK
 
-    def join(name: str, bssid: str, previous: str) -> None:
+    def join(name: str, bssid: str, previous: str, signal: float = -100.0,
+             kind: str = "up") -> None:
+        """kind "up" joins an idle radio; "move" drops the radio's current
+        link first (switching in place failed "no secrets" 2 of 2 times live,
+        joins from disconnected 0 of 8)."""
         nonlocal need_multi
         if need_multi:
             memory["modified"].setdefault(leader["uuid"], profile.get("multi_connect", "") or "default")
             actions.append(("multi", leader["uuid"], "manual-multiple"))
             need_multi = False
-        actions.append(("up", leader["uuid"], name, bssid))
+        actions.append((kind, leader["uuid"], name, bssid))
         if parked.pop(name, None) is not None:
             actions.append(("unpark", name))
-        moves[name] = {"target": leader["uuid"], "previous": previous, "at": now, "bssid": bssid}
+        moves[name] = {"target": leader["uuid"], "previous": previous, "at": now, "bssid": bssid,
+                       "signal": round(float(signal), 1)}
 
     def park(name: str) -> None:
         # disconnect + block autoconnect: NM mustn't put it back on another
@@ -462,35 +489,57 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
     #     radio for BAD_AP_TTL_S; the radio is re-pinned elsewhere below.
     #     (Live 2026-09-24: one AP never gave the A8000 a DHCP lease, and
     #     without this the follower re-picked it forever.)
+    #     A join to a strong AP that fails is the AP's doing (live 2026-09-25:
+    #     the far AP's 5 GHz side timed out the handshake for both sticks at
+    #     -43 dBm), so it is avoided by every radio for SHARED_BAD_S, not just
+    #     the one that tried. A radio that loses the AP it was on avoids that
+    #     AP for LOST_AP_S (it was sent straight back to it, and failed).
     bad: dict = memory.setdefault("bad", {})
+    shared_bad: dict = memory.setdefault("bad_all", {})
     for name in list(bad):
         bad[name] = {b: until for b, until in bad[name].items() if until > now}
         if not bad[name]:
             del bad[name]
+    for b in [b for b, until in shared_bad.items() if until <= now]:
+        del shared_bad[b]
     broken: set[str] = set()
     for name, mv in moves.items():
         bssid, dev = mv.get("bssid"), by_dev.get(name)
         if not bssid or dev is None or now - mv.get("at", 0) > JOIN_JUDGE_S:
             continue
         on_target = dev.get("uuid") == mv.get("target")
-        failed = (not on_target and dev.get("state") == STATE_DISCONNECTED) or (
+        # the first seconds after `up` can still read disconnected
+        failed = (not on_target and dev.get("state") == STATE_DISCONNECTED
+                  and now - mv.get("at", 0) >= JOIN_START_S) or (
             on_target and dev.get("state") == STATE_ACTIVATED
             and dev.get("connectivity") in (1, 2, 3)
             and now - mv.get("at", 0) > LIMITED_GRACE_S)
         if failed:
             bad.setdefault(name, {})[bssid] = now + BAD_AP_TTL_S
+            if mv.get("signal", -100) >= roam.STRONG_DBM:
+                shared_bad[bssid] = now + SHARED_BAD_S
             mv["bssid"] = ""
+            mv["settled"] = True
             if on_target:
                 broken.add(name)
+    held: dict = memory.setdefault("held", {})
+    for name, bssid in list(held.items()):
+        dev = by_dev.get(name)
+        lost = dev is not None and dev.get("state") == STATE_DISCONNECTED and name not in parked
+        in_flight = now - moves.get(name, {}).get("at", -1e18) < SWITCH_TIMEOUT_S
+        if lost and not in_flight:
+            bad.setdefault(name, {})[bssid] = max(bad.get(name, {}).get(bssid, 0), now + LOST_AP_S)
+        if dev is None or dev.get("state") != STATE_ACTIVATED:
+            del held[name]
     for name, entries in bad.items():
         if name in by_dev:
             status["iface_flags"].setdefault(name, []).append(_flag(
                 "avoiding_ap", "info", "Avoiding an access point",
                 "Recently failed to give this radio a working connection: "
-                + ", ".join(sorted(entries)) + ". Retried after 30 min."))
+                + ", ".join(sorted(entries)) + "."))
 
     def avoid(name: str) -> set[str]:
-        return set(bad.get(name, {}))
+        return set(bad.get(name, {})) | set(shared_bad)
 
     status["followers"] = [d["device"] for d in wifi
                            if d["device"] != leader["device"] and on_network(d)]
@@ -507,10 +556,23 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
     for d in wifi:
         name, state = d["device"], d.get("state", 0)
         move = moves.get(name, {})
-        view = {"dev": name, "slot": None, "locked": False,
-                "cands": roam.candidates(name, ssid, lookup.scan(name), ctx.dumps,
-                                         ctx.offsets, avoid(name))}
-        if on_network(d) and state == STATE_ACTIVATED:
+        cands = roam.candidates(name, ssid, lookup.scan(name), ctx.dumps, ctx.offsets, avoid(name))
+        if not ctx.region_ok:
+            # radar channels need the country's rules in force to be joined
+            cands = [c for c in cands if not roam.is_radar(c["freq"])]
+        view = {"dev": name, "slot": None, "locked": False, "cands": cands}
+        landed = on_network(d) and state == STATE_ACTIVATED
+        if landed and move.get("target") == leader["uuid"]:
+            move["settled"] = True
+        # A switch in flight is busy until it lands or is judged failed: in
+        # between, the radio reads deactivating / disconnected, and treating
+        # it as free let two switches overlap (live: 66 s with no link).
+        in_flight = (bool(move.get("target")) and not move.get("settled")
+                     and now - move.get("at", -1e18) < SWITCH_TIMEOUT_S)
+        if in_flight or state > STATE_ACTIVATED:
+            target = next((c for c in cands if c["bssid"] == move.get("bssid")), None)
+            view.update(status="busy", locked=True, slot=target)
+        elif landed:
             bssid = lookup.bssid(name)
             own = next((r for r in ctx.dumps.get(name, []) if r["bssid"] == bssid), {})
             freq = lookup.freq(name)
@@ -540,13 +602,22 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
             continue
         views.append(view)
 
-    change, why = roam.plan_slots(views)
+    for view in views:
+        if view["status"] == "on":
+            held[view["dev"]] = view["slot"]["bssid"]
+
+    if ctx.region_settling(now):
+        change, why = None, "waiting for the regulatory domain to settle"
+    else:
+        change, why = roam.plan_slots(views)
     status["plan"] = why
     joining = ""
     if change and change[0] in ("join", "move"):
         _, name, bssid = change
         previous = by_dev[name].get("uuid", "") if change[0] == "join" else leader["uuid"]
-        join(name, bssid, previous)
+        view = next(v for v in views if v["dev"] == name)
+        signal = next((c["signal"] for c in view["cands"] if c["bssid"] == bssid), -100.0)
+        join(name, bssid, previous, signal, "move" if change[0] == "move" else "up")
         status["moved"].append(name)
         joining = name
     elif change and change[0] == "park":
@@ -664,9 +735,21 @@ def read_scan_dump(dev: str) -> list[dict]:
     return roam.parse_scan_dump(res.stdout) if res.returncode == 0 else []
 
 
-def feed_context(ctx: RoamContext, states: dict, now: float, dump=read_scan_dump) -> None:
+def read_region() -> str:
+    """Global regulatory country from `iw reg get` ("US", "00"; "" unknown)."""
+    try:
+        res = subprocess.run(["iw", "reg", "get"], capture_output=True, text=True,
+                             timeout=2, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return roam.parse_reg_country(res.stdout)
+
+
+def feed_context(ctx: RoamContext, states: dict, now: float, dump=read_scan_dump,
+                 region=read_region) -> None:
     """Per poll: each radio's live level into its trend, fresh scan tables,
-    and per-card offsets learned from them."""
+    per-card offsets learned from them, and the regulatory country."""
+    ctx.set_region(region(), now)
     slots = {}
     for dev, state in states.items():
         if state.get("connected"):
@@ -791,6 +874,12 @@ class Follower:
                             "connection.multi-connect", value])
         elif kind == "up":
             _, uuid, dev, bssid = action
+            rc = activate_pinned(uuid, dev, bssid)
+        elif kind == "move":
+            # Drop the current link and wait for it to go (-w 5), then join
+            # from disconnected: switching in place lost the secrets race.
+            _, uuid, dev, bssid = action
+            run_nmcli(["-w", "5", "device", "disconnect", dev], timeout=7)
             rc = activate_pinned(uuid, dev, bssid)
         elif kind == "down":
             # Deactivate this device's instance of the profile only; never

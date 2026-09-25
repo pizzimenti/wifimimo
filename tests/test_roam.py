@@ -362,3 +362,23 @@ def test_weak_radio_scans_itself_only_without_a_scout():
     assert roam.plan_scans([steady], {"wifi1": 50.0}, 100.0, mobile=True) == []
     falling = on("wifi1", dict(slot(*H52, -60), declining=True))
     assert roam.plan_scans([falling], {}, 100.0, mobile=True) == ["wifi1"]
+
+
+def test_parse_reg_country_reads_the_global_block():
+    text = ("global\ncountry US: DFS-FCC\n\t(2400 - 2472 @ 40), (N/A, 30), (N/A)\n\n"
+            "phy#35 (self-managed)\ncountry 00: DFS-UNSET\n")
+    assert roam.parse_reg_country(text) == "US"
+    assert roam.parse_reg_country("global\ncountry 00: DFS-UNSET\n") == "00"
+    assert roam.parse_reg_country("") == ""
+
+
+def test_radar_channels():
+    assert roam.is_radar(5260) and roam.is_radar(5500) and roam.is_radar(5720)
+    assert not roam.is_radar(5180) and not roam.is_radar(5745) and not roam.is_radar(6135)
+
+
+def test_only_working_radio_moves_only_when_in_trouble():
+    radios = [on("wifi1", slot("dd:01", 2412, -60, width=20), [cand(*F36, -40)]), free("wifi0")]
+    assert roam.plan_slots(radios)[0] is None
+    radios[0] = on("wifi1", slot("dd:01", 2412, -78, width=20, level=-68), [cand(*F36, -60)])
+    assert roam.plan_slots(radios)[0] == ("move", "wifi1", "bb:36")
