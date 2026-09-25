@@ -604,7 +604,7 @@ def test_follower_heal_is_rate_limited(tmp_path, monkeypatch):
     follower = nm.Follower(tmp_path / "follow.json")
     devices = [{"device": "wifi2", "connectivity": 4}]
     assert follower.heal(devices, 100.0) == ["wifi2"]
-    assert follower.heal(devices, 105.0) == []            # within the interval
+    assert follower.heal(devices, 100.0 + nm.HEAL_INTERVAL_S / 2) == []   # within the interval
     assert follower.heal(devices, 100.0 + nm.HEAL_INTERVAL_S + 1) == ["wifi2"]
     assert launched[0] == ["pkexec", "/usr/local/lib/wifimimo/wifimimo-helper", "multipath", "apply"]
     assert len(launched) == 2
@@ -666,3 +666,151 @@ def test_tidy_prefers_unbound_keeper_and_spares_plain_duplicates():
 def test_tidy_ignores_different_security():
     assert nm.plan_tidy([prof("a", "Net", "Net", key="sae"),
                          prof("b", "Net-x", "Net", mac="aa:bb:cc:dd:ee:ff", key="wpa-psk")]) == []
+
+
+# --- traffic check, fast give-up, per-card floors, proven APs, swaps --------
+
+
+class FakeClock:
+    def __init__(self, t=0.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def test_liveness_needs_replies_and_calls_a_silent_link_dead():
+    clock = FakeClock(100.0)
+    spawned = []
+    live = nm.Liveness(spawn=lambda dev, gw: spawned.append((dev, gw)), clock=clock)
+    states = {"wifi2": {"connected": True, "ipv4": "10.7.10.19", "gateway": "10.7.10.1"},
+              "wifi0": {"connected": False}}
+    live.update(states)
+    assert spawned == [("wifi2", "10.7.10.1")]
+    assert live.alive("wifi2", 101.0) is None           # no verdict yet
+    assert live.alive("wifi0", 101.0) is None           # not probed
+    live.last_reply["wifi2"] = 102.0
+    assert live.alive("wifi2", 103.0) is True
+    assert live.alive("wifi2", 102.0 + nm.DEAD_AFTER_S + 0.5) is False
+    # a probe that never got a single reply is dead too, after the same wait
+    live.update({"wifi1": {"connected": True, "ipv4": "x", "gateway": "g"}})
+    assert live.alive("wifi1", 100.0 + nm.DEAD_AFTER_S + 0.5) is False
+    assert "wifi2" not in live.started                  # dropped from states: stopped
+
+
+def test_liveness_restarts_when_the_gateway_changes():
+    spawned = []
+    live = nm.Liveness(spawn=lambda dev, gw: spawned.append(gw), clock=FakeClock())
+    live.update({"wifi1": {"connected": True, "ipv4": "a", "gateway": "10.7.10.1"}})
+    live.update({"wifi1": {"connected": True, "ipv4": "b", "gateway": "10.3.0.1"}})
+    assert spawned == ["10.7.10.1", "10.3.0.1"]
+
+
+def dead_ctx(scans, dead=(), alive=(), now=100.0):
+    ctx = ctx_for(scans, now=now)
+    ctx.alive = {**{d: False for d in dead}, **{d: True for d in alive}}
+    return ctx
+
+
+def test_a_held_radio_passing_no_traffic_is_taken_off_its_ap():
+    # live 14:32: the A8000 at -55 on the house 2.4 GHz passed nothing for minutes
+    devices = [dev("wifi1", P), dev("wifi2", P)]
+    scans = {"wifi2": [ap(A1, 5180), ap(A2, 5745), ap(A3, 2412)]}
+    look = lookup(scans=scans, freqs={"wifi1": 5180, "wifi2": 2412},
+                  bssids={"wifi1": A1, "wifi2": A3}, signals={"wifi1": -50, "wifi2": -55})
+    mem = led(devices)
+    mem["held"] = {"wifi2": A3}
+    actions, memory, _ = plan(devices, mem, 100.0, look, ctx=dead_ctx(scans, dead=["wifi2"],
+                                                                   alive=["wifi1"]))
+    assert ups(actions) == {"wifi2": A2}               # moved off the dead link
+    assert memory["bad"]["wifi2"][A3] == 100.0 + nm.LOST_AP_S
+
+
+def test_a_dead_radio_does_not_count_as_the_other_working_radio():
+    # wifi1 is fine but wifi2 is dead: wifi1 is the only working link and
+    # must not be moved for an upgrade
+    devices = [dev("wifi1", P), dev("wifi2", P)]
+    scans = {"wifi1": [ap(A1, 2412), ap(A2, 5745, signal=95)], "wifi2": []}
+    look = lookup(scans=scans, freqs={"wifi1": 2412, "wifi2": 5180},
+                  bssids={"wifi1": A1, "wifi2": A3}, signals={"wifi1": -60, "wifi2": -50})
+    actions, _, _ = plan(devices, led(devices), 100.0, look,
+                         ctx=dead_ctx(scans, dead=["wifi2"], alive=["wifi1"]))
+    assert "wifi1" not in ups(actions)
+
+
+def test_a_join_still_connecting_after_the_timeout_is_cancelled():
+    devices = [dev("wifi1", P), dict(dev("wifi2", P), state=70)]   # ip-config: no lease
+    mem = _pinned_mem(devices, "wifi2", A2, at=100.0)
+    mem["moves"]["wifi2"]["signal"] = -66
+    actions, memory, status = plan(devices, mem, 100.0 + nm.JOIN_TIMEOUT_S + 0.5)
+    assert kinds(actions, "park") == ["wifi2"]
+    assert memory["floor"]["wifi2"][A2][0] == -66 + nm.FLOOR_MARGIN_DB
+    (entry,) = [j for j in status["joins"] if j["outcome"] == "timed out"]
+    assert entry["dev"] == "wifi2"
+
+
+def test_the_learned_floor_keeps_that_card_off_that_ap_until_stronger():
+    devices = [dev("wifi1", P), dev("wifi0")]
+    mem = led(devices)
+    mem["floor"] = {"wifi0": {A2: [-60.0, 10_000.0]}}
+    scans = {"wifi0": [ap(A1, 5180), ap(A2, 5745, signal=65)]}          # A2 -61 dBm
+    actions, _, status = plan(devices, mem, 100.0, lookup(scans=scans), scans=scans)
+    assert not ups(actions) and status["floors"] == {"wifi0": {A2: -60.0}}
+    scans = {"wifi0": [ap(A1, 5180), ap(A2, 5745, signal=75)]}          # -55: clears it
+    actions, _, _ = plan(devices, mem, 100.0, lookup(scans=scans), scans=scans)
+    assert ups(actions) == {"wifi0": A2}
+    # other cards aren't affected
+    mem["floor"] = {"wifi2": {A2: [-40.0, 10_000.0]}}
+    actions, _, _ = plan(devices, mem, 100.0, lookup(scans=scans), scans=scans)
+    assert ups(actions) == {"wifi0": A2}
+
+
+def test_a_working_radio_only_moves_to_a_proven_ap():
+    # live 14:34:41: the A9000 left a working house 5 GHz (-64) for an AP
+    # that had just refused two radios, and lost 56 s
+    devices = [dev("wifi1", P), dev("wifi2", P)]
+    scans = {"wifi1": [ap(A1, 2412), ap(A2, 5745, signal=95)], "wifi2": []}
+    look = lookup(scans=scans, freqs={"wifi1": 2412, "wifi2": 5180},
+                  bssids={"wifi1": A1, "wifi2": A3}, signals={"wifi1": -68, "wifi2": -50})
+    ctx = dead_ctx(scans, alive=["wifi1", "wifi2"])
+    mem = led(devices)
+    mem["proven"] = {A1: 90.0, A3: 90.0}
+    actions, _, _ = plan(devices, mem, 100.0, look, ctx=ctx)
+    assert "wifi1" not in ups(actions)
+    mem["proven"][A2] = 95.0
+    actions, _, _ = plan(devices, mem, 100.0, look, ctx=ctx)
+    assert ups(actions) == {"wifi1": A2}
+
+
+def test_proven_is_recorded_only_for_links_that_pass_traffic():
+    devices = [dev("wifi1", P), dev("wifi2", P)]
+    look = lookup(freqs={"wifi1": 5180, "wifi2": 5745}, bssids={"wifi1": A1, "wifi2": A2},
+                  signals={"wifi1": -50, "wifi2": -50})
+    _, memory, _ = plan(devices, led(devices), 100.0, look,
+                        ctx=dead_ctx(SCANS, dead=["wifi2"], alive=["wifi1"]))
+    assert A1 in memory["proven"] and A2 not in memory["proven"]
+
+
+def test_heal_reapplies_when_a_member_stops_passing_traffic():
+    devices = [{"device": "wifi1", "connectivity": 4}, {"device": "wifi2", "connectivity": 4}]
+    assert nm.heal_candidates([], devices, ["wifi1", "wifi2"], {"wifi2": False}) == ["wifi2"]
+    # and a waiting radio whose traffic check passes needn't wait for NM's slow check
+    excluded = [{"iface": "wifi2", "reason": "gateway unreachable"}]
+    devices = [{"device": "wifi2", "connectivity": 3}]
+    assert nm.heal_candidates(excluded, devices, [], {"wifi2": True}) == ["wifi2"]
+
+
+def test_swap_steps_park_move_join_in_order():
+    ctx = nm.RoamContext()
+    swap = {"a": "wifi1", "a_to": A2, "b": "wifi0", "b_to": A1, "at": 0.0, "step": 0}
+    by = {"wifi1": dev("wifi1", P), "wifi0": dict(dev("wifi0", P), state=110)}
+    assert nm.swap_step(swap, by, ctx, 1.0) == ("wait", "wifi0", "")
+    by["wifi0"] = dev("wifi0")                               # b is down
+    assert nm.swap_step(swap, by, ctx, 2.0) == ("move", "wifi1", A2)
+    by["wifi1"] = dict(dev("wifi1", P), state=70)
+    assert nm.swap_step(swap, by, ctx, 3.0) == ("wait", "wifi1", "")
+    by["wifi1"] = dev("wifi1", P)
+    assert nm.swap_step(swap, by, ctx, 5.0) == ("up", "wifi0", A1)
+    by["wifi0"] = dev("wifi0", P)
+    assert nm.swap_step(swap, by, ctx, 6.0) is None          # done
+    assert nm.swap_step(dict(swap, step=0), by, ctx, nm.SWAP_TIMEOUT_S + 1) is None

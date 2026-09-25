@@ -578,12 +578,15 @@ def plan_slots(radios: list[dict]) -> tuple[tuple | None, str]:
         others_up = any(o[0] == "stay" and _grade(o, by_dev[d]) in ("strong", "usable")
                         for d, o in current.items() if d != dev)
         sole_and_fine = opt[0] == "stay" and not others_up and _grade(opt, radio) == "strong"
+        working = opt[0] == "stay" and _grade(opt, radio) == "strong"
         if not settling and not sole_and_fine:
             for cand in radio.get("cands", []):
                 if cand["age"] > FRESH_S or cand["bssid"] == (radio.get("slot") or {}).get("bssid"):
                     continue
                 if cand["signal"] < MIN_JOIN_DBM:
                     continue
+                if working and not cand.get("proven", True):
+                    continue  # a working radio only moves to an AP known to carry traffic
                 if cand["signal"] < STRONG_DBM and anyone_up:
                     continue  # weak slots are only joined when nothing is up at all
                 options.append(("go", cand))
@@ -599,6 +602,12 @@ def plan_slots(radios: list[dict]) -> tuple[tuple | None, str]:
                     and alt[1]["signal"] - radio["slot"]["signal"] < UPGRADE_DB):
                 continue
             trials.append((s, dev, alt))
+    if not trials and not settling:
+        swap = _best_swap(current, by_dev, base)
+        if swap:
+            a, a_to, b, b_to = swap
+            return ("swap", a, a_to["bssid"], b, b_to["bssid"]), (
+                f"swap {a} -> {a_to['bssid']} ({a_to['freq']} MHz), {b} -> {b_to['bssid']}")
     if not trials:
         return None, "waiting for a connection to land" if settling else "placement already best"
     _, dev, alt = max(trials, key=lambda t: (t[0], t[1]))
@@ -608,6 +617,38 @@ def plan_slots(radios: list[dict]) -> tuple[tuple | None, str]:
     cand = alt[1]
     return (kind, dev, cand["bssid"]), (
         f"{dev} -> {cand['bssid']} ({cand['freq']} MHz, {cand['signal']:.0f} dBm)")
+
+
+SWAP_NEEDS_SPARE = True  # a swap drops one link for a few seconds: only with a third radio up
+
+
+def _best_swap(current: dict, by_dev: dict, base: tuple) -> tuple | None:
+    """Two working radios trading slots, if that's clearly better (e.g. the
+    stronger card on 2.4 GHz and the weaker on 5 GHz only because of who
+    got there first). Needs a third working radio to carry traffic while
+    one of the two is switching."""
+    working = [d for d, o in current.items()
+               if o[0] == "stay" and _grade(o, by_dev[d]) == "strong" and not by_dev[d].get("locked")]
+    best = None
+    for i, a in enumerate(working):
+        for b in working[i + 1:]:
+            spare = any(o[0] == "stay" and _grade(o, by_dev[d]) in ("strong", "usable")
+                        for d, o in current.items() if d not in (a, b))
+            if SWAP_NEEDS_SPARE and not spare:
+                continue
+            sa, sb = by_dev[a]["slot"], by_dev[b]["slot"]
+            ca = next((c for c in by_dev[a].get("cands", []) if c["bssid"] == sb["bssid"]
+                       and c["age"] <= FRESH_S and c["signal"] >= STRONG_DBM), None)
+            cb = next((c for c in by_dev[b].get("cands", []) if c["bssid"] == sa["bssid"]
+                       and c["age"] <= FRESH_S and c["signal"] >= STRONG_DBM), None)
+            if not ca or not cb:
+                continue
+            trial = dict(current)
+            trial[a], trial[b] = ("go", ca), ("go", cb)
+            s = score(trial, by_dev)
+            if _better(s, base) and (best is None or s > best[0]):
+                best = (s, (a, ca, b, cb))
+    return best[1] if best else None
 
 
 def plan_scans(radios: list[dict], last_scan: dict[str, float], now: float,

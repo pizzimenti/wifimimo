@@ -41,7 +41,6 @@ READ_ONLY_ACTIONS = {"status"}
 EXIT_OK, EXIT_ROOT, EXIT_USAGE, EXIT_UNCONFIGURED, EXIT_REFUSED, EXIT_FAILED = 0, 1, 2, 3, 4, 5
 CMD_TIMEOUT_S = 5
 LOCK_TIMEOUT_S = 10
-GOOD_NEIGH_STATES = {"REACHABLE", "STALE", "DELAY", "PROBE", "PERMANENT"}
 
 
 class UsageError(Exception):
@@ -196,9 +195,9 @@ def nm_connectivity_ok(ctx: Ctx, iface: str) -> tuple[bool, str]:
 
 
 def gateway_reachable(ctx: Ctx, iface: str, gw: str) -> bool:
-    for entry in ctx.query_json(["ip", "-j", "-4", "neigh", "show", "dev", iface, gw]):
-        if set(entry.get("state", []) or []) & GOOD_NEIGH_STATES:
-            return True
+    # Always a real ping through the radio: the neighbour cache keeps a dead
+    # link's gateway REACHABLE / STALE for up to a minute (live 2026-09-25:
+    # an associated radio passing no traffic stayed a multipath member).
     rc, _, _ = ctx.query(["ping", "-n", "-q", "-c", "1", "-W", "1", "-I", iface, gw])
     return rc == 0
 

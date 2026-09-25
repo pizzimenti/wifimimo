@@ -387,3 +387,23 @@ def test_only_working_radio_moves_only_when_in_trouble():
     assert roam.plan_slots(radios)[0] is None
     radios[0] = on("wifi1", slot("dd:01", 2412, -78, width=20, level=-68), [cand(*F36, -60)])
     assert roam.plan_slots(radios)[0] == ("move", "wifi1", "bb:36")
+
+
+def test_swap_puts_the_stronger_card_on_the_wider_channel_with_a_spare_up():
+    # the A9000 landed on 2.4 GHz and the built-in on 5 GHz only by order
+    lh24, lh5 = ("ee:24", 2437), ("ee:5", 5500)
+    a9000 = on("wifi1", slot(*lh24, -33, width=20), [cand(*lh5, -40)])
+    builtin = on("wifi0", slot(*lh5, -60), [cand(*lh24, -50, width=20)])
+    spare = on("wifi2", slot(*H11, -45, width=20))
+    change, why = roam.plan_slots([a9000, builtin, spare])
+    assert change == ("swap", "wifi1", "ee:5", "wifi0", "ee:24"), why
+    # without a third radio up, a swap would drop the only other link: no swap
+    assert roam.plan_slots([a9000, builtin])[0] is None
+
+
+def test_a_working_radio_ignores_unproven_candidates():
+    radios = [on("wifi1", slot("dd:01", 2412, -60, width=20), [dict(cand(*F36, -40), proven=False)]),
+              on("wifi2", slot(*H52, -40))]
+    assert roam.plan_slots(radios)[0] is None
+    radios[0]["cands"][0]["proven"] = True
+    assert roam.plan_slots(radios)[0] == ("move", "wifi1", "bb:36")

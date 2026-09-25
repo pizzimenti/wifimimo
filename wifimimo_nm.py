@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -60,14 +61,30 @@ BAD_AP_TTL_S = 1800.0        # how long a bad AP is avoided for that radio
 NEW_RADIO_GRACE_S = 60.0
 JOIN_START_S = 5.0           # a join isn't judged "didn't start" before this
 SWITCH_TIMEOUT_S = 30.0      # a switch in flight counts as busy up to this long
-SHARED_BAD_S = 300.0         # a strong AP that failed a join: avoided by every radio
+SHARED_BAD_S = 120.0         # a strong AP that failed a join: avoided by every radio
 # A failed join counts against the AP (every radio avoids it) only when we
 # read it at SURE_DBM or better: below that it may be the AP's minimum-signal
 # floor refusing this one radio (the AP hears us ~10 dB weaker than we hear
 # it), which only that radio backs off from, for FLOOR_BACKOFF_S.
-SURE_DBM = -62
+SURE_DBM = -50
 FLOOR_BACKOFF_S = 120.0
 JOIN_LOG = STATE_DIR / "joins.jsonl"
+# Traffic check (Liveness): a gateway ping per radio every 2 s; three misses
+# in a row (6 s) and the link is dead however good its signal reads.
+PROBE_INTERVAL_S = 2
+DEAD_AFTER_S = 6.0
+# A join that hasn't reached full activation within JOIN_TIMEOUT_S is given
+# up (NM would wait 45 s for DHCP; live, three riverhouse joins each cost
+# ~50 s: associate, AP drops us 3 s later, retry, no lease).
+JOIN_TIMEOUT_S = 15.0
+# Per radio and AP, a failed join raises the signal we require from that AP
+# to (reading at the failure + FLOOR_MARGIN_DB), for FLOOR_TTL_S: the AP
+# hears each card differently weaker than the card hears it.
+FLOOR_MARGIN_DB = 6.0
+FLOOR_TTL_S = 1800.0
+# A working radio only moves (for capacity) to an AP some radio has
+# carried traffic on within PROVEN_S; a radio in trouble may go anywhere.
+PROVEN_S = 1800.0
 LOST_AP_S = 60.0             # the AP a radio just lost: avoided by that radio
 FAST_AFTER_MOVE_S = 30.0     # keep 1 s polling this long after any change
 REGION_SETTLE_S = 2.0        # no joins this soon after the regulatory domain changed
@@ -150,24 +167,30 @@ CONNECTIVITY_FULL = 4
 # connectivity check passes (which fires no dispatcher event of its own).
 HEALABLE_REASONS = frozenset({"no connectivity", "limited connectivity", "captive portal",
                               "gateway unreachable"})
-HEAL_INTERVAL_S = 10.0
+HEAL_INTERVAL_S = 5.0
 DEGRADED_CONNECTIVITY = (1, 2, 3)   # none / portal / limited
 
 
 def heal_candidates(excluded: list[dict], devices: list[dict],
-                    members: list[str] | None = None) -> list[str]:
+                    members: list[str] | None = None,
+                    alive: dict | None = None) -> list[str]:
     """Radios whose health changed without a dispatcher event.
 
     Either left out by the helper but now rated fully connected by NM, or
     carrying multipath traffic but no longer fully connected (walking away
-    from an AP: associated, but its share of new connections blackholes).
+    from an AP: associated, but its share of new connections blackholes),
+    or carrying multipath traffic while the traffic check (Liveness) says
+    nothing gets through.
     """
     waiting = {e.get("iface") for e in excluded or [] if e.get("reason") in HEALABLE_REASONS}
     serving = set(members or [])
+    alive = alive or {}
     return sorted(
         d["device"] for d in devices
-        if (d.get("device") in waiting and d.get("connectivity") == CONNECTIVITY_FULL)
-        or (d.get("device") in serving and d.get("connectivity") in DEGRADED_CONNECTIVITY))
+        if (d.get("device") in waiting and alive.get(d["device"]) is not False
+            and (d.get("connectivity") == CONNECTIVITY_FULL or alive.get(d["device"]) is True))
+        or (d.get("device") in serving and (d.get("connectivity") in DEGRADED_CONNECTIVITY
+                                            or alive.get(d["device"]) is False)))
 
 
 SCAN_FIELDS = "SSID,BSSID,CHAN,FREQ,SIGNAL,SECURITY,BANDWIDTH"
@@ -303,6 +326,7 @@ class RoamContext:
         self.last_scan: dict[str, float] = {}
         self.region = ""               # `iw reg get` global country, "" unknown
         self.region_changed_at = -1e18
+        self.alive: dict[str, bool | None] = {}   # Liveness verdict per radio
 
     @property
     def region_ok(self) -> bool:
@@ -509,32 +533,58 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
             del bad[name]
     for b in [b for b, until in shared_bad.items() if until <= now]:
         del shared_bad[b]
-    broken: set[str] = set()
+    floors: dict = memory.setdefault("floor", {})
+    for name in list(floors):
+        floors[name] = {b: v for b, v in floors[name].items() if v[1] > now}
+        if not floors[name]:
+            del floors[name]
+    proven: dict = memory.setdefault("proven", {})
+    for b in [b for b, t in proven.items() if now - t > PROVEN_S]:
+        del proven[b]
+
+    def raise_floor(name: str, bssid: str, signal) -> None:
+        if signal is None:
+            return
+        need = float(signal) + FLOOR_MARGIN_DB
+        old = floors.get(name, {}).get(bssid, [-200.0, 0])[0]
+        floors.setdefault(name, {})[bssid] = [max(old, need), now + FLOOR_TTL_S]
+
+    broken: set[str] = set()      # on its target AP but passing no traffic
+    abandon: set[str] = set()     # still connecting past JOIN_TIMEOUT_S: give up
     for name, mv in moves.items():
         bssid, dev = mv.get("bssid"), by_dev.get(name)
-        if not bssid or dev is None or now - mv.get("at", 0) > JOIN_JUDGE_S:
+        if not bssid or dev is None or mv.get("settled") or now - mv.get("at", 0) > JOIN_JUDGE_S:
             continue
+        age = now - mv.get("at", 0)
         on_target = dev.get("uuid") == mv.get("target")
-        # the first seconds after `up` can still read disconnected
-        failed = (not on_target and dev.get("state") == STATE_DISCONNECTED
-                  and now - mv.get("at", 0) >= JOIN_START_S) or (
-            on_target and dev.get("state") == STATE_ACTIVATED
-            and dev.get("connectivity") in (1, 2, 3)
-            and now - mv.get("at", 0) > LIMITED_GRACE_S)
-        if failed:
-            sure = mv.get("signal", -100) >= SURE_DBM
-            bad.setdefault(name, {})[bssid] = now + (BAD_AP_TTL_S if sure else FLOOR_BACKOFF_S)
-            if sure:
-                shared_bad[bssid] = now + SHARED_BAD_S
-            status.setdefault("joins", []).append({
-                "t": round(now, 1), "dev": name, "bssid": bssid, "signal": mv.get("signal"),
-                "outcome": "limited" if on_target else ("failed" if sure else "refused (floor?)"),
-                "secs": round(now - mv.get("at", now), 1), "nm_state": dev.get("state"),
-                "nm_reason": dev.get("reason")})
-            mv["bssid"] = ""
-            mv["settled"] = True
-            if on_target:
-                broken.add(name)
+        activated = on_target and dev.get("state") == STATE_ACTIVATED
+        dead = activated and ctx.alive.get(name) is False
+        # the first seconds after `up` can still read disconnected; NM falling
+        # back to another profile is a failed join too (nothing to cancel)
+        elsewhere = bool(dev.get("uuid")) and not on_target
+        dropped = elsewhere or (
+            not on_target and dev.get("state") == STATE_DISCONNECTED and age >= JOIN_START_S)
+        stalled = not activated and not dropped and age >= JOIN_TIMEOUT_S
+        limited = activated and dev.get("connectivity") in (1, 2, 3) and age > LIMITED_GRACE_S
+        if not (dropped or stalled or dead or limited):
+            continue
+        sure = mv.get("signal", -100) >= SURE_DBM
+        bad.setdefault(name, {})[bssid] = now + (BAD_AP_TTL_S if sure else FLOOR_BACKOFF_S)
+        if sure:
+            shared_bad[bssid] = now + SHARED_BAD_S
+        raise_floor(name, bssid, mv.get("signal"))
+        outcome = ("no traffic" if dead else "limited" if limited else
+                   "timed out" if stalled else "failed" if sure else "refused (floor?)")
+        status.setdefault("joins", []).append({
+            "t": round(now, 1), "dev": name, "bssid": bssid, "signal": mv.get("signal"),
+            "outcome": outcome, "secs": round(age, 1), "nm_state": dev.get("state"),
+            "nm_reason": dev.get("reason")})
+        mv["bssid"] = ""
+        mv["settled"] = True
+        if activated:
+            broken.add(name)
+        elif stalled:
+            abandon.add(name)
     held: dict = memory.setdefault("held", {})
     for name, bssid in list(held.items()):
         dev = by_dev.get(name)
@@ -542,6 +592,13 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
         in_flight = now - moves.get(name, {}).get("at", -1e18) < SWITCH_TIMEOUT_S
         if lost and not in_flight:
             bad.setdefault(name, {})[bssid] = max(bad.get(name, {}).get(bssid, 0), now + LOST_AP_S)
+        if dev is not None and dev.get("state") == STATE_ACTIVATED and ctx.alive.get(name) is False:
+            # a held link that stopped passing traffic: off it, and not straight back
+            broken.add(name)
+            bad.setdefault(name, {})[bssid] = max(bad.get(name, {}).get(bssid, 0), now + LOST_AP_S)
+            mv = moves.get(name, {})
+            if mv.get("bssid") == bssid and now - mv.get("at", -1e18) < JOIN_JUDGE_S:
+                raise_floor(name, bssid, mv.get("signal"))   # joined, never worked
         if dev is None or dev.get("state") != STATE_ACTIVATED:
             del held[name]
     for name, entries in bad.items():
@@ -573,7 +630,14 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
         if not ctx.region_ok:
             # radar channels need the country's rules in force to be joined
             cands = [c for c in cands if not roam.is_radar(c["freq"])]
+        mine = floors.get(name, {})
+        cands = [dict(c, proven=c["bssid"] in proven) for c in cands
+                 if c["signal"] >= mine.get(c["bssid"], [-200.0])[0]]
         view = {"dev": name, "slot": None, "locked": False, "cands": cands}
+        if name in abandon:
+            view.update(status="free", locked=True)   # parked below
+            views.append(view)
+            continue
         landed = on_network(d) and state == STATE_ACTIVATED
         if landed and move.get("target") == leader["uuid"] and not move.get("settled"):
             move["settled"] = True
@@ -622,6 +686,64 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
     for view in views:
         if view["status"] == "on":
             held[view["dev"]] = view["slot"]["bssid"]
+            if ctx.alive.get(view["dev"]) is True:
+                proven[view["slot"]["bssid"]] = now
+
+    def finish(views: list[dict], joining: str) -> tuple[list[tuple], dict, dict]:
+        # A join that timed out is cancelled; idle radios that aren't
+        # joining stay parked (scouting) rather than left to NM's autoconnect.
+        for name in sorted(abandon):
+            if name not in parked:
+                park(name)
+        for view in views:
+            name = view["dev"]
+            if (view["status"] == "free" and not view.get("other") and name != joining
+                    and name not in parked and by_dev[name].get("state") == STATE_DISCONNECTED):
+                park(name)
+        for name in sorted(parked):
+            status["iface_flags"].setdefault(name, []).append(_flag(
+                "scouting", "info", FLAG_TITLES["scouting"],
+                "No access point on a free channel, or on another access point, is strong "
+                "enough for this radio, so it scans instead of sharing a channel with "
+                "another radio. It joins as soon as one is."))
+
+        # 5. Scans: scouts continuously while anything moves; a weak or
+        #    fading radio scans itself when no scout exists.
+        mobile = ctx.trend.mobile()
+        for name in roam.plan_scans([v for v in views if not v.get("other")],
+                                    ctx.last_scan, now, mobile):
+            if name != joining:
+                actions.append(("scan", name))
+
+        memory["leader"] = leader
+        status["leader"]["device"] = leader.get("device", "")
+        status["parked"] = sorted(parked)
+        status["floors"] = {n: {b: v[0] for b, v in f.items()} for n, f in floors.items()}
+        # 1 s polls while anything is moving or changing; a scout sitting
+        # still beside steady radios doesn't need them (it scans every 30 s).
+        status["wants_fast"] = bool(
+            joining or mobile or memory.get("swap")
+            or any(now - mv.get("at", -1e18) < FAST_AFTER_MOVE_S for mv in moves.values())
+            or any(v["status"] == "on" and (v["slot"]["signal"] < roam.STRONG_DBM
+                                            or v["slot"]["declining"]) for v in views))
+        return actions, memory, status
+
+    swap = memory.get("swap")
+    if swap:
+        step = swap_step(swap, by_dev, ctx, now)
+        if step is None:
+            memory.pop("swap", None)
+        else:
+            kind, name, bssid = step
+            if kind == "wait":
+                pass
+            else:
+                signal = next((c["signal"] for v in views if v["dev"] == name
+                               for c in v["cands"] if c["bssid"] == bssid), -60.0)
+                join(name, bssid, leader["uuid"], signal, kind)
+                status["moved"].append(name)
+            status["plan"] = f"swap: {swap['a']} <-> {swap['b']} ({kind} {name})"
+            return finish(views, name if kind in ("up", "move") else "")
 
     if ctx.region_settling(now):
         change, why = None, "waiting for the regulatory domain to settle"
@@ -642,39 +764,49 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
         if name == leader["device"]:
             hand_over(exclude=name)
         park(name)
+    elif change and change[0] == "swap":
+        # a <-> b: park b, move a to b's slot, join b to a's slot; one step
+        # per poll, each waiting for the last (see swap_step)
+        _, a, a_to, b, b_to = change
+        memory["swap"] = {"a": a, "a_to": a_to, "b": b, "b_to": b_to, "at": now, "step": 0}
+        if b == leader["device"]:
+            hand_over(exclude=b)
+        park(b)
+    return finish(views, joining)
 
-    # Idle radios that aren't joining stay parked (scouting) rather than
-    # being left to NM's autoconnect.
-    for view in views:
-        name = view["dev"]
-        if (view["status"] == "free" and not view.get("other") and name != joining
-                and name not in parked and by_dev[name].get("state") == STATE_DISCONNECTED):
-            park(name)
-    for name in sorted(parked):
-        status["iface_flags"].setdefault(name, []).append(_flag(
-            "scouting", "info", FLAG_TITLES["scouting"],
-            "No access point on a free channel, or on another access point, is strong "
-            "enough for this radio, so it scans instead of sharing a channel with "
-            "another radio. It joins as soon as one is."))
 
-    # 5. Scans: scouts continuously while anything moves; a weak or fading
-    #    radio scans itself when no scout exists.
-    mobile = ctx.trend.mobile()
-    for name in roam.plan_scans([v for v in views if not v.get("other")], ctx.last_scan, now, mobile):
-        if name != joining:
-            actions.append(("scan", name))
+SWAP_TIMEOUT_S = 60.0
 
-    memory["leader"] = leader
-    status["leader"]["device"] = leader.get("device", "")
-    status["parked"] = sorted(parked)
-    # 1 s polls while anything is moving or changing; a scout sitting still
-    # beside steady radios doesn't need them (it scans every 30 s then).
-    status["wants_fast"] = bool(
-        joining or mobile
-        or any(now - mv.get("at", -1e18) < FAST_AFTER_MOVE_S for mv in moves.values())
-        or any(v["status"] == "on" and (v["slot"]["signal"] < roam.STRONG_DBM
-                                        or v["slot"]["declining"]) for v in views))
-    return actions, memory, status
+
+def swap_step(swap: dict, by_dev: dict, ctx: RoamContext, now: float) -> tuple | None:
+    """Next step of a two-radio swap (a takes b's slot, b takes a's), or
+    None when it's done or has to be abandoned (the planner takes over).
+
+    step 0: b was parked; once it's down, move a to b's old slot.
+    step 1: once a carries traffic there, join b to a's old slot.
+    step 2: once b is up, done.
+    """
+    a, b = by_dev.get(swap["a"]), by_dev.get(swap["b"])
+    if a is None or b is None or now - swap.get("at", now) > SWAP_TIMEOUT_S:
+        return None
+    step = swap.get("step", 0)
+    if step == 0:
+        if b.get("state") != STATE_DISCONNECTED:
+            return ("wait", swap["b"], "")
+        swap.update(step=1, t=now)
+        return ("move", swap["a"], swap["a_to"])
+    if step == 1:
+        age = now - swap.get("t", now)
+        if a.get("state") == STATE_ACTIVATED and ctx.alive.get(swap["a"]) is not False and age >= 2:
+            swap.update(step=2, t=now)
+            return ("up", swap["b"], swap["b_to"])
+        if age > JOIN_TIMEOUT_S or (a.get("state") == STATE_DISCONNECTED and age >= JOIN_START_S):
+            return None
+        return ("wait", swap["a"], "")
+    age = now - swap.get("t", now)
+    if b.get("state") == STATE_ACTIVATED or age > JOIN_TIMEOUT_S:
+        return None
+    return ("wait", swap["b"], "")
 
 
 def plan_release(memory: dict) -> list[tuple]:
@@ -740,6 +872,77 @@ class _Lookup:
 
     def width(self, dev: str) -> int:
         return int(self._state(dev, "bandwidth_mhz", 20) or 20)
+
+
+class Liveness:
+    """Does traffic actually flow on each radio? One `ping` of the radio's
+    gateway every PROBE_INTERVAL_S, bound to that radio (-I), per connected
+    radio.
+
+    Signal alone can't tell: live 2026-09-25 the A8000 sat associated at
+    -55 dBm from 14:32 on, passing nothing (every gateway ping lost, link at
+    6 Mb/s), while NetworkManager's connectivity check (every few minutes)
+    and the neighbour cache still called it fine.
+    """
+
+    def __init__(self, spawn=None, clock=time.time) -> None:
+        self._spawn = spawn or self._spawn_ping
+        self._clock = clock
+        self._procs: dict[str, tuple] = {}      # dev -> (proc, gateway)
+        self.started: dict[str, float] = {}
+        self.last_reply: dict[str, float] = {}
+
+    @staticmethod
+    def _spawn_ping(dev: str, gw: str):
+        return subprocess.Popen(
+            ["ping", "-n", "-i", str(PROBE_INTERVAL_S), "-W", "1", "-I", dev, gw],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+
+    def _reader(self, dev: str, proc) -> None:
+        for line in proc.stdout:
+            if "bytes from" in line:
+                self.last_reply[dev] = self._clock()
+
+    def update(self, states: dict) -> None:
+        """Probe every radio with an address and a gateway; stop the rest."""
+        want = {dev: s.get("gateway") for dev, s in states.items()
+                if s.get("connected") and s.get("ipv4") and s.get("gateway")}
+        for dev in list(self._procs):
+            proc, gw = self._procs[dev]
+            if want.get(dev) != gw or (proc is not None and proc.poll() is not None):
+                self.stop(dev)
+        for dev, gw in want.items():
+            if dev in self._procs:
+                continue
+            try:
+                proc = self._spawn(dev, gw)
+            except OSError:
+                continue
+            self._procs[dev] = (proc, gw)
+            self.started[dev] = self._clock()
+            self.last_reply.pop(dev, None)
+            if proc is not None and getattr(proc, "stdout", None) is not None:
+                threading.Thread(target=self._reader, args=(dev, proc), daemon=True).start()
+
+    def stop(self, dev: str) -> None:
+        proc, _ = self._procs.pop(dev, (None, None))
+        if proc is not None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+        self.started.pop(dev, None)
+        self.last_reply.pop(dev, None)
+
+    def alive(self, dev: str, now: float) -> bool | None:
+        """True / False, or None while not probed or still in its grace."""
+        start = self.started.get(dev)
+        if start is None:
+            return None
+        last = max(self.last_reply.get(dev, start), start)
+        if now - last > DEAD_AFTER_S:
+            return False
+        return True if dev in self.last_reply else None
 
 
 def read_scan_dump(dev: str) -> list[dict]:
@@ -845,6 +1048,7 @@ class Follower:
         self.last_heal = 0.0
         self.heal_proc: subprocess.Popen | None = None
         self.ctx = RoamContext()
+        self.liveness = Liveness()
         self.wants_fast = False     # read by the daemon's poll-interval logic
 
     def heal(self, devices: list[dict], now: float) -> list[str]:
@@ -863,7 +1067,8 @@ class Follower:
             return []
         if not isinstance(status, dict):
             return []
-        ready = heal_candidates(status.get("excluded", []), devices, status.get("members", []))
+        ready = heal_candidates(status.get("excluded", []), devices, status.get("members", []),
+                                self.ctx.alive)
         if ready:
             self.last_heal = now
             try:
@@ -944,6 +1149,7 @@ class Follower:
         enabled = shared.MULTIPATH_FLAG.exists()
         if not enabled:
             self.wants_fast = False
+            self.liveness.update({})    # stops every probe
             if self.was_enabled or self.memory.get("modified") or self.memory.get("parked"):
                 for action in plan_release(self.memory):
                     self._run(action)
@@ -958,6 +1164,8 @@ class Follower:
 
         devices = parse_dev_show(out)
         feed_context(self.ctx, states, now)
+        self.liveness.update(states)
+        self.ctx.alive = {dev: self.liveness.alive(dev, time.time()) for dev in states}
         actions, memory, status = plan_follow(devices, self.memory, now, _Lookup(states),
                                               primary_wifi_device(states), self.ctx)
         self.wants_fast = bool(status.pop("wants_fast", False))
