@@ -7,6 +7,13 @@ Each version's heading says whether it was a major, minor or patch change.
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-09-25 (patch)
+
+### Fixed
+
+- The widget no longer shadows Qt's `Item.data` with its own `data` property
+  (renamed `cardData`), which drew a Qt warning on every load.
+
 ## [1.6.0] - 2026-09-25 (minor)
 
 ### Added

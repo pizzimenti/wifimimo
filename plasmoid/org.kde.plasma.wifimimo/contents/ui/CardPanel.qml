@@ -19,7 +19,7 @@ ColumnLayout {
 
     required property var app
 
-    readonly property var d: app.data
+    readonly property var d: app.cardData
     readonly property var disp: app.display
     readonly property bool live: app.hasRecentData
     readonly property string mono: app.monospaceFamily

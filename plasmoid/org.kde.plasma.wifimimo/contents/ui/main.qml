@@ -104,9 +104,11 @@ PlasmoidItem {
         display: defaultDisplay
     })
 
-    property var data: defaultData
+    // Not `data`: that name is Item's default property (children), and
+    // shadowing it drew a Qt warning on every load.
+    property var cardData: defaultData
 
-    // Multi-card (schema v3) support. `data` above always holds the state of
+    // Multi-card (schema v3) support. `cardData` above always holds the state of
     // the *displayed* card. The daemon's document carries every discovered
     // card under `interfaces`; the selector row (visible when 2+ cards are
     // present) pins one, and empty selection follows the daemon's primary
@@ -168,10 +170,10 @@ PlasmoidItem {
     property real histRetryPctMinValue: 0
     property real histRetryPctMaxValue: 0
 
-    readonly property bool isConnected: !!(data && data.connected)
-    readonly property var antennaSignals: (data && data.signal_antennas) ? data.signal_antennas : []
-    readonly property var display: (data && data.display) ? data.display : defaultDisplay
-    readonly property bool stale: !data || !data.connected || !data.timestamp || (Math.floor(Date.now() / 1000) - data.timestamp) > 15
+    readonly property bool isConnected: !!(cardData && cardData.connected)
+    readonly property var antennaSignals: (cardData && cardData.signal_antennas) ? cardData.signal_antennas : []
+    readonly property var display: (cardData && cardData.display) ? cardData.display : defaultDisplay
+    readonly property bool stale: !cardData || !cardData.connected || !cardData.timestamp || (Math.floor(Date.now() / 1000) - cardData.timestamp) > 15
     readonly property bool hasRecentData: isConnected && !stale
     readonly property int effectiveNss: {
         // Best observed NSS across either direction. Asymmetric NSS is normal
@@ -181,11 +183,11 @@ PlasmoidItem {
         // max(tx, rx) keeps the alert firing only when *both* directions
         // collapse to a single stream, which is the actual chain-failure
         // signature worth flagging.
-        const tx = data.tx_nss > 0 ? data.tx_nss : 0;
-        const rx = data.rx_nss > 0 ? data.rx_nss : 0;
+        const tx = cardData.tx_nss > 0 ? cardData.tx_nss : 0;
+        const rx = cardData.rx_nss > 0 ? cardData.rx_nss : 0;
         return Math.max(tx, rx);
     }
-    readonly property int linkCount: (data && data.links) ? data.links.length : 0
+    readonly property int linkCount: (cardData && cardData.links) ? cardData.links.length : 0
     readonly property bool mloMultiLink: linkCount > 1
     // Read the band tier from the daemon-computed label so the 6 GHz floor
     // (5955 MHz, the UNII-5 boundary) is defined in one place
@@ -498,17 +500,17 @@ PlasmoidItem {
         if (selectedIface === internalGhost && internalGhostShown) {
             return "Internal card is off (removed from the PCI bus)";
         }
-        if (!data.iface) {
+        if (!cardData.iface) {
             return "No wifi interface detected";
         }
-        if (data.connected && stale) {
-            return "Stale data (daemon last seen " + fmtClock(data.timestamp) + ")";
+        if (cardData.connected && stale) {
+            return "Stale data (daemon last seen " + fmtClock(cardData.timestamp) + ")";
         }
-        if (data.operstate === "dormant") {
+        if (cardData.operstate === "dormant") {
             return "Connecting…";
         }
         // Parked by multipath: no strong free channel or other AP for it.
-        if (doc && doc.nm && (doc.nm.parked || []).indexOf(data.iface) >= 0) {
+        if (doc && doc.nm && (doc.nm.parked || []).indexOf(cardData.iface) >= 0) {
             return "Scouting: scanning for a free channel";
         }
         return "Not associated";
@@ -516,29 +518,29 @@ PlasmoidItem {
 
     function deviceLine() {
         const parts = [];
-        if (data.bus === "usb") {
-            const gen = data.usb_speed_mbps >= 5000 ? "USB 3" : data.usb_speed_mbps > 0 ? "USB 2" : "USB";
-            parts.push(gen + (data.usb_speed_mbps > 0
-                ? " · " + (data.usb_speed_mbps >= 1000 ? (data.usb_speed_mbps / 1000) + " Gb/s" : data.usb_speed_mbps + " Mb/s")
+        if (cardData.bus === "usb") {
+            const gen = cardData.usb_speed_mbps >= 5000 ? "USB 3" : cardData.usb_speed_mbps > 0 ? "USB 2" : "USB";
+            parts.push(gen + (cardData.usb_speed_mbps > 0
+                ? " · " + (cardData.usb_speed_mbps >= 1000 ? (cardData.usb_speed_mbps / 1000) + " Gb/s" : cardData.usb_speed_mbps + " Mb/s")
                 : ""));
-        } else if (data.bus === "pci") {
+        } else if (cardData.bus === "pci") {
             parts.push("PCIe");
         }
-        if (data.driver) {
-            parts.push(data.driver);
+        if (cardData.driver) {
+            parts.push(cardData.driver);
         }
-        if (data.perm_mac) {
-            parts.push(data.perm_mac);
+        if (cardData.perm_mac) {
+            parts.push(cardData.perm_mac);
         }
-        if (data.ipv4) {
-            parts.push(data.ipv4 + "/" + data.prefixlen);
+        if (cardData.ipv4) {
+            parts.push(cardData.ipv4 + "/" + cardData.prefixlen);
         }
         return parts.join(" · ");
     }
 
     function parseState(rawText) {
-        const previousConnected = !!(data && data.connected);
-        const previousBssid = data && data.bssid ? data.bssid : "";
+        const previousConnected = !!(cardData && cardData.connected);
+        const previousBssid = cardData && cardData.bssid ? cardData.bssid : "";
         const previousIface = shownIface;
         let parsed = null;
         const trimmed = (rawText || "").trim();
@@ -616,7 +618,7 @@ PlasmoidItem {
             && next.bssid.length > 0
             && previousBssid !== next.bssid;
 
-        data = next;
+        cardData = next;
 
         if (!next.connected) {
             if (previousConnected) {
@@ -772,8 +774,8 @@ PlasmoidItem {
         // duplicating it is what the user called out as inconsistent. The
         // overall channel width applies to the current rate; we attach it
         // once at the end (true for both single- and multi-link cases).
-        const links = data.links || [];
-        const width = data.bandwidth_mhz > 0 ? "   " + data.bandwidth_mhz + " MHz" : "";
+        const links = cardData.links || [];
+        const width = cardData.bandwidth_mhz > 0 ? "   " + cardData.bandwidth_mhz + " MHz" : "";
         if (mloMultiLink) {
             const parts = [];
             for (let i = 0; i < links.length; ++i) {
@@ -783,8 +785,8 @@ PlasmoidItem {
             }
             return parts.join("  +  ") + width;
         }
-        const ch = data.chan_num > 0 ? " ch" + data.chan_num : "";
-        return data.freq_mhz + " MHz" + ch + width;
+        const ch = cardData.chan_num > 0 ? " ch" + cardData.chan_num : "";
+        return cardData.freq_mhz + " MHz" + ch + width;
     }
 
     function linkStatusLine() {
@@ -821,9 +823,9 @@ PlasmoidItem {
         const live = root.hasRecentData;
         const n = antennaSignals.length;
         return [
-            { label: "Overall", value: root.data.signal_dbm, hist: "sig_overall", kind: "signal", available: live },
-            { label: "Avg", value: root.data.signal_avg_dbm, hist: "sig_avg", kind: "signal",
-              available: live && !!root.data.signal_avg_dbm },
+            { label: "Overall", value: root.cardData.signal_dbm, hist: "sig_overall", kind: "signal", available: live },
+            { label: "Avg", value: root.cardData.signal_avg_dbm, hist: "sig_avg", kind: "signal",
+              available: live && !!root.cardData.signal_avg_dbm },
             { label: "Antenna 1", value: antennaSignalAt(0), hist: "sig_ant0", kind: "signal", available: live && n >= 1 },
             { label: "Antenna 2", value: antennaSignalAt(1), hist: "sig_ant1", kind: "signal", available: live && n >= 2 },
             { label: "Spread", value: spreadValue(), hist: "sig_spread", kind: "spread",
@@ -910,7 +912,7 @@ PlasmoidItem {
 
     onExpandedChanged: function() {
         if (root.expanded) {
-            resetHistory(root.data && root.data.connected ? root.data : null);
+            resetHistory(root.cardData && root.cardData.connected ? root.cardData : null);
             root.pollNow();
         }
     }
@@ -1103,13 +1105,13 @@ PlasmoidItem {
         : PlasmaCore.Types.ActiveStatus
     Plasmoid.icon: iconSource
     toolTipMainText: "wifimimo"
-    toolTipSubText: stale || !data.connected
+    toolTipSubText: stale || !cardData.connected
         ? "No recent antenna data"
-        : "Bandwidth " + (data.bandwidth_mhz > 0 ? data.bandwidth_mhz + " MHz" : "width unknown")
+        : "Bandwidth " + (cardData.bandwidth_mhz > 0 ? cardData.bandwidth_mhz + " MHz" : "width unknown")
           + "  ·  " + effectiveNss + "x" + effectiveNss + " MIMO"
           + (mloMultiLink ? ("  ·  MLO " + linkCount + " links") : "")
-          + "\nOverall " + Math.min(data.tx_rate_mbps || 0, data.rx_rate_mbps || 0).toFixed(1) + " MBit/s"
-          + "  ·  Signal " + data.signal_dbm + " dBm"
+          + "\nOverall " + Math.min(cardData.tx_rate_mbps || 0, cardData.rx_rate_mbps || 0).toFixed(1) + " MBit/s"
+          + "  ·  Signal " + cardData.signal_dbm + " dBm"
           + (doc.multipath && doc.multipath.active
              ? "\nMultipath: active (" + (doc.multipath.members || []).length + " radios)" : "")
           + (radios.filter(r => r.worst === "warn" || r.worst === "crit").length > 0
