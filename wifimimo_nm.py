@@ -73,6 +73,10 @@ JOIN_LOG = STATE_DIR / "joins.jsonl"
 # in a row (6 s) and the link is dead however good its signal reads.
 PROBE_INTERVAL_S = 2
 DEAD_AFTER_S = 6.0
+# A card transmitting at the lowest legacy rate is suspect (the mute A8000
+# sat at 6 Mb/s): two misses are enough then.
+SUSPECT_TX_MBPS = 6.5
+SUSPECT_DEAD_AFTER_S = 4.0
 # A join that hasn't reached full activation within JOIN_TIMEOUT_S is given
 # up (NM would wait 45 s for DHCP; live, three riverhouse joins each cost
 # ~50 s: associate, AP drops us 3 s later, retry, no lease).
@@ -90,6 +94,7 @@ FAST_AFTER_MOVE_S = 30.0     # keep 1 s polling this long after any change
 REGION_SETTLE_S = 2.0        # no joins this soon after the regulatory domain changed
 REASON_USER_REQUESTED = 39
 STATE_DISCONNECTED = 30
+STATE_IP_CONFIG = 70          # associated and authenticated; asking for an address
 STATE_ACTIVATED = 100
 MULTI_OK = {"manual-multiple", "multiple", "2", "3"}
 
@@ -557,6 +562,8 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
             continue
         age = now - mv.get("at", 0)
         on_target = dev.get("uuid") == mv.get("target")
+        if on_target:
+            mv["max_state"] = max(mv.get("max_state", 0), dev.get("state", 0))
         activated = on_target and dev.get("state") == STATE_ACTIVATED
         dead = activated and ctx.alive.get(name) is False
         # the first seconds after `up` can still read disconnected; NM falling
@@ -572,9 +579,16 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
         bad.setdefault(name, {})[bssid] = now + (BAD_AP_TTL_S if sure else FLOOR_BACKOFF_S)
         if sure:
             shared_bad[bssid] = now + SHARED_BAD_S
-        raise_floor(name, bssid, mv.get("signal"))
+        # Only a join that never got past association / handshake says the AP
+        # couldn't hear us. Past that (DHCP, no traffic) it isn't a signal
+        # problem: live, the riverhouse AP heard us at -70 and mistral
+        # answered every DHCP request; the answers never reached the card.
+        got_to_ip = mv.get("max_state", 0) >= STATE_IP_CONFIG
+        if not got_to_ip:
+            raise_floor(name, bssid, mv.get("signal"))
         outcome = ("no traffic" if dead else "limited" if limited else
-                   "timed out" if stalled else "failed" if sure else "refused (floor?)")
+                   "no address" if stalled and got_to_ip else "timed out" if stalled else
+                   "failed" if sure else "refused (floor?)")
         status.setdefault("joins", []).append({
             "t": round(now, 1), "dev": name, "bssid": bssid, "signal": mv.get("signal"),
             "outcome": outcome, "secs": round(age, 1), "nm_state": dev.get("state"),
@@ -596,9 +610,6 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
             # a held link that stopped passing traffic: off it, and not straight back
             broken.add(name)
             bad.setdefault(name, {})[bssid] = max(bad.get(name, {}).get(bssid, 0), now + LOST_AP_S)
-            mv = moves.get(name, {})
-            if mv.get("bssid") == bssid and now - mv.get("at", -1e18) < JOIN_JUDGE_S:
-                raise_floor(name, bssid, mv.get("signal"))   # joined, never worked
         if dev is None or dev.get("state") != STATE_ACTIVATED:
             del held[name]
     for name, entries in bad.items():
@@ -934,13 +945,14 @@ class Liveness:
         self.started.pop(dev, None)
         self.last_reply.pop(dev, None)
 
-    def alive(self, dev: str, now: float) -> bool | None:
-        """True / False, or None while not probed or still in its grace."""
+    def alive(self, dev: str, now: float, suspect: bool = False) -> bool | None:
+        """True / False, or None while not probed or still in its grace.
+        `suspect` (transmit rate collapsed to the minimum) shortens the fuse."""
         start = self.started.get(dev)
         if start is None:
             return None
         last = max(self.last_reply.get(dev, start), start)
-        if now - last > DEAD_AFTER_S:
+        if now - last > (SUSPECT_DEAD_AFTER_S if suspect else DEAD_AFTER_S):
             return False
         return True if dev in self.last_reply else None
 
@@ -1165,7 +1177,11 @@ class Follower:
         devices = parse_dev_show(out)
         feed_context(self.ctx, states, now)
         self.liveness.update(states)
-        self.ctx.alive = {dev: self.liveness.alive(dev, time.time()) for dev in states}
+        self.ctx.alive = {
+            dev: self.liveness.alive(
+                dev, time.time(),
+                suspect=0 < float(s.get("tx_rate_mbps") or 0) <= SUSPECT_TX_MBPS)
+            for dev, s in states.items()}
         actions, memory, status = plan_follow(devices, self.memory, now, _Lookup(states),
                                               primary_wifi_device(states), self.ctx)
         self.wants_fast = bool(status.pop("wants_fast", False))

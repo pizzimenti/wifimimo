@@ -739,7 +739,7 @@ def test_a_dead_radio_does_not_count_as_the_other_working_radio():
 
 
 def test_a_join_still_connecting_after_the_timeout_is_cancelled():
-    devices = [dev("wifi1", P), dict(dev("wifi2", P), state=70)]   # ip-config: no lease
+    devices = [dev("wifi1", P), dict(dev("wifi2", P), state=50)]   # never got past config
     mem = _pinned_mem(devices, "wifi2", A2, at=100.0)
     mem["moves"]["wifi2"]["signal"] = -66
     actions, memory, status = plan(devices, mem, 100.0 + nm.JOIN_TIMEOUT_S + 0.5)
@@ -814,3 +814,23 @@ def test_swap_steps_park_move_join_in_order():
     by["wifi0"] = dev("wifi0", P)
     assert nm.swap_step(swap, by, ctx, 6.0) is None          # done
     assert nm.swap_step(dict(swap, step=0), by, ctx, nm.SWAP_TIMEOUT_S + 1) is None
+
+
+def test_a_join_stuck_waiting_for_an_address_teaches_no_signal_floor():
+    # live: the riverhouse AP heard us at -70 and every DHCP request was
+    # answered by mistral; the answers never reached the card
+    devices = [dev("wifi1", P), dict(dev("wifi2", P), state=70)]
+    mem = _pinned_mem(devices, "wifi2", A2, at=100.0)
+    mem["moves"]["wifi2"].update(signal=-66, max_state=70)
+    actions, memory, status = plan(devices, mem, 100.0 + nm.JOIN_TIMEOUT_S + 0.5)
+    assert kinds(actions, "park") == ["wifi2"]
+    assert "wifi2" not in memory.get("floor", {})
+    assert [j["outcome"] for j in status["joins"] if j["dev"] == "wifi2"][0] == "no address"
+
+
+def test_liveness_fuse_is_shorter_for_a_card_at_the_lowest_rate():
+    live = nm.Liveness(spawn=lambda dev, gw: None, clock=FakeClock(100.0))
+    live.update({"wifi2": {"connected": True, "ipv4": "a", "gateway": "g"}})
+    live.last_reply["wifi2"] = 100.0
+    assert live.alive("wifi2", 104.5) is True
+    assert live.alive("wifi2", 104.5, suspect=True) is False
