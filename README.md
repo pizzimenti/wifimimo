@@ -359,6 +359,16 @@ suspicious 0 reads as "data unavailable" instead of "perfect link". Switching to
 a non-MLO association (legacy SSID, no `MLD … stats` block) brings both counters
 back to life on the same hardware.
 
+## More docs and walk testing
+
+- [docs/roaming.md](docs/roaming.md): how radio placement and roaming work, and
+  the walk evidence behind each rule.
+- [docs/status.md](docs/status.md): where the v1 branch stands and what's open.
+- `tools/walk-log [SECONDS] [NAME]` records a walk (radio links, scan tables,
+  per-radio gateway pings, a new-connection probe, NM / kernel / helper logs)
+  into `walk-logs/NAME/`; `tools/walk-summary walk-logs/NAME` prints placements,
+  outages and joins. Use them to tune `roam.json` for a new site.
+
 ## Tests + CI
 
 ```bash
