@@ -139,6 +139,15 @@ PlasmoidItem {
     property string helperBusy: ""
     property string helperError: ""
     property string helperErrorVerb: ""   // which row shows the error
+    // What the last helper run reported (it reads the machine as root right
+    // after acting), laid over the daemon's document until the daemon has
+    // sampled since. Without it a switch flips back to the old state for up
+    // to a poll, and a click meant to fix that lands as the opposite action.
+    property var helperFresh: null   // {key, fields, at (wall s)}
+    readonly property var helperFreshFields: ({
+        "internal": ["desired", "present", "bound", "iface"],
+        "multipath": ["desired", "active", "members", "reason"]
+    })
 
     // Radio palette (validated for colour-vision-deficiency separation).
     // Red / yellow / green are left out: they mean good / warn / bad here.
@@ -491,9 +500,38 @@ PlasmoidItem {
         } else if (code !== 0 || (result && result.error)) {
             helperError = (result && result.error) ? result.error : ("helper exited " + code);
         }
+        const verb = helperBusy.split(" ")[0];
+        if (result && typeof result === "object" && helperFreshFields[verb]) {
+            const fields = {};
+            for (const name of helperFreshFields[verb]) {
+                if (name in result) {
+                    fields[name] = result[name];
+                }
+            }
+            helperFresh = {
+                key: verb === "internal" ? "internal_card" : verb,
+                fields: fields,
+                at: Date.now() / 1000
+            };
+            doc = withHelperFresh(Object.assign({}, doc));
+        }
         helperBusy = "";
         helperWatchdog.stop();
         pollNow();
+    }
+
+    // Lays helperFresh over a parsed document (in place) until the daemon
+    // has sampled after the helper ran, or 10 s if it isn't writing.
+    function withHelperFresh(parsed) {
+        if (!helperFresh || !parsed || typeof parsed !== "object") {
+            return parsed;
+        }
+        if ((parsed.sampled_at || 0) >= helperFresh.at || Date.now() / 1000 - helperFresh.at > 10) {
+            helperFresh = null;
+            return parsed;
+        }
+        parsed[helperFresh.key] = Object.assign({}, parsed[helperFresh.key] || {}, helperFresh.fields);
+        return parsed;
     }
 
     function statusReason() {
@@ -556,6 +594,7 @@ PlasmoidItem {
             // daemon restarts onto the new JSON format.
             parsed = parseStateV1Lines(trimmed);
         }
+        parsed = withHelperFresh(parsed);
 
         // Schema v3: the document's top level is the primary card's state and
         // `interfaces` maps every card to its own. Pick the user-selected

@@ -7,6 +7,16 @@ Each version's heading says whether it was a major, minor or patch change.
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-09-28 (patch)
+
+### Fixed
+
+- The Internal Wi-Fi and Multipath switches no longer flip back to the old state
+  after a toggle. The widget showed the daemon's last sample (taken before the
+  helper acted) for up to a poll, so a click meant to correct the switch ran the
+  opposite action. The helper's own fresh report now holds the switch until the
+  daemon has sampled since.
+
 ## [1.7.0] - 2026-09-25 (minor)
 
 ### Added
