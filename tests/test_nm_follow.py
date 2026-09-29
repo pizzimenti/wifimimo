@@ -467,6 +467,21 @@ def test_locked_profile_is_skipped_and_flagged():
     assert status["skipped"]["wifi0"] == "profile_locked"
 
 
+def test_profile_bound_by_name_to_a_radio_is_unbound_first():
+    look = lookup(profiles={P: profile(interface_name="wifi1")})
+    actions, _, status = plan([dev("wifi1", P), dev("wifi0")], {}, 1.0, look, "wifi1")
+    assert actions == [("unbind", P)]
+    assert "unbinding" in status["plan"]
+    assert not status["iface_flags"]
+
+
+def test_profile_bound_by_mac_and_name_is_only_flagged():
+    look = lookup(profiles={P: profile(interface_name="wifi1", mac_address="28:94:01:BB:F8:96")})
+    actions, _, status = plan([dev("wifi1", P), dev("wifi0")], {}, 1.0, look, "wifi1")
+    assert actions == []
+    assert status["iface_flags"]["wifi1"][0]["code"] == "profile_locked"
+
+
 def test_stable_cloned_mac_is_a_duplicate_mac_risk():
     for cloned, stable_id, bad in [("stable", "", True), ("stable-ssid", "", True),
                                    ("02:11:22:33:44:55", "", True), ("stable", "${DEVICE}", False),
@@ -721,6 +736,14 @@ def test_tidy_collapses_card_copies_keeping_the_original_name():
                       "keep": {"uuid": "u1", "id": "Central_Library", "clear_binding": True},
                       "delete": [{"uuid": "u2", "id": "Central_Library-a8000"},
                                  {"uuid": "u3", "id": "Central_Library-internal"}]}]
+
+
+def test_tidy_clears_a_lone_bound_profile():
+    lone = dict(prof("u1", "StarlinkMini2", "StarlinkMini2", key="wpa-psk"), interface_name="wifi0")
+    assert nm.plan_tidy([lone, prof("u2", "Home", "Home")]) == [
+        {"ssid": "StarlinkMini2",
+         "keep": {"uuid": "u1", "id": "StarlinkMini2", "clear_binding": True},
+         "delete": []}]
 
 
 def test_tidy_leaves_plain_duplicates_alone():

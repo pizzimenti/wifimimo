@@ -1,8 +1,8 @@
-# Status: feature/v1.0 (2026-09-25)
+# Status: feature/v1.0 (2026-09-28)
 
-Branch `feature/v1.0` at **1.7.0**; `main` is still at 0.4.0. Every change on
+Branch `feature/v1.0` at **1.8.0**; `main` is still at 0.4.0. Every change on
 the branch has its own version and a major / minor / patch heading in
-CHANGELOG.md; the merge takes the branch version as-is (tag `v1.7.0` on main).
+CHANGELOG.md; the merge takes the branch version as-is (tag `v1.8.0` on main).
 
 ## Done and verified live
 
@@ -16,6 +16,10 @@ CHANGELOG.md; the merge takes the branch version as-is (tag `v1.7.0` on main).
 - Dead-man switches: release on stop/crash (verified on a restart), daemon
   watchdog (active), root `wifimimo-deadman.timer` (installed, runs every 20 s,
   quiet when nothing changes), planner fail-safe (unit-tested).
+- Switches hold after a toggle (1.7.1). A profile bound to one radio by name is
+  unbound so the others join with its saved password (1.8.0; the binding was
+  cleared by hand before the fix landed, after which wifi2 joined StarlinkMini2
+  in 2 s; the follower's own unbind is unit-tested).
 
 ## Not yet done
 

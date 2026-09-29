@@ -7,6 +7,18 @@ Each version's heading says whether it was a major, minor or patch change.
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-09-28 (minor)
+
+### Changed
+
+- The follower now saves one change to a profile: a network saved bound to one
+  radio by name (`connection.interface-name`, as the applet can save a newly
+  joined network) has that binding cleared, so the other radios, and its saved
+  password, can join it; it follows from the next poll. MAC bindings are still
+  only flagged.
+- `wifimimo-nm-tidy` also clears a lone profile's interface-name binding (it
+  used to act only on networks with several profiles).
+
 ## [1.7.1] - 2026-09-28 (patch)
 
 ### Fixed

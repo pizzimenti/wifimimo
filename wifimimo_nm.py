@@ -460,7 +460,7 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
     Returns (actions, new_memory, status). Actions:
       ("multi", uuid, value) | ("up", uuid, dev, bssid) | ("down", uuid, dev)
       | ("move", uuid, dev, bssid) | ("park", dev) | ("hold", dev) | ("release", dev)
-      | ("scan", dev)
+      | ("scan", dev) | ("unbind", uuid)
     """
     ctx = ctx or RoamContext()
     memory = json.loads(json.dumps(memory or {}))
@@ -579,6 +579,18 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
     status["leader"] = {"uuid": leader["uuid"], "id": profile.get("id", ""),
                         "device": leader["device"], "ssid": profile.get("ssid", "")}
     status["moved"] = []
+    # A network joined from the desktop applet can be saved with
+    # connection.interface-name set to the radio it was joined on, which
+    # keeps every other radio (and its saved password) off it. A binding to
+    # one of our own radios by name is that, not a choice: clear it on the
+    # saved profile, so it sticks, and follow from the next poll. A
+    # mac-address binding is someone's deliberate setting: flagged, never
+    # touched.
+    bound_to = profile.get("interface_name", "")
+    if bound_to and not profile.get("mac_address") and bound_to in {d["device"] for d in wifi}:
+        actions.append(("unbind", leader["uuid"]))
+        status["plan"] = f"unbinding '{profile.get('id', '')}' from {bound_to} so every radio can join it"
+        return actions, memory, status
     code, severity, detail = followability(profile, lookup.global_cloned())
     if code:
         status["iface_flags"][leader["device"]] = [
@@ -1346,6 +1358,12 @@ class Follower:
             _, dev = action
             rc, _ = run_nmcli(["device", "wifi", "rescan", "ifname", dev])
             self.ctx.last_scan[dev] = time.time()
+        elif kind == "unbind":
+            # On disk, not --temporary, and never undone on release: the
+            # binding is the bug. The active link is left as it is.
+            _, uuid = action
+            rc, _ = run_nmcli(["connection", "modify", "uuid", uuid, "connection.interface-name", ""])
+            print(f"nm: cleared connection.interface-name on {uuid} so every radio can join it", flush=True)
         else:
             return f"unknown action {kind}"
         return "" if rc == 0 else f"{' '.join(map(str, action))}: nmcli exit {rc}"
@@ -1444,7 +1462,8 @@ def plan_tidy(profiles: list[dict]) -> list[dict]:
     Groups profiles by (SSID, key-mgmt). Only groups that contain a
     card-bound profile (mac-address / interface-name set) are touched, and
     only bound profiles are ever deleted: plain duplicates the user made for
-    their own reasons (different passwords, settings) are left alone.
+    their own reasons (different passwords, settings) are left alone. A
+    lone profile bound by interface-name is kept with its binding cleared.
     Keeper preference: unbound, then named exactly like the SSID (the
     original rather than a '-a8000' style copy), then most recently used.
     """
@@ -1455,8 +1474,10 @@ def plan_tidy(profiles: list[dict]) -> list[dict]:
         groups.setdefault((p["ssid"], p.get("key_mgmt", "")), []).append(p)
     plan = []
     for (ssid, _key_mgmt), members in sorted(groups.items()):
-        if len(members) < 2 or not any(_bound(p) for p in members):
+        if not any(_bound(p) for p in members):
             continue
+        if len(members) == 1 and members[0].get("mac_address"):
+            continue    # a lone MAC binding is deliberate (see plan_follow)
         keep = max(members, key=lambda p: (not _bound(p), p.get("id") == ssid,
                                            p.get("timestamp", 0), p.get("id", "")))
         doomed = [p for p in members if p is not keep and _bound(p)]

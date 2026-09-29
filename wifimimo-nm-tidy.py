@@ -5,9 +5,10 @@ Before v1.0, running two radios on one network meant cloning a profile per
 card (NetworkManager lets a profile be active on one device at a time).
 wifimimo's NM follow makes that unnecessary, and card-bound copies block it.
 
-For every SSID with more than one profile, keep one (an unbound one if it
+For every SSID with a card-bound profile, keep one (an unbound one if it
 exists, else the most recently used, with its card binding cleared) and
-delete the others. Dry run by default; pass --apply to change anything.
+delete the other bound ones. Dry run by default; pass --apply to change
+anything.
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
 
     plan = plan_tidy(list_wifi_profiles())
     if not plan:
-        print("Nothing to tidy: every network has a single profile.")
+        print("Nothing to tidy: no Wi-Fi profile is tied to one card.")
         return 0
     for group in plan:
         keep = group["keep"]

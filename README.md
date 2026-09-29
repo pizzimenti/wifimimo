@@ -6,7 +6,7 @@ the full per-MCS rate ladder for **Wi-Fi 4 / 5 / 6 / 6E / 7** links.
 
 ![wifimimo expanded panel](docs/wifimimo-panel.png)
 
-Current version: `1.7.1` · See [CHANGELOG.md](CHANGELOG.md) · Use GitHub Issues for bugs and feature requests.
+Current version: `1.8.0` · See [CHANGELOG.md](CHANGELOG.md) · Use GitHub Issues for bugs and feature requests.
 
 ## What it shows
 
@@ -52,7 +52,7 @@ The installer:
 | `/usr/local/lib/wifimimo/wifimimo-helper` | Root helper (multipath, internal card), root-owned |
 | `/usr/local/bin/wifimimo-daemon` | Background poller |
 | `/usr/local/bin/wifimimo-mon` | Curses monitor launcher |
-| `/usr/local/bin/wifimimo-nm-tidy` | Collapses per-card copies of NetworkManager profiles |
+| `/usr/local/bin/wifimimo-nm-tidy` | Clears card bindings and collapses per-card copies of NetworkManager profiles |
 | `/usr/local/bin/wifimimo-plasmoid-source` | One-shot state-file dumper |
 | `/usr/share/polkit-1/actions/io.github.pizzimenti.wifimimo.policy` | polkit action for the helper |
 | `/etc/NetworkManager/dispatcher.d/90-wifimimo` | Re-applies multipath on network changes |
@@ -244,14 +244,19 @@ out-of-range values are ignored and reported in the state file's `nm.tuning_prob
 
 (those are the defaults). The join log is the evidence for changing them.
 
-No per-card profile copies are needed, and NetworkManager's saved profiles are
-never modified (only an in-memory `multi-connect` change, reverted when multipath
-is turned off). It runs as you, so passwords come from your own keyring.
+No per-card profile copies are needed. The one change it saves to a profile:
+a network joined from the applet can be saved with `connection.interface-name`
+set to the radio it was joined on, which keeps the other radios (and the
+password) off it. When the leader profile is bound by name to one of your
+radios, the follower clears that binding on the saved profile and follows from
+the next poll. Otherwise only an in-memory `multi-connect` change is made,
+reverted when multipath is turned off. It runs as you, so passwords come from
+your own keyring.
 
-It won't follow a profile that's tied to one card (`mac-address` /
-`interface-name` set) or that clones one MAC for every radio (`stable` /
-`stable-ssid` without `${DEVICE}` in `connection.stable-id`); those get a flag.
-`wifimimo-nm-tidy` (dry run by default, `--apply` to act) removes the card-bound
+It won't follow a profile that's tied to one card by `mac-address`, or that
+clones one MAC for every radio (`stable` / `stable-ssid` without `${DEVICE}` in
+`connection.stable-id`); those get a flag. `wifimimo-nm-tidy` (dry run by
+default, `--apply` to act) clears card bindings and removes the card-bound
 copies people made by hand for multi-radio use, keeping the original profile.
 
 ## Internal card toggle
