@@ -66,7 +66,11 @@ def main(argv: list[str]) -> int:
         if b is None or b - a > 2.5:
             print(f"  outage {hms(a)} " + (f"{b - a:.0f} s" if b else "(still failing at the end)"))
 
-    joins = Path.home() / ".local" / "state" / "wifimimo" / "joins.jsonl"
+    # walk-log copies the join log into the walk; older walks fall back to
+    # this machine's live log
+    joins = out / "joins.jsonl"
+    if not joins.exists():
+        joins = Path.home() / ".local" / "state" / "wifimimo" / "joins.jsonl"
     if joins.exists():
         print("\njoins:")
         for line in joins.open():

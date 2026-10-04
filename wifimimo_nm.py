@@ -3,8 +3,10 @@ every radio, so multipath needs no per-card profile copies.
 
 Runs inside the unprivileged daemon, as the desktop user, so NetworkManager
 asks the user's own secret agent (plasma-nm / KWallet) for passwords.
-Nothing persistent is changed in NM: profiles are only ever modified with
-`--temporary` (in-memory), and never created.
+Profiles are never created, and otherwise only modified with `--temporary`
+(in-memory), with one exception: a profile the applet saved bound to one
+radio by name (`connection.interface-name`) has that binding cleared on
+disk, once (see "unbind" in `plan_follow`).
 
 Model
 -----
@@ -585,9 +587,14 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
     # one of our own radios by name is that, not a choice: clear it on the
     # saved profile, so it sticks, and follow from the next poll. A
     # mac-address binding is someone's deliberate setting: flagged, never
-    # touched.
+    # touched. One try per profile: if it's still bound afterwards (polkit
+    # refused the on-disk change, say) it falls through to the
+    # profile_locked flag instead of re-running nmcli every poll.
     bound_to = profile.get("interface_name", "")
-    if bound_to and not profile.get("mac_address") and bound_to in {d["device"] for d in wifi}:
+    unbind_tried: dict = memory.setdefault("unbind_tried", {})
+    if (bound_to and not profile.get("mac_address") and bound_to in {d["device"] for d in wifi}
+            and leader["uuid"] not in unbind_tried):
+        unbind_tried[leader["uuid"]] = now
         actions.append(("unbind", leader["uuid"]))
         status["plan"] = f"unbinding '{profile.get('id', '')}' from {bound_to} so every radio can join it"
         return actions, memory, status
@@ -754,11 +761,14 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
         memory.update(leader={}, held_ac=[], parked={}, leader_seen=now)
         status["plan"] = f"'{ssid}' gone for {int(now - seen_at)} s: NetworkManager picks again"
         return actions, memory, status
+    # Only radios we actually switched off go in held_ac: a release turns
+    # autoconnect back on, which must not override a radio the user (or the
+    # applet's disconnect) had already set to no.
     for d in wifi:
         if d.get("autoconnect") is True:
             actions.append(("hold", d["device"]))
-        if d["device"] not in held_ac:
-            held_ac.append(d["device"])
+            if d["device"] not in held_ac:
+                held_ac.append(d["device"])
     memory["held_ac"] = [n for n in held_ac if n in by_dev]
     if user_pinned:
         # The user locked the profile to one AP: every radio would share it.
@@ -932,8 +942,18 @@ def plan_release_holds(memory: dict) -> tuple[list[tuple], dict]:
     return [("release", name) for name in sorted(radios)], memory
 
 
+def keep_unreleased(memory: dict, failed: list[str]) -> dict:
+    """A release nmcli couldn't make (timeout, NM restarting) stays a hold, so
+    the next release, or the follower's off-path, tries it again; forgetting
+    it would leave that radio's autoconnect off with nothing to undo it."""
+    if failed:
+        memory["held_ac"] = sorted(set(memory.get("held_ac", [])) | set(failed))
+    return memory
+
+
 def release_holds(path: Path = FOLLOW_PATH, nmcli=None) -> list[str]:
-    """`wifimimo-daemon --release` (systemd ExecStopPost). Returns the radios."""
+    """`wifimimo-daemon --release` (systemd ExecStopPost). Returns the radios
+    released; any nmcli failed on stay in held_ac for the next try."""
     nmcli = nmcli or run_nmcli
     try:
         memory = json.loads(path.read_text(encoding="utf-8"))
@@ -942,15 +962,16 @@ def release_holds(path: Path = FOLLOW_PATH, nmcli=None) -> list[str]:
     if not isinstance(memory, dict):
         return []
     actions, memory = plan_release_holds(memory)
-    for _, dev in actions:
-        nmcli(["device", "set", dev, "autoconnect", "yes"])
+    failed = [dev for _, dev in actions
+              if nmcli(["device", "set", dev, "autoconnect", "yes"])[0] != 0]
+    memory = keep_unreleased(memory, failed)
     try:
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(memory, indent=1) + "\n", encoding="utf-8")
         tmp.replace(path)
     except OSError:
         pass
-    return [dev for _, dev in actions]
+    return [dev for _, dev in actions if dev not in failed]
 
 
 SWAP_TIMEOUT_S = 60.0
@@ -1376,9 +1397,9 @@ class Follower:
             self.liveness.update({})    # stops every probe
             if (self.was_enabled or self.memory.get("modified") or self.memory.get("parked")
                     or self.memory.get("held_ac")):
-                for action in plan_release(self.memory):
-                    self._run(action)
-                self.memory = {}
+                failed = [a[1] for a in plan_release(self.memory)
+                          if self._run(a) and a[0] == "release"]
+                self.memory = keep_unreleased({}, failed)   # retried next poll
                 self._save()
             self.was_enabled = False
             return {}
@@ -1410,8 +1431,8 @@ class Follower:
             self.no_traffic_since = now
         elif now - self.no_traffic_since >= FAILSAFE_AFTER_S:
             actions, self.memory = plan_release_holds(self.memory)
-            for action in actions:
-                self._run(action)
+            failed = [a[1] for a in actions if self._run(a)]
+            self.memory = keep_unreleased(self.memory, failed)
             self._save()
             self.failsafe_until = now + FAILSAFE_HOLDOFF_S
             self.no_traffic_since = None

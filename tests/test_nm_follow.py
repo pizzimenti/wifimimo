@@ -270,7 +270,9 @@ def test_every_radio_is_held_from_nm_autoconnect_while_following():
     look = lookup(freqs={"wifi1": 5180, "wifi2": 5745}, bssids={"wifi1": A1, "wifi2": A2})
     actions, memory, _ = plan(devices, led(devices), 100.0, look)
     assert kinds(actions, "hold") == ["wifi1", "wifi2"]
-    assert sorted(memory["held_ac"]) == ["wifi0", "wifi1", "wifi2"]
+    # wifi0's autoconnect was already off (the user's doing): not ours to
+    # turn back on at release
+    assert sorted(memory["held_ac"]) == ["wifi1", "wifi2"]
 
 
 def test_holds_are_released_when_the_network_is_gone():
@@ -473,6 +475,15 @@ def test_profile_bound_by_name_to_a_radio_is_unbound_first():
     assert actions == [("unbind", P)]
     assert "unbinding" in status["plan"]
     assert not status["iface_flags"]
+
+
+def test_an_unbind_that_did_not_stick_is_flagged_not_retried_every_poll():
+    look = lookup(profiles={P: profile(interface_name="wifi1")})
+    devices = [dev("wifi1", P), dev("wifi0")]
+    _, memory, _ = plan(devices, {}, 1.0, look, "wifi1")
+    actions, _, status = plan(devices, memory, 2.0, look, "wifi1")   # still bound
+    assert not [a for a in actions if a[0] == "unbind"]
+    assert status["iface_flags"]["wifi1"][0]["code"] == "profile_locked"
 
 
 def test_profile_bound_by_mac_and_name_is_only_flagged():
@@ -959,6 +970,40 @@ def test_stopping_the_daemon_hands_every_held_radio_back(tmp_path):
     assert nm.release_holds(tmp_path / "missing.json") == []
 
 
+def test_a_release_nmcli_could_not_make_stays_held_for_the_next_try(tmp_path):
+    # nmcli timing out at ExecStopPost must not forget the hold: the radio's
+    # autoconnect would stay off with nothing left to turn it back on.
+    path = tmp_path / "follow.json"
+    path.write_text(json.dumps({"held_ac": ["wifi1", "wifi2"], "parked": {"wifi0": 1.0}}))
+    assert nm.release_holds(path, nmcli=lambda a: (1 if "wifi1" in a else 0, "")) == ["wifi0", "wifi2"]
+    left = json.loads(path.read_text())
+    assert left["held_ac"] == ["wifi1"] and "parked" not in left
+    assert nm.release_holds(path, nmcli=lambda a: (0, "")) == ["wifi1"]
+    assert "held_ac" not in json.loads(path.read_text())
+
+
+def test_switching_multipath_off_retries_a_release_that_failed(tmp_path, monkeypatch):
+    monkeypatch.setattr(nm.shared, "MULTIPATH_FLAG", tmp_path / "multipath-enabled")  # absent: off
+    nm_down = [True]
+    calls = []
+
+    def fake_nmcli(args, timeout=5):
+        calls.append(" ".join(args))
+        return (8 if nm_down[0] else 0), ""
+
+    monkeypatch.setattr(nm, "run_nmcli", fake_nmcli)
+    path = tmp_path / "follow.json"
+    path.write_text(json.dumps({"held_ac": ["wifi1"], "parked": {"wifi2": 1.0}}))
+    follower = nm.Follower(path)
+    follower.step({}, 1000.0)
+    assert sorted(json.loads(path.read_text())["held_ac"]) == ["wifi1", "wifi2"]
+    nm_down[0] = False
+    calls.clear()
+    follower.step({}, 1001.0)
+    assert sorted(calls) == ["device set wifi1 autoconnect yes", "device set wifi2 autoconnect yes"]
+    assert not json.loads(path.read_text()).get("held_ac")
+
+
 def test_a_swap_runs_end_to_end_through_the_follower():
     """The stronger card sits on 2.4 GHz and the weaker on the same AP's
     80 MHz 5 GHz only because of who got there first; a third radio carries
@@ -1066,6 +1111,16 @@ def test_failsafe_hands_every_radio_to_nm_after_a_minute_without_traffic(tmp_pat
     flag = tmp_path / "multipath-enabled"
     flag.touch()
     monkeypatch.setattr(nm.shared, "MULTIPATH_FLAG", flag)
+    # step() heals from the multipath status and may spawn the root helper:
+    # never the real file or a real pkexec on a developer's machine
+    monkeypatch.setattr(nm.shared, "MULTIPATH_STATUS", tmp_path / "multipath.json")
+    real_popen = nm.subprocess.Popen
+
+    def no_helper(argv, *a, **k):
+        assert argv[0] != "pkexec", "started the root helper"
+        return real_popen(argv, *a, **k)
+
+    monkeypatch.setattr(nm.subprocess, "Popen", no_helper)
     calls = []
     show = ("GENERAL.DEVICE:wifi1\nGENERAL.TYPE:wifi\nGENERAL.STATE:100 (connected)\n"
             "GENERAL.CON-UUID:" + P + "\nGENERAL.IP4-CONNECTIVITY:1 (none)\n")

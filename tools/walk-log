@@ -18,11 +18,28 @@ repo=$(cd "$here/.." && pwd)
 dur=${1:-3600}
 name=${2:-walk-$(date +%Y%m%d-%H%M%S)}
 out="$repo/walk-logs/$name"
+# A second run into the same directory would append to samples.jsonl and
+# repeat http.csv's header, which walk-summary can't read.
+if [ -e "$out" ] && [ -n "$(ls -A "$out" 2>/dev/null)" ]; then
+    echo "walk-log: $out already holds a recording; pick another NAME" >&2
+    exit 2
+fi
 mkdir -p "$out"
 gw=$(ip -4 route show default table main | awk '{print $3; exit}')
 echo "${gw:-}" > "$out/gw"
 date +%s.%N > "$out/start"
-trap 'kill 0 2>/dev/null' EXIT INT TERM
+# Each background job in its own process group (job control on), so the
+# trap stops exactly this script's recorders (the ping loops' pings
+# included) and nothing else in the caller's group. On the way out, keep a
+# copy of the join log so the walk's directory is self-contained.
+set -m
+joins="$HOME/.local/state/wifimimo/joins.jsonl"
+cleanup() {
+    for pg in $(jobs -p); do kill -- "-$pg" 2>/dev/null; done
+    [ -f "$joins" ] && cp "$joins" "$out/joins.jsonl"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 iw event -t -f > "$out/events.log" 2>&1 &
 journalctl -f -n 0 -o short-unix -u NetworkManager -u wpa_supplicant > "$out/nm.log" 2>&1 &

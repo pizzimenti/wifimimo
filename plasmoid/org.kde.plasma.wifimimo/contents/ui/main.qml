@@ -137,6 +137,7 @@ PlasmoidItem {
         "internal": ["enable", "disable"]
     })
     property string helperBusy: ""
+    property string helperCommand: ""   // the run in flight (the engine's source name)
     property string helperError: ""
     property string helperErrorVerb: ""   // which row shows the error
     // What the last helper run reported (it reads the machine as root right
@@ -484,7 +485,8 @@ PlasmoidItem {
         helperError = "";
         helperErrorVerb = verb;
         helperWatchdog.restart();
-        helperSource.connectSource("pkexec " + helperPath + " " + verb + " " + action);
+        helperCommand = "pkexec " + helperPath + " " + verb + " " + action;
+        helperSource.connectSource(helperCommand);
     }
 
     function finishHelper(sourceData) {
@@ -927,6 +929,13 @@ PlasmoidItem {
             // The engine keys sources by command string: disconnect so the
             // same toggle can run again later.
             helperSource.disconnectSource(sourceName);
+            // A run the watchdog gave up on may still finish: its result
+            // belongs to no current click, so it must not clear a later
+            // run's busy state or land on the wrong switch.
+            if (sourceName !== root.helperCommand) {
+                return;
+            }
+            root.helperCommand = "";
             root.finishHelper(sourceData);
         }
     }
@@ -935,6 +944,10 @@ PlasmoidItem {
         id: helperWatchdog
         interval: 30000
         onTriggered: {
+            // Disconnect, or a retry of the same toggle (same source name)
+            // would never start a new run.
+            helperSource.disconnectSource(root.helperCommand);
+            root.helperCommand = "";
             root.helperError = "The helper didn't answer within 30 s.";
             root.helperBusy = "";
         }

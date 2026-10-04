@@ -6,7 +6,7 @@ the full per-MCS rate ladder for **Wi-Fi 4 / 5 / 6 / 6E / 7** links.
 
 ![wifimimo expanded panel](docs/wifimimo-panel.png)
 
-Current version: `1.8.0` · See [CHANGELOG.md](CHANGELOG.md) · Use GitHub Issues for bugs and feature requests.
+Current version: `1.8.1` · See [CHANGELOG.md](CHANGELOG.md) · Use GitHub Issues for bugs and feature requests.
 
 ## What it shows
 
@@ -147,6 +147,11 @@ How it works: the root helper keeps its routes **outside** the main table
 | 32001+ | `from <radio address> lookup 101+` | replies leave the radio they came in on |
 | 32090 | `lookup 100` | table 100 holds the one multipath default route |
 
+Everything it adds is tagged `proto 211`, and only that is ever removed: a VPN's
+policy routing in the same table numbers or priorities is left alone, and
+turning multipath on is refused (with the reason in the widget) rather than
+overwrite it.
+
 It also sets `fib_multipath_hash_policy=1`, `ignore_routes_with_linkdown=1`,
 `rp_filter=2` and `arp_ignore=1` / `arp_announce=2` on member radios (originals
 restored on disable). A radio only joins when NetworkManager reports full
@@ -210,8 +215,9 @@ Keeping links honest:
   speed at all. Two working radios may trade APs, but only while a third
   carries traffic.
 - **No races.** While following a network, NetworkManager's autoconnect is
-  blocked on every radio (in memory only, re-asserted every poll), so only the
-  planner connects radios. If the network is gone for 2 min and no radio sees
+  blocked on every radio that had it on (in memory only, re-asserted every
+  poll), so only the planner connects radios. A radio whose autoconnect you
+  turned off stays off when wifimimo hands back. If the network is gone for 2 min and no radio sees
   it, NetworkManager takes over again; turning multipath off does too, and so
   does the daemon stopping for any reason, crash included (the service's
   `ExecStopPost` runs `wifimimo-daemon --release`).
@@ -249,7 +255,8 @@ a network joined from the applet can be saved with `connection.interface-name`
 set to the radio it was joined on, which keeps the other radios (and the
 password) off it. When the leader profile is bound by name to one of your
 radios, the follower clears that binding on the saved profile and follows from
-the next poll. Otherwise only an in-memory `multi-connect` change is made,
+the next poll (one try; if the change is refused, the profile gets the
+"tied to one card" flag instead). Otherwise only an in-memory `multi-connect` change is made,
 reverted when multipath is turned off. It runs as you, so passwords come from
 your own keyring.
 

@@ -57,9 +57,13 @@ def main(argv: list[str] | None = None) -> int:
         keep = group["keep"]
         if keep["clear_binding"]:
             rc, _ = run_nmcli(["connection", "modify", "uuid", keep["uuid"],
-                            "802-11-wireless.mac-address", "", "connection.interface-name", "",
-                            "ipv4.route-metric", "-1"])
-            failed |= rc != 0
+                            "802-11-wireless.mac-address", "", "connection.interface-name", ""])
+            if rc != 0:
+                # Keep the copies: deleting them would leave one profile that's
+                # still card-bound and lose the others' saved secrets.
+                failed = True
+                print(f"FAILED to clear the card binding on '{keep['id']}'; kept its copies")
+                continue
         for dead in group["delete"]:
             rc, _ = run_nmcli(["connection", "delete", "uuid", dead["uuid"]])
             failed |= rc != 0

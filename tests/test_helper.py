@@ -134,6 +134,7 @@ def test_teardown_removes_ecmp_route_first_and_restores_sysctls_last():
     assert plan[-1] == ("restore-sysctls",)
     cmds = argvs(plan)
     assert "ip -4 rule del priority 5300 from 172.20.179.201 lookup 101" in cmds
+    # 101 / 102 are adopted from the legacy rules, so flushed whole
     assert "ip -4 route flush table 101" in cmds and "ip -4 route flush table 102" in cmds
     # never touches rules it doesn't own
     assert not [c for c in cmds if "5270" in c or "32766" in c]
@@ -175,9 +176,43 @@ def test_no_healthy_radio_removes_the_route_but_keeps_radio_routing():
     assert not [c for c in cmds if " rule del " in c]
 
 
+def test_teardown_leaves_foreign_routes_in_radio_tables():
+    # Runs every 20 s from the dead-man timer while multipath is off: a VPN's
+    # policy routing in 101-116 must survive it.
+    rules, routes = _as_live(MEMBERS[:1])
+    routes.append({"dst": "default", "dev": "wg0", "table": "101", "protocol": "static"})
+    routes.append({"dst": "10.8.0.0/24", "dev": "wg0", "table": "105", "protocol": "boot"})
+    cmds = argvs(helper.plan_teardown(rules, routes))
+    assert "ip -4 route flush table 101 proto 211" in cmds
+    assert not [c for c in cmds if "table 105" in c]
+    assert not [c for c in cmds if c.startswith("ip -4 route flush table 101") and "proto" not in c]
+
+
+def test_teardown_flushes_tables_adopted_from_legacy_rules_whole():
+    routes = [{"dst": "default", "dev": "wifi1", "table": "102", "protocol": "boot"}]
+    cmds = argvs(helper.plan_teardown(LEGACY_RULES, routes))
+    assert "ip -4 route flush table 102" in cmds
+
+
+def test_apply_cleanup_never_deletes_foreign_routes():
+    rules, routes = _as_live(MEMBERS)
+    routes.append({"dst": "10.8.0.0/24", "dev": "wg0", "table": "103", "protocol": "static"})
+    cmds = argvs(helper.plan_apply(MEMBERS, rules, routes, GOOD_SYSCTLS))
+    assert not [c for c in cmds if "table 103" in c]
+
+
+def test_foreign_route_in_a_radio_table_refuses_apply_but_not_teardown():
+    routes = [{"dst": "default", "dev": "wg0", "table": "101", "protocol": "static"}]
+    assert helper.foreign_conflicts([], routes)
+    assert not helper.foreign_conflicts([], routes, radio_tables=False)
+    # ...unless a pre-v1.0 rule points at it: that table is being adopted
+    assert not helper.foreign_conflicts(LEGACY_RULES, routes)
+
+
 def test_foreign_table_100_route_is_refused():
     routes = [{"dst": "default", "table": "100", "protocol": "static", "dev": "eth0"}]
     assert helper.foreign_conflicts([], routes)
+    assert helper.foreign_conflicts([], routes, radio_tables=False)
 
 
 def test_foreign_rule_at_owned_priority_is_refused():
@@ -367,6 +402,38 @@ def test_check_hands_routing_back_when_applying_fails(tmp_path, monkeypatch):
     result = helper.multipath_check(ctx, True)
     assert "ip -4 route del default table 100" in ctx.ran
     assert "No such process" in result["reason"]
+
+
+def test_a_refused_check_hands_back_only_our_own_routing(tmp_path, monkeypatch):
+    # Another tool's rule at our ECMP priority: apply refuses, and the
+    # dead-man's teardown must still remove ours, but never theirs.
+    ctx = FakeCtx(tmp_path)
+    rules, routes = _as_live(MEMBERS)
+    rules.append({"priority": 32090, "src": "all", "table": "200", "protocol": "static"})
+    routes.append({"dst": "default", "dev": "wg0", "table": "101", "protocol": "static"})
+    monkeypatch.setattr(helper, "multipath_snapshot", lambda ctx: (rules, routes))
+    result = helper.multipath_check(ctx, True)
+    assert "Refused" in result["reason"]
+    assert "ip -4 rule del priority 32090 lookup 100" in ctx.ran
+    assert not [line for line in ctx.ran if "lookup 200" in line]
+    assert "ip -4 route flush table 101 proto 211" in ctx.ran
+    assert not [line for line in ctx.ran if line == "ip -4 route flush table 101"]
+
+
+def test_a_failure_that_persists_is_logged_once(tmp_path, monkeypatch):
+    ctx = FakeCtx(tmp_path)
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc" / shared.MULTIPATH_FLAG.name).touch()
+    _live_snapshot(monkeypatch)
+
+    def refused(ctx, desired):
+        raise helper.Refused("rule 32090 belongs to protocol static")
+
+    monkeypatch.setattr(helper, "multipath_apply", refused)
+    _, result = helper.cmd_multipath(ctx, "check")
+    assert result["quiet"] is False and "dead-man" in result["reason"]
+    _, result = helper.cmd_multipath(ctx, "check")
+    assert result["quiet"] is True
 
 
 def test_a_healthy_check_is_quiet_and_touches_nothing(tmp_path, monkeypatch):

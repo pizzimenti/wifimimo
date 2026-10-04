@@ -163,6 +163,8 @@ class WifimimoDaemon:
         if self.follower is not None:
             try:
                 nm_status = self.follower.step(states, wall)
+                if not isinstance(nm_status, dict):
+                    nm_status = {"error": f"follower returned {type(nm_status).__name__}"}
             except Exception as exc:  # never let NM trouble stop telemetry
                 nm_status = {"error": str(exc)}
             for iface, extra in (nm_status.pop("iface_flags", {}) or {}).items():

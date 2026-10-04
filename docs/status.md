@@ -1,8 +1,9 @@
-# Status: feature/v1.0 (2026-09-28)
+# Status: feature/v1.0 (2026-10-03)
 
-Branch `feature/v1.0` at **1.8.0**; `main` is still at 0.4.0. Every change on
+Branch `feature/v1.0` at **1.8.1**; `main` is still at 0.4.0. Every change on
 the branch has its own version and a major / minor / patch heading in
-CHANGELOG.md; the merge takes the branch version as-is (tag `v1.8.0` on main).
+CHANGELOG.md; the merge takes the branch version as-is (tag `v1.8.1` on main).
+In review as PR #4; 1.8.1 is the round-1 review fixes (Codex + CodeRabbit).
 
 ## Done and verified live
 

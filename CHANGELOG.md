@@ -7,6 +7,37 @@ Each version's heading says whether it was a major, minor or patch change.
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-10-03 (patch)
+
+### Fixed
+
+- **Foreign routing is never touched.** The root helper's teardown (run every
+  20 s by the dead-man timer, even with multipath off) flushed tables 101–116
+  whole and deleted any rule at its priorities, so a VPN's policy routing there
+  was wiped. It now removes only what it tagged (`proto 211`); a table adopted
+  from pre-v1.0 hand-made rules is still flushed whole. Turning multipath on is
+  refused, not applied over, when another tool's routes sit in tables 100–116.
+- A refused or failing dead-man check is logged once, not every 20 s, and its
+  log lines now reach the journal (they were INFO under `LogLevelMax=notice`).
+- A release NetworkManager couldn't take (nmcli timing out, NM restarting) is
+  kept and retried, instead of being forgotten with the radio's autoconnect
+  still off: on daemon stop, on the fail-safe, and when multipath is turned off.
+- Hand-back no longer turns autoconnect on for a radio whose autoconnect was
+  already off before wifimimo held it.
+- Unbinding a profile from one radio is tried once; if it doesn't stick
+  (polkit refused the on-disk change) the profile gets the "tied to one card"
+  flag instead of nmcli running every poll.
+- `wifimimo-nm-tidy --apply` no longer resets the kept profile's
+  `ipv4.route-metric`, and keeps a network's per-card copies if clearing the
+  kept profile's binding fails.
+- The widget's helper watchdog drops a timed-out run, so a retry of the same
+  switch starts a new run and a late result can't land on a later click.
+- The daemon survives a non-dict result from the follower.
+- Tools: `walk-log` refuses a directory that already holds a recording, stops
+  only its own recorders, and copies the join log into the walk (which
+  `walk-summary` now reads); the new-connection probe bypasses proxies.
+- Tests: the fail-safe test can no longer start the real root helper.
+
 ## [1.8.0] - 2026-09-28 (minor)
 
 ### Changed

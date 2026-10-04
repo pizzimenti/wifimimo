@@ -171,7 +171,8 @@ def probe():
         f.write("t,code,connect_s,total_s,local_ip\n")
         while time.time() < END:
             t0 = time.time()
-            _, out = run(["curl", "-s", "-o", "/dev/null", "-w",
+            # --noproxy: a proxy's answer says nothing about the default route
+            _, out = run(["curl", "-s", "--noproxy", "*", "-o", "/dev/null", "-w",
                           "%{http_code},%{time_connect},%{time_total},%{local_ip}",
                           "--max-time", "2", "http://connectivity-check.ubuntu.com/"], timeout=4)
             f.write(f"{t0:.3f},{out.strip() or '000,,,'}\n")

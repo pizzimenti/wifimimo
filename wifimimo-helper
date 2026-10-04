@@ -117,10 +117,12 @@ class Ctx:
 
 
 def syslog(message: str) -> None:
+    # NOTICE: the dead-man unit runs with LogLevelMax=notice, which drops
+    # syslog()'s default INFO, hand-backs included.
     try:
         import syslog as _syslog
         _syslog.openlog("wifimimo-helper")
-        _syslog.syslog(message)
+        _syslog.syslog(_syslog.LOG_NOTICE, message)
     except Exception:
         pass
 
@@ -310,17 +312,24 @@ def owned_rules(rules) -> list[dict]:
     ]
 
 
-def foreign_conflicts(rules, routes_all) -> list[str]:
-    """Things at wifimimo's priorities / tables that wifimimo didn't create."""
+def foreign_conflicts(rules, routes_all, radio_tables: bool = True) -> list[str]:
+    """Things at wifimimo's priorities / tables that wifimimo didn't create.
+
+    `radio_tables` also reports foreign routes in tables 101-116, which an
+    apply would overwrite; a teardown only ever deletes its own routes there,
+    so it passes False and leaves a VPN's policy tables alone without
+    refusing."""
     problems = []
     for r in owned_rules(rules):
-        prio = int(r.get("priority", -1))
-        legacy = shared.LEGACY_PRIO_MIN <= prio <= shared.LEGACY_PRIO_MAX
-        if not legacy and r.get("protocol") is not None and not shared.proto_is_ours(r.get("protocol")):
-            problems.append(f"rule {prio} belongs to protocol {r.get('protocol')}")
+        if not _rule_is_ours(r):
+            problems.append(f"rule {r.get('priority')} belongs to protocol {r.get('protocol')}")
+    adopted = _adopted_tables(rules)
     for route in routes_all if isinstance(routes_all, list) else []:
-        if _route_table(route) == shared.ECMP_TABLE and not shared.proto_is_ours(route.get("protocol")):
-            problems.append(f"table {shared.ECMP_TABLE} holds a foreign route ({route.get('dst')})")
+        table = _route_table(route)
+        if _route_is_ours(route, adopted):
+            continue
+        if table == shared.ECMP_TABLE or (radio_tables and _owned_table(table)):
+            problems.append(f"table {table} holds a foreign route ({route.get('dst')})")
     return problems
 
 
@@ -331,6 +340,32 @@ def _owned_table(table: int | None) -> bool:
     return table is not None and (
         table == shared.ECMP_TABLE or shared.RADIO_TABLE_BASE <= table <= shared.RADIO_TABLE_MAX
     )
+
+
+def _adopted_tables(rules) -> set[int]:
+    """Radio tables a pre-v1.0 hand-made rule (prio 5300-5399) points at: their
+    untagged routes are that old setup's, and wifimimo takes them over."""
+    out = set()
+    for r in owned_rules(rules):
+        if shared.LEGACY_PRIO_MIN <= int(r.get("priority", -1)) <= shared.LEGACY_PRIO_MAX:
+            table = _rule_table(r)
+            if table is not None:
+                out.add(table)
+    return out
+
+
+def _rule_is_ours(rule: dict) -> bool:
+    """A rule at one of wifimimo's priorities that wifimimo made: tagged with
+    its protocol (or untagged), or a pre-v1.0 hand-made one being adopted."""
+    prio = int(rule.get("priority", -1))
+    legacy = shared.LEGACY_PRIO_MIN <= prio <= shared.LEGACY_PRIO_MAX
+    return legacy or rule.get("protocol") is None or shared.proto_is_ours(rule.get("protocol"))
+
+
+def _route_is_ours(route: dict, adopted: set[int]) -> bool:
+    """Tagged with wifimimo's protocol, or in a table adopted from pre-v1.0.
+    Anything else in 100-116 belongs to someone else and is never deleted."""
+    return shared.proto_is_ours(route.get("protocol")) or _route_table(route) in adopted
 
 
 def desired_sysctls(members: list[dict]) -> dict[str, str]:
@@ -366,6 +401,7 @@ def plan_apply(members: list[dict], rules, routes_all, sysctl_now: dict[str, str
     plan: list[tuple] = []
     tables_wanted: dict[int, set[tuple[str, str]]] = {}
     existing = owned_rules(rules)
+    adopted = _adopted_tables(rules)
 
     # 0. adopt pre-v1.0 hand-made rules (prio 5300-5399) by deleting them
     #    first: they sit ahead of ours and point old addresses at tables
@@ -418,7 +454,7 @@ def plan_apply(members: list[dict], rules, routes_all, sysctl_now: dict[str, str
             plan.append(("cmd", _rule_del_argv(have)))
     for route in routes_all if isinstance(routes_all, list) else []:
         table = _route_table(route)
-        if not _owned_table(table) or table == shared.ECMP_TABLE:
+        if not _owned_table(table) or table == shared.ECMP_TABLE or not _route_is_ours(route, adopted):
             continue
         key = (route.get("dst"), route.get("dev"))
         if key not in tables_wanted.get(table, set()):
@@ -430,17 +466,30 @@ def plan_apply(members: list[dict], rules, routes_all, sysctl_now: dict[str, str
 
 
 def plan_teardown(rules, routes_all) -> list[tuple]:
-    """ECMP route first (NM's defaults take over instantly), then the rest."""
+    """ECMP route first (NM's defaults take over instantly), then the rest.
+
+    Only wifimimo's own state goes: this runs every 20 s from the dead-man
+    timer (multipath off, or a check that failed or was refused), and a VPN's
+    policy routing may share the numbers. Rules at our priorities that
+    another protocol made stay; radio tables lose only wifimimo's routes
+    (`flush ... proto 211`), except a table adopted from pre-v1.0 hand-made
+    rules, which is flushed whole."""
     plan: list[tuple] = []
     routes = routes_all if isinstance(routes_all, list) else []
+    adopted = _adopted_tables(rules)
     if any(_route_table(r) == shared.ECMP_TABLE and shared.proto_is_ours(r.get("protocol"))
            for r in routes):
         plan.append(("cmd", ["ip", "-4", "route", "del", "default", "table", str(shared.ECMP_TABLE)]))
     for rule in owned_rules(rules):
-        plan.append(("cmd", _rule_del_argv(rule)))
-    for table in sorted({_route_table(r) for r in routes if _owned_table(_route_table(r))}):
-        if table != shared.ECMP_TABLE:
-            plan.append(("cmd", ["ip", "-4", "route", "flush", "table", str(table)]))
+        if _rule_is_ours(rule):
+            plan.append(("cmd", _rule_del_argv(rule)))
+    tables = {_route_table(r) for r in routes
+              if _owned_table(_route_table(r)) and _route_is_ours(r, adopted)}
+    for table in sorted(tables - {shared.ECMP_TABLE}):
+        argv = ["ip", "-4", "route", "flush", "table", str(table)]
+        if table not in adopted:
+            argv += ["proto", str(shared.RT_PROTO)]
+        plan.append(("cmd", argv))
     plan.append(("restore-sysctls",))
     return plan
 
@@ -536,7 +585,7 @@ def multipath_snapshot(ctx: Ctx) -> tuple:
 
 def multipath_apply(ctx: Ctx, desired: bool) -> dict:
     rules, routes_all = multipath_snapshot(ctx)
-    conflicts = foreign_conflicts(rules, routes_all)
+    conflicts = foreign_conflicts(rules, routes_all, radio_tables=desired)
     if conflicts:
         raise Refused("; ".join(conflicts))
     result = {"desired": desired, "active": False, "members": [], "excluded": [],
@@ -618,7 +667,9 @@ def cmd_multipath(ctx: Ctx, action: str) -> tuple[int, dict]:
             prev = json.loads((ctx.run_dir / shared.MULTIPATH_STATUS.name).read_text())
         except (OSError, ValueError):
             prev = None
-        result["quiet"] = result["quiet"] and not _check_changed(prev, result)
+        # Log / write status only when membership or the verdict moved: a
+        # failure that persists (a refusal, say) is logged once, not every 20 s.
+        result["quiet"] = not _check_changed(prev, result)
         if not ctx.dry_run and not result["quiet"]:
             status = {k: v for k, v in result.items() if k not in ("plan", "quiet")}
             _write_json(ctx, ctx.run_dir / shared.MULTIPATH_STATUS.name, status)
