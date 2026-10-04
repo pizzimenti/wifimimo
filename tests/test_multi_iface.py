@@ -177,6 +177,40 @@ def test_malformed_structured_fields_keep_defaults(tmp_path: Path):
     assert loaded["display"]["signal_tier"] == "crit"
 
 
+def test_malformed_v4_structured_fields_keep_defaults(tmp_path: Path):
+    path = tmp_path / "state"
+    path.write_text(
+        '{"schema_version": 4, "flags": "x", "signal_history": 3,'
+        ' "multipath": [1], "internal_card": "on", "nm": null}',
+        encoding="utf-8",
+    )
+    loaded = wifimimo_core.read_state(path)
+    assert loaded["flags"] == [] and loaded["signal_history"] == []
+    assert loaded["multipath"] == {} and loaded["internal_card"] == {} and loaded["nm"] == {}
+
+
+def test_doc_only_keys_never_leak_into_interfaces():
+    usb = _state("wifi1", connected=True)
+    usb.update(multipath={"active": True}, internal_card={"managed": True},
+               helper_available=True, sampled_at=1.0, nm={"x": 1})
+    doc = wifimimo_core.build_multi_state({"wifi1": usb})
+    assert doc["multipath"] == {"active": True}
+    assert not set(wifimimo_core.DOC_ONLY_KEYS) & set(doc["interfaces"]["wifi1"])
+
+
+def test_v4_per_radio_fields_round_trip(tmp_path: Path):
+    usb = _state("wifi1", connected=True)
+    usb.update(card_name="A9000", flags=[{"code": "shared_bss"}],
+               signal_history=[[1.0, -55]], usb_speed_mbps=5000)
+    path = tmp_path / "state"
+    wifimimo_core.write_state(path, wifimimo_core.build_multi_state({"wifi1": usb}))
+    sub = wifimimo_core.read_state(path)["interfaces"]["wifi1"]
+    assert sub["card_name"] == "A9000"
+    assert sub["flags"] == [{"code": "shared_bss"}]
+    assert sub["signal_history"] == [[1.0, -55]]
+    assert sub["usb_speed_mbps"] == 5000
+
+
 # ---------------------------------------------------------------------------
 # Daemon per-iface tracking
 # ---------------------------------------------------------------------------

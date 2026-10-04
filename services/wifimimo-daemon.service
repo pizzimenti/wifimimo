@@ -7,6 +7,13 @@ PartOf=graphical-session.target
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/wifimimo-daemon
+# After every stop, crash included: hand the radios' autoconnect back to
+# NetworkManager (the daemon re-holds them within a poll of starting).
+ExecStopPost=/usr/local/bin/wifimimo-daemon --release
+# Dead-man for a hung daemon: the poll loop pings systemd every pass; 45 s
+# without one and systemd kills it (ExecStopPost runs, then a restart).
+WatchdogSec=45
+NotifyAccess=main
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

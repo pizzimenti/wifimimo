@@ -6,7 +6,7 @@ the full per-MCS rate ladder for **Wi-Fi 4 / 5 / 6 / 6E / 7** links.
 
 ![wifimimo expanded panel](docs/wifimimo-panel.png)
 
-Current version: `0.4.0` · See [CHANGELOG.md](CHANGELOG.md) · Use GitHub Issues for bugs and feature requests.
+Current version: `1.8.1` · See [CHANGELOG.md](CHANGELOG.md) · Use GitHub Issues for bugs and feature requests.
 
 ## What it shows
 
@@ -48,22 +48,38 @@ The installer:
 
 | Path | Role |
 |------|------|
-| `/usr/local/lib/wifimimo/` | Daemon + monitor + plasmoid source bridge + venv |
+| `/usr/local/lib/wifimimo/` | Daemon + monitor + modules + venv |
+| `/usr/local/lib/wifimimo/wifimimo-helper` | Root helper (multipath, internal card), root-owned |
 | `/usr/local/bin/wifimimo-daemon` | Background poller |
 | `/usr/local/bin/wifimimo-mon` | Curses monitor launcher |
-| `/usr/local/bin/wifimimo-plasmoid-source` | One-shot state-file dumper used by the plasmoid |
+| `/usr/local/bin/wifimimo-nm-tidy` | Clears card bindings and collapses per-card copies of NetworkManager profiles |
+| `/usr/local/bin/wifimimo-plasmoid-source` | One-shot state-file dumper |
+| `/usr/share/polkit-1/actions/io.github.pizzimenti.wifimimo.policy` | polkit action for the helper |
+| `/etc/NetworkManager/dispatcher.d/90-wifimimo` | Re-applies multipath on network changes |
+| `/etc/iproute2/rt_protos.d/wifimimo.conf` | Names route protocol 211 `wifimimo` |
+| `/etc/wifimimo/` | Multipath / internal-card state (root-owned) |
 | `~/.config/systemd/user/wifimimo-daemon.service` | User systemd service (auto-enabled) |
 | Plasmoid (via `kpackagetool6`) | Per-user `org.kde.plasma.wifimimo` widget |
 
 The script also restarts `plasma-plasmashell.service` so the new widget code loads
 without you having to log out and back in.
 
+Options:
+
+```bash
+./install.sh --manage-internal 14c3:7925     # let the widget toggle an internal PCI card
+./install.sh --manage-internal auto          # ...every bound PCI wifi card present now
+./install.sh --manage-internal 14c3:7925=mt7925e   # card not present: name the driver
+./install.sh --migrate-legacy-rules          # move hand-made "remove this card" udev rules aside
+./install.sh --uninstall                     # remove everything (restores the internal card)
+```
+
 ## Daemon
 
 `wifimimo-daemon` auto-discovers every wifi netdev under `/sys/class/net`
 (re-scanned each poll, so a hotplugged USB card appears without a restart),
 polls nl80211 station data for each via `pyroute2`, and writes a versioned
-JSON state file to `/run/user/$UID/wifimimo-state` (`schema_version: 3`). It also
+JSON state file to `/run/user/$UID/wifimimo-state` (`schema_version: 4`). It also
 appends a daily CSV history row per card to
 `~/.local/state/wifimimo/history/<date>.csv` so you can plot link quality over
 time later. Set `WIFI_IFACE=<name>` in the service environment to pin the
@@ -94,25 +110,222 @@ multi-link MLO is active.
 ## Plasma widget
 
 A KDE Plasma 6 panel widget that consumes the daemon's JSON state file. Compact
-representation = a single coloured icon (see table above). Expanded popup = the
-full telemetry pictured at the top of this README. When two or more wifi cards
-are present, a button row at the top of the popup selects which card is
-displayed; with no selection the popup follows the daemon's primary card (the
-connected one).
+representation = a single coloured icon (see table above). The expanded popup is
+sized to its content with no scrolling; every card renders the same skeleton, so
+nothing shifts when a card goes down or you switch cards. From the top:
+
+- **Controls** — *Multipath* and *Internal Wi-Fi* switches on one line (see
+  below); hover a label for its status.
+- **Signal, last 60 s** — signal (dBm) for every radio on a fixed −90…−30 dBm
+  axis with good / warn / bad bands, so link quality reads at a glance. The axis
+  never rescales. Points are placed by time, and gaps (radio down) break the line.
+- **Card selector** — one button per card (the first is selected by default); each card shows a
+  filled dot when up, a hollow one when down, and `!` when flagged. A switched-off
+  internal card keeps a ghost button.
+- **Card panel** — the card's name (e.g. `A9000`, `A8000`, `Built-in`), SSID or
+  the reason it's down, device line (bus, USB speed, driver, MAC, address),
+  health-flag chips, then SIGNAL / RATES / MCS / TX RETRIES. A down card keeps
+  the same layout with dashes and empty meters instead of collapsing.
 
 To re-add the widget after install: right-click the panel → Add Widgets → search
 "wifimimo".
 
+## Multipath
+
+On networks that cap bandwidth *per client* (libraries, cafés, hotels), several
+radios get several allowances. Turning on **Multipath** balances new connections
+across every connected radio at layer 4 (the kernel hashes each TCP/UDP flow's
+5-tuple onto one radio), measured at roughly 2× with two radios and up to ~3×
+upload with three. A single download still uses one radio; it can't be split.
+
+How it works: the root helper keeps its routes **outside** the main table
+(NetworkManager prunes unknown routes there):
+
+| Priority | Rule | Purpose |
+|---|---|---|
+| 32000 | `lookup main suppress_prefixlength 0` | NM's specific routes (LAN, VPNs) still win |
+| 32001+ | `from <radio address> lookup 101+` | replies leave the radio they came in on |
+| 32090 | `lookup 100` | table 100 holds the one multipath default route |
+
+Everything it adds is tagged `proto 211`, and only that is ever removed: a VPN's
+policy routing in the same table numbers or priorities is left alone, and
+turning multipath on is refused (with the reason in the widget) rather than
+overwrite it.
+
+It also sets `fib_multipath_hash_policy=1`, `ignore_routes_with_linkdown=1`,
+`rp_filter=2` and `arp_ignore=1` / `arp_announce=2` on member radios (originals
+restored on disable). A radio only joins when NetworkManager reports full
+connectivity (so a captive portal can't swallow a share of your connections) and
+its gateway answers. The dispatcher hook rebuilds the layout on every connect,
+disconnect or DHCP change. The setting survives reboots.
+
+Radios on the same access point or channel share airtime, so they gain nothing
+from each other; wifimimo flags that. IPv4 only.
+
+Recovery, if anything ever goes wrong: `pkexec /usr/local/lib/wifimimo/wifimimo-helper multipath disable`,
+or just `sudo ip rule del pref 32090`.
+
+### Following your network choice (NetworkManager)
+
+While multipath is on, the daemon makes one click in the Plasma network applet
+drive every radio: the network you pick becomes the leader and the other radios
+join the same profile. Pick another network and they all follow; disconnect and
+they all drop.
+
+Where each radio sits is planned continuously (`wifimimo_roam.py`), in this order
+of preference:
+
+1. **A channel of its own.** An access point (this one's other band, or another
+   one) whose channel doesn't overlap any other radio's, at −70 dBm or better.
+2. **Another access point** on an overlapping channel (shared airtime, but a
+   separate AP: separate per-client limits and backhaul).
+3. **Scouting.** No two radios ever share one access point on one channel. A
+   radio with neither of the above is parked (disconnected, autoconnect blocked
+   in memory only) and scans, so it can take a slot the moment one appears.
+   The widget shows it as "Scouting".
+
+A radio's signal is tracked as a trend: one heading below −75 dBm within about
+six seconds moves early to a fresh, stronger slot while its link still works.
+Scouts scan every 6 s while you're moving (30 s when still); without a scout, a
+weak or fading radio scans itself every 10 s. Cards hear the air differently
+(the built-in mt7925e reads ~20 dB below the A9000 on the same AP), so a reading
+one radio took is only used for another after a learned per-card correction.
+Changes happen one at a time, the next waiting until the last one has landed;
+a move drops the old link first, then joins.
+
+Keeping links honest:
+
+- **Traffic check.** Every connected radio pings its gateway every 2 s, bound to
+  that radio. Three misses (two if the card has fallen to the lowest transmit
+  rate) and the link is dead however good its signal: it's taken off that AP and
+  out of multipath routing within seconds. (Live: a card sat associated at
+  −55 dBm passing nothing for minutes.)
+- **Fast give-up.** A join not fully up within 15 s is cancelled, instead of
+  waiting out NetworkManager's 45 s DHCP timeout.
+- **Two strikes.** A failed join avoids that AP for that card for 5 min, then
+  it's tried again; a second failure avoids it until you choose the network
+  again. A working join clears the strikes.
+- **Signal floors.** Nothing below −72 dBm is ever tried (some APs drop clients
+  they hear below −75, and they hear us weaker than we hear them). A join that
+  fails before authentication completes raises that card's minimum for that AP
+  by 6 dB for 30 min; a join stuck waiting for an address doesn't (that's a
+  network problem, not signal).
+- **Proven APs.** A working radio moves for speed only to an AP some radio has
+  carried traffic on in the last 30 min; the only working radio never moves for
+  speed at all. Two working radios may trade APs, but only while a third
+  carries traffic.
+- **No races.** While following a network, NetworkManager's autoconnect is
+  blocked on every radio that had it on (in memory only, re-asserted every
+  poll), so only the planner connects radios. A radio whose autoconnect you
+  turned off stays off when wifimimo hands back. If the network is gone for 2 min and no radio sees
+  it, NetworkManager takes over again; turning multipath off does too, and so
+  does the daemon stopping for any reason, crash included (the service's
+  `ExecStopPost` runs `wifimimo-daemon --release`).
+- **Join log.** Every attempt and its outcome goes to
+  `~/.local/state/wifimimo/joins.jsonl`.
+
+Dead-man switches — if any part of wifimimo's control fails, NetworkManager gets
+everything back:
+
+| What fails | What happens |
+|---|---|
+| The daemon stops or crashes | the service's `ExecStopPost` hands every radio's autoconnect back to NetworkManager |
+| The daemon hangs | systemd watchdog (45 s without a heartbeat) kills it; the same hand-back runs, then a restart |
+| The daemon is gone while routing is active | a root timer (`wifimimo-deadman.timer`, every 20 s) re-checks routing with fresh gateway pings on its own |
+| The helper can't check or apply routing | that timer tears wifimimo's routing down; NetworkManager's own routes carry everything (the switch stays on, so the next good check rebuilds it) |
+| The planner gets nothing through for a minute | every radio goes back to NetworkManager for 5 min, then wifimimo tries again (shown in the widget) |
+
+A gateway that never answers pings (common on public networks) doesn't make a
+radio "dead" while NetworkManager's own connectivity check passes.
+
+The thresholds were tuned on one property. To tune another site, put overrides in
+`~/.config/wifimimo/roam.json` (re-read when it changes; unknown keys and
+out-of-range values are ignored and reported in the state file's `nm.tuning_problems`):
+
+```json
+{"strong_dbm": -70, "keep_dbm": -75, "dead_dbm": -82, "min_join_dbm": -72,
+ "horizon_s": 6, "upgrade_db": 6, "join_timeout_s": 15, "retry_avoid_s": 300,
+ "dead_after_s": 6, "leader_lost_s": 120}
+```
+
+(those are the defaults). The join log is the evidence for changing them.
+
+No per-card profile copies are needed. The one change it saves to a profile:
+a network joined from the applet can be saved with `connection.interface-name`
+set to the radio it was joined on, which keeps the other radios (and the
+password) off it. When the leader profile is bound by name to one of your
+radios, the follower clears that binding on the saved profile and follows from
+the next poll (one try; if the change is refused, the profile gets the
+"tied to one card" flag instead). Otherwise only an in-memory `multi-connect` change is made,
+reverted when multipath is turned off. It runs as you, so passwords come from
+your own keyring.
+
+It won't follow a profile that's tied to one card by `mac-address`, or that
+clones one MAC for every radio (`stable` / `stable-ssid` without `${DEVICE}` in
+`connection.stable-id`); those get a flag. `wifimimo-nm-tidy` (dry run by
+default, `--apply` to act) clears card bindings and removes the card-bound
+copies people made by hand for multi-radio use, keeping the original profile.
+
+## Internal card toggle
+
+With `install.sh --manage-internal <vendor:device>`, the widget gets an
+*Internal Wi-Fi* switch for a built-in PCI card: useful when a USB stick is
+impractical (flights, walking around) but you normally keep the internal radio
+off. Off removes the card from the PCI bus (like unplugging it); on rescans the
+bus and loads its driver. The choice survives reboots via a generated udev rule
+(`/etc/udev/rules.d/70-wifimimo-internal.rules`, from `/etc/wifimimo/internal.conf`).
+The driver module is never unloaded, since it can be shared with USB sticks of
+the same chip family.
+
+## Health flags
+
+Each card carries flags the widget shows as chips and the monitor lists:
+
+| Flag | Meaning |
+|---|---|
+| Running at USB 2 | A USB 3 stick negotiated 480 Mb/s on a USB 3 port: reseat it firmly |
+| USB 2 port | A USB 3 stick on a USB 2-only port |
+| Shares an access point / a channel | Two radios split one airtime budget |
+| ARP flux risk | Several radios in one subnet without `arp_ignore` / `arp_announce` |
+| Weak signal / antenna, antenna imbalance, MIMO offline / degraded, high interference | Link-level checks |
+| Profile tied to one card, shared cloned MAC | NetworkManager follow can't use this profile |
+
+## Card names
+
+Cards get short names: known models by USB id (`A9000`, `A8000`), `Built-in` for
+PCI cards, otherwise vendor + chip (e.g. `NetGear MT7921U`). Override any of them
+in `~/.config/wifimimo/names.json`, keyed by permanent MAC:
+
+```json
+{ "28:94:01:bb:f8:96": "Travel stick" }
+```
+
+## Security model
+
+Everything privileged goes through one root helper with a fixed command set
+(`multipath enable|disable|apply|status`, `internal enable|disable|status|sync-rules`).
+It accepts no interface names, paths or numbers from the caller, runs under
+`python3 -I`, and only touches routes, rules and tables it owns. The polkit
+action lets processes in the **active local session** run it without a password
+(that's what makes the switches usable on a plane); inactive and remote sessions
+need admin authentication. Anything running as you in your desktop session can
+therefore toggle multipath or the internal card.
+
 ## State schema
 
-The runtime state file is JSON v3. The top level mirrors the *primary*
+The runtime state file is JSON v4. The top level mirrors the *primary*
 interface's full state (schema-v2 shape, so older consumers keep working);
 `ifaces` lists every discovered card and `interfaces` maps each card name to
-its own full state of the same shape. Stable contract:
+its own full state of the same shape. v4 adds per-card `card_name`, `perm_mac`,
+`bus`, `driver`, `dev_id`, `usb_speed_mbps`, `ipv4` / `subnet` / `gateway`,
+`rx_mbps` / `tx_mbps`, `signal_history` (`[[unix_ts, dBm], ...]`, last 60 s),
+`flags` (`{code, severity, title, detail}`) and `color_index`, plus
+document-level `multipath`, `internal_card`, `nm`, `helper_available` and
+`sampled_at` (never repeated inside `interfaces`). Stable contract:
 
 ```jsonc
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "iface": "wlp3s0f3u2",
   "ifaces": ["wlp1s0", "wlp3s0f3u2"],
   "interfaces": { "wlp1s0": { /* full per-card state */ }, "wlp3s0f3u2": { /* … */ } },
@@ -158,6 +371,16 @@ suspicious 0 reads as "data unavailable" instead of "perfect link". Switching to
 a non-MLO association (legacy SSID, no `MLD … stats` block) brings both counters
 back to life on the same hardware.
 
+## More docs and walk testing
+
+- [docs/roaming.md](docs/roaming.md): how radio placement and roaming work, and
+  the walk evidence behind each rule.
+- [docs/status.md](docs/status.md): where the v1 branch stands and what's open.
+- `tools/walk-log [SECONDS] [NAME]` records a walk (radio links, scan tables,
+  per-radio gateway pings, a new-connection probe, NM / kernel / helper logs)
+  into `walk-logs/NAME/`; `tools/walk-summary walk-logs/NAME` prints placements,
+  outages and joins. Use them to tune `roam.json` for a new site.
+
 ## Tests + CI
 
 ```bash
@@ -167,10 +390,21 @@ pytest -q
 
 Suite covers PHY-mode round-tripping (HT/VHT/HE/EHT), iw output fixtures
 (single-link / MLO / disconnected / VHT), state file (write, read, v1 migration,
-forward-compat), derived display, history-CSV schema rotation, and a QML parity
-check that fails CI if PHY-mode literals leak back into the QML.
+forward-compat), derived display, history-CSV schema rotation, sysfs bus / USB
+port detection on fake trees, health flags, card names, the helper's argument
+validation and routing plans (ordering, idempotency, teardown, refusal of
+foreign state), the internal-card udev rule, NetworkManager follow and tidy
+planning, cross-file packaging facts (polkit path, dispatcher, versions), and a
+QML parity check that fails CI if PHY-mode literals leak back into the QML.
 
 GitHub Actions CI runs on `ubuntu-24.04` with Python `3.12.7`.
+
+Widget development: `tools/pv -t 10` runs the plasmoid in `plasmoidviewer` with
+every QML message on stdout. Qt 6 sends logging to the systemd journal whenever
+the process has no controlling terminal (IDE and agent shells), so without the
+script the messages are only in `journalctl --user _COMM=plasmoidviewer`. The
+installed widget always logs to the journal:
+`journalctl --user -u plasma-plasmashell.service -f --grep wifimimo`.
 
 ## License
 

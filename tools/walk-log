@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Record a walk for tuning wifimimo's roaming: run it, walk, Ctrl-C (or let
+# the duration run out), then `tools/walk-summary walk-logs/<name>`.
+# usage: tools/walk-log [SECONDS] [NAME]      (default 3600, walk-<timestamp>)
+#
+# Unprivileged, local files only. It triggers no scans of its own, so every
+# scan in the log is the follower's. Records, into walk-logs/<NAME>/:
+#   samples.jsonl  1 Hz: each radio's link (iw station dump), NM device state,
+#                  addresses, ECMP members, the daemon's nm status
+#   dumps.jsonl    every 2 s: each radio's scan table (iw scan dump)
+#   http.csv       1 Hz: a fresh TCP connection through the default route
+#   ping-<radio>.log  5 Hz gateway ping bound to each radio
+#   events.log / nm.log / helper.log / daemon.log  nl80211, NM + supplicant,
+#                  root helper, and daemon journals
+set -u
+here=$(cd "$(dirname "$0")" && pwd)
+repo=$(cd "$here/.." && pwd)
+dur=${1:-3600}
+name=${2:-walk-$(date +%Y%m%d-%H%M%S)}
+out="$repo/walk-logs/$name"
+# A second run into the same directory would append to samples.jsonl and
+# repeat http.csv's header, which walk-summary can't read.
+if [ -e "$out" ] && [ -n "$(ls -A "$out" 2>/dev/null)" ]; then
+    echo "walk-log: $out already holds a recording; pick another NAME" >&2
+    exit 2
+fi
+mkdir -p "$out"
+gw=$(ip -4 route show default table main | awk '{print $3; exit}')
+echo "${gw:-}" > "$out/gw"
+date +%s.%N > "$out/start"
+# Each background job in its own process group (job control on), so the
+# trap stops exactly this script's recorders (the ping loops' pings
+# included) and nothing else in the caller's group. On the way out, keep a
+# copy of the join log so the walk's directory is self-contained.
+set -m
+joins="$HOME/.local/state/wifimimo/joins.jsonl"
+cleanup() {
+    for pg in $(jobs -p); do kill -- "-$pg" 2>/dev/null; done
+    [ -f "$joins" ] && cp "$joins" "$out/joins.jsonl"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+iw event -t -f > "$out/events.log" 2>&1 &
+journalctl -f -n 0 -o short-unix -u NetworkManager -u wpa_supplicant > "$out/nm.log" 2>&1 &
+journalctl -f -n 0 -o short-unix -t wifimimo-helper > "$out/helper.log" 2>&1 &
+journalctl --user -f -n 0 -o short-unix -u wifimimo-daemon > "$out/daemon.log" 2>&1 &
+if [ -n "$gw" ]; then
+    for dev in /sys/class/net/*/phy80211; do
+        r=$(basename "$(dirname "$dev")")
+        ( while true; do ping -D -O -n -i 0.2 -W 1 -I "$r" "$gw" 2>&1; sleep 1; done ) \
+            > "$out/ping-$r.log" &
+    done
+fi
+python3 "$here/walk_dump.py" "$out" "$dur" &
+echo "recording to $out for up to $dur s (Ctrl-C to stop)"
+python3 "$here/walk_sample.py" "$out" "$dur"

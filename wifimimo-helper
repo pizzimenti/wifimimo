@@ -1,0 +1,919 @@
+#!/usr/bin/python3 -I
+"""wifimimo-helper — the only privileged part of wifimimo.
+
+Run as root via pkexec (polkit action io.github.pizzimenti.wifimimo.helper)
+or by the NetworkManager dispatcher hook. Accepts exactly:
+
+    wifimimo-helper [--dry-run] multipath enable|disable|apply|status
+    wifimimo-helper [--dry-run] internal  enable|disable|status|sync-rules
+
+It takes no interface names, paths, or numbers from the caller: every fact
+it acts on is discovered from the kernel, NetworkManager, or root-owned
+files under /etc/wifimimo. Output is one JSON line; exit codes:
+0 ok, 1 needs root, 2 usage, 3 not configured, 4 refused, 5 failed.
+
+`-I` keeps the caller's environment, user site-packages and CWD out of
+sys.path; the only extra import path is this file's own (root-owned)
+directory, for wifimimo_shared.
+"""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import wifimimo_shared as shared  # noqa: E402
+
+VERBS = {
+    "multipath": ("enable", "disable", "apply", "check", "status"),
+    "internal": ("enable", "disable", "status", "sync-rules"),
+}
+READ_ONLY_ACTIONS = {"status"}
+
+EXIT_OK, EXIT_ROOT, EXIT_USAGE, EXIT_UNCONFIGURED, EXIT_REFUSED, EXIT_FAILED = 0, 1, 2, 3, 4, 5
+CMD_TIMEOUT_S = 5
+LOCK_TIMEOUT_S = 10
+
+
+class UsageError(Exception):
+    pass
+
+
+class Refused(Exception):
+    pass
+
+
+def parse_argv(argv: list[str]) -> tuple[bool, str, str]:
+    """Strictly [--dry-run] VERB ACTION; anything else is a usage error."""
+    args = list(argv)
+    dry_run = False
+    if args and args[0] == "--dry-run":
+        dry_run = True
+        args = args[1:]
+    if len(args) != 2:
+        raise UsageError("usage: wifimimo-helper [--dry-run] VERB ACTION")
+    verb, action = args
+    if verb not in VERBS or action not in VERBS[verb]:
+        raise UsageError(f"unknown command: {verb} {action}")
+    return dry_run, verb, action
+
+
+# ---------------------------------------------------------------------------
+# Execution context (injectable for tests)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Ctx:
+    sys_root: Path = Path("/sys")
+    proc_root: Path = Path("/proc")
+    etc_dir: Path = shared.ETC_DIR
+    run_dir: Path = shared.RUN_DIR
+    udev_rule: Path = shared.INTERNAL_UDEV_RULE
+    udev_rules_dir: Path = Path("/etc/udev/rules.d")
+    dry_run: bool = False
+    settle_s: float = 5.0  # how long `internal enable` waits for the card to appear
+    log: list = field(default_factory=list)
+
+    # -- process execution -------------------------------------------------
+    def query(self, argv: list[str]) -> tuple[int, str, str]:
+        """Read-only command: always runs, even in --dry-run."""
+        try:
+            res = subprocess.run(argv, capture_output=True, text=True,
+                                 timeout=CMD_TIMEOUT_S, check=False)
+            return res.returncode, res.stdout, res.stderr
+        except (OSError, subprocess.SubprocessError) as exc:
+            return 127, "", str(exc)
+
+    def query_json(self, argv: list[str]):
+        rc, out, _ = self.query(argv)
+        if rc != 0:
+            return []
+        try:
+            return json.loads(out or "[]")
+        except ValueError:
+            return []
+
+    def mutate(self, argv: list[str]) -> tuple[int, str]:
+        self.log.append(argv)
+        if self.dry_run:
+            return 0, ""
+        rc, _, err = self.query(argv)
+        return rc, err.strip()
+
+    def write(self, path: Path, value: str) -> None:
+        self.log.append(["write", str(path), value])
+        if self.dry_run:
+            return
+        path.write_text(value + "\n", encoding="utf-8")
+
+
+def syslog(message: str) -> None:
+    # NOTICE: the dead-man unit runs with LogLevelMax=notice, which drops
+    # syslog()'s default INFO, hand-backs included.
+    try:
+        import syslog as _syslog
+        _syslog.openlog("wifimimo-helper")
+        _syslog.syslog(_syslog.LOG_NOTICE, message)
+    except Exception:
+        pass
+
+
+def _sysfs(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Multipath: discovery
+# ---------------------------------------------------------------------------
+
+
+def wifi_netdevs(ctx: Ctx) -> list[dict]:
+    """Every cfg80211 netdev with its link state and permanent MAC."""
+    base = ctx.sys_root / "class" / "net"
+    result = []
+    try:
+        names = sorted(p.name for p in base.iterdir())
+    except OSError:
+        return result
+    for name in names:
+        node = base / name
+        if not (node / "phy80211").exists():
+            continue
+        result.append({
+            "iface": name,
+            "perm_mac": (_sysfs(node / "phy80211" / "macaddress") or _sysfs(node / "address")).lower(),
+            "operstate": _sysfs(node / "operstate"),
+            "carrier": _sysfs(node / "carrier") == "1",
+        })
+    return result
+
+
+def _addrs(entries) -> dict[str, tuple[str, str]]:
+    import ipaddress
+    out: dict[str, tuple[str, str]] = {}
+    for link in entries if isinstance(entries, list) else []:
+        for addr in link.get("addr_info", []) or []:
+            if addr.get("family") == "inet" and addr.get("scope") == "global":
+                try:
+                    net = ipaddress.ip_interface(f"{addr['local']}/{addr['prefixlen']}").network
+                except (KeyError, ValueError):
+                    continue
+                out.setdefault(link.get("ifname", ""), (addr["local"], str(net)))
+    return out
+
+
+def _gateways(entries) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for route in entries if isinstance(entries, list) else []:
+        if route.get("dst") == "default" and route.get("dev") and route.get("gateway"):
+            out.setdefault(route["dev"], route["gateway"])
+    return out
+
+
+def nm_connectivity_ok(ctx: Ctx, iface: str) -> tuple[bool, str]:
+    """NM says full (4) or unknown (0 / checks disabled). Portal/limited/none fail."""
+    if shutil.which("nmcli") is None:
+        return True, ""
+    rc, out, _ = ctx.query(["nmcli", "-g", "GENERAL.IP4-CONNECTIVITY", "device", "show", iface])
+    if rc != 0:
+        return True, ""
+    value = out.strip().split(" ", 1)[0]
+    if value in ("", "0", "4"):
+        return True, ""
+    names = {"1": "no connectivity", "2": "captive portal", "3": "limited connectivity"}
+    return False, names.get(value, f"connectivity {out.strip()}")
+
+
+def gateway_reachable(ctx: Ctx, iface: str, gw: str) -> bool:
+    # Always a real ping through the radio: the neighbour cache keeps a dead
+    # link's gateway REACHABLE / STALE for up to a minute (live 2026-09-25:
+    # an associated radio passing no traffic stayed a multipath member).
+    rc, _, _ = ctx.query(["ping", "-n", "-q", "-c", "1", "-W", "1", "-I", iface, gw])
+    return rc == 0
+
+
+def discover_members(ctx: Ctx) -> tuple[list[dict], list[dict], list[dict]]:
+    """Classify wifi radios. Returns (healthy, excluded, routable).
+
+    routable: up, with an address and an NM default route. Every routable
+    radio gets its own table, source rule and loose rp_filter, *including*
+    ones not yet healthy: with several radios in one subnet, a radio without
+    them has its replies dropped by strict reverse-path filtering, so it can
+    never pass NM's connectivity check and would stay excluded forever
+    (found live 2026-09-24).
+    healthy: routable + NM full/unknown connectivity + reachable gateway.
+    Only these become ECMP nexthops. All lists sorted by permanent MAC.
+    """
+    addrs = _addrs(ctx.query_json(["ip", "-j", "-4", "addr", "show"]))
+    gws = _gateways(ctx.query_json(["ip", "-j", "-4", "route", "show", "default", "table", "main"]))
+    routable, excluded = [], []
+    for dev in wifi_netdevs(ctx):
+        name = dev["iface"]
+        if dev["operstate"] != "up" or not dev["carrier"]:
+            excluded.append({"iface": name, "reason": "not connected"})
+            continue
+        if name not in addrs:
+            excluded.append({"iface": name, "reason": "no IPv4 address"})
+            continue
+        if name not in gws:
+            excluded.append({"iface": name, "reason": "no default route"})
+            continue
+        ip, subnet = addrs[name]
+        routable.append({"iface": name, "perm_mac": dev["perm_mac"], "ip": ip,
+                         "subnet": subnet, "gw": gws[name]})
+    routable.sort(key=lambda m: m["perm_mac"])
+    if len(routable) > shared.MAX_RADIOS:
+        for extra in routable[shared.MAX_RADIOS:]:
+            excluded.append({"iface": extra["iface"], "reason": "too many radios"})
+        routable = routable[:shared.MAX_RADIOS]
+    healthy = []
+    for radio in routable:
+        ok, why = nm_connectivity_ok(ctx, radio["iface"])
+        if not ok:
+            excluded.append({"iface": radio["iface"], "reason": why})
+        elif not gateway_reachable(ctx, radio["iface"], radio["gw"]):
+            excluded.append({"iface": radio["iface"], "reason": "gateway unreachable"})
+        else:
+            healthy.append(radio)
+    return healthy, excluded, routable
+
+
+# ---------------------------------------------------------------------------
+# Multipath: pure planning
+# ---------------------------------------------------------------------------
+
+
+def _rule_table(rule: dict) -> int | None:
+    try:
+        return int(rule.get("table"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _rule_del_argv(rule: dict) -> list[str]:
+    argv = ["ip", "-4", "rule", "del", "priority", str(rule.get("priority"))]
+    src = rule.get("src")
+    if src and src != "all":
+        argv += ["from", f"{src}/{rule['srclen']}" if rule.get("srclen") is not None else src]
+    table = rule.get("table")
+    if table is not None:
+        argv += ["lookup", str(table)]
+    if rule.get("suppress_prefixlen") is not None:
+        argv += ["suppress_prefixlength", str(rule["suppress_prefixlen"])]
+    return argv
+
+
+def desired_rules(members: list[dict]) -> list[dict]:
+    rules = [{"priority": shared.PRIO_SUPPRESS_MAIN, "src": "all", "table": "main",
+              "suppress_prefixlen": 0}]
+    for i, m in enumerate(members):
+        rules.append({"priority": shared.PRIO_RADIO_BASE + i, "src": m["ip"],
+                      "table": str(shared.RADIO_TABLE_BASE + i)})
+    rules.append({"priority": shared.PRIO_ECMP, "src": "all", "table": str(shared.ECMP_TABLE)})
+    return rules
+
+
+def _same_rule(a: dict, b: dict) -> bool:
+    return (
+        int(a.get("priority", -1)) == int(b.get("priority", -2))
+        and str(a.get("src", "all")) == str(b.get("src", "all"))
+        and str(a.get("table")) == str(b.get("table"))
+        and a.get("suppress_prefixlen") == b.get("suppress_prefixlen")
+    )
+
+
+def _rule_add_argv(rule: dict) -> list[str]:
+    argv = ["ip", "-4", "rule", "add", "priority", str(rule["priority"])]
+    if rule.get("src", "all") != "all":
+        argv += ["from", rule["src"]]
+    argv += ["lookup", str(rule["table"])]
+    if rule.get("suppress_prefixlen") is not None:
+        argv += ["suppress_prefixlength", str(rule["suppress_prefixlen"])]
+    argv += ["protocol", str(shared.RT_PROTO)]
+    return argv
+
+
+def owned_rules(rules) -> list[dict]:
+    return [
+        r for r in (rules if isinstance(rules, list) else [])
+        if shared.owned_rule_priority(int(r.get("priority", -1)), _rule_table(r))
+    ]
+
+
+def foreign_conflicts(rules, routes_all, radio_tables: bool = True) -> list[str]:
+    """Things at wifimimo's priorities / tables that wifimimo didn't create.
+
+    `radio_tables` also reports foreign routes in tables 101-116, which an
+    apply would overwrite; a teardown only ever deletes its own routes there,
+    so it passes False and leaves a VPN's policy tables alone without
+    refusing."""
+    problems = []
+    for r in owned_rules(rules):
+        if not _rule_is_ours(r):
+            problems.append(f"rule {r.get('priority')} belongs to protocol {r.get('protocol')}")
+    adopted = _adopted_tables(rules)
+    for route in routes_all if isinstance(routes_all, list) else []:
+        table = _route_table(route)
+        if _route_is_ours(route, adopted):
+            continue
+        if table == shared.ECMP_TABLE or (radio_tables and _owned_table(table)):
+            problems.append(f"table {table} holds a foreign route ({route.get('dst')})")
+    return problems
+
+
+_route_table = shared.route_table
+
+
+def _owned_table(table: int | None) -> bool:
+    return table is not None and (
+        table == shared.ECMP_TABLE or shared.RADIO_TABLE_BASE <= table <= shared.RADIO_TABLE_MAX
+    )
+
+
+def _adopted_tables(rules) -> set[int]:
+    """Radio tables a pre-v1.0 hand-made rule (prio 5300-5399) points at: their
+    untagged routes are that old setup's, and wifimimo takes them over."""
+    out = set()
+    for r in owned_rules(rules):
+        if shared.LEGACY_PRIO_MIN <= int(r.get("priority", -1)) <= shared.LEGACY_PRIO_MAX:
+            table = _rule_table(r)
+            if table is not None:
+                out.add(table)
+    return out
+
+
+def _rule_is_ours(rule: dict) -> bool:
+    """A rule at one of wifimimo's priorities that wifimimo made: tagged with
+    its protocol (or untagged), or a pre-v1.0 hand-made one being adopted."""
+    prio = int(rule.get("priority", -1))
+    legacy = shared.LEGACY_PRIO_MIN <= prio <= shared.LEGACY_PRIO_MAX
+    return legacy or rule.get("protocol") is None or shared.proto_is_ours(rule.get("protocol"))
+
+
+def _route_is_ours(route: dict, adopted: set[int]) -> bool:
+    """Tagged with wifimimo's protocol, or in a table adopted from pre-v1.0.
+    Anything else in 100-116 belongs to someone else and is never deleted."""
+    return shared.proto_is_ours(route.get("protocol")) or _route_table(route) in adopted
+
+
+def desired_sysctls(members: list[dict]) -> dict[str, str]:
+    want = {
+        "net/ipv4/fib_multipath_hash_policy": "1",
+        "net/ipv4/conf/all/ignore_routes_with_linkdown": "1",
+        "net/ipv4/conf/default/ignore_routes_with_linkdown": "1",
+    }
+    for m in members:
+        base = f"net/ipv4/conf/{m['iface']}"
+        want[f"{base}/ignore_routes_with_linkdown"] = "1"
+        want[f"{base}/rp_filter"] = "2"
+        want[f"{base}/arp_ignore"] = "1"
+        want[f"{base}/arp_announce"] = "2"
+    return want
+
+
+def plan_apply(members: list[dict], rules, routes_all, sysctl_now: dict[str, str],
+               ecmp: list[dict] | None = None) -> list[tuple]:
+    """Ordered plan: ("cmd", argv) | ("sysctl", key, value).
+
+    `members` (the routable radios) get tables, source rules and sysctls;
+    `ecmp` (the healthy subset, default: all members) become nexthops. With
+    fewer than two healthy radios the multipath route is removed but the
+    per-radio routing stays, so the others can pass their connectivity check
+    and join on a later apply.
+
+    Order matters for never dropping traffic: build radio tables and rules,
+    set sysctls, then swap the ECMP default in ONE `route replace`, and only
+    then remove stale owned state.
+    """
+    ecmp = members if ecmp is None else ecmp
+    plan: list[tuple] = []
+    tables_wanted: dict[int, set[tuple[str, str]]] = {}
+    existing = owned_rules(rules)
+    adopted = _adopted_tables(rules)
+
+    # 0. adopt pre-v1.0 hand-made rules (prio 5300-5399) by deleting them
+    #    first: they sit ahead of ours and point old addresses at tables
+    #    this plan is about to reassign.
+    legacy = [r for r in existing
+              if shared.LEGACY_PRIO_MIN <= int(r.get("priority", -1)) <= shared.LEGACY_PRIO_MAX]
+    for rule in legacy:
+        plan.append(("cmd", _rule_del_argv(rule)))
+    existing = [r for r in existing if r not in legacy]
+
+    # 1. per-radio tables
+    for i, m in enumerate(members):
+        table = shared.RADIO_TABLE_BASE + i
+        tables_wanted[table] = {(m["subnet"], m["iface"]), ("default", m["iface"])}
+        plan.append(("cmd", ["ip", "-4", "route", "replace", m["subnet"], "dev", m["iface"],
+                             "src", m["ip"], "table", str(table), "proto", str(shared.RT_PROTO)]))
+        plan.append(("cmd", ["ip", "-4", "route", "replace", "default", "via", m["gw"],
+                             "dev", m["iface"], "table", str(table), "proto", str(shared.RT_PROTO)]))
+
+    # 2. rules (add missing)
+    wanted = desired_rules(members)
+    for rule in wanted:
+        if not any(_same_rule(rule, have) for have in existing):
+            plan.append(("cmd", _rule_add_argv(rule)))
+
+    # 3. sysctls
+    for key, value in desired_sysctls(members).items():
+        if sysctl_now.get(key) != value:
+            plan.append(("sysctl", key, value))
+
+    # 4. the one change that moves new flows: atomic swap of the table-100
+    #    default. Two or more healthy radios: multipath. Exactly one: a
+    #    single-nexthop route, i.e. failover: all new flows go to the one
+    #    radio that works, instead of NM's lowest-metric default, which may
+    #    point at a radio that's associated but broken (seen on the walk).
+    #    None: removal, so NM's defaults take over.
+    if len(ecmp) >= 1:
+        swap = ["ip", "-4", "route", "replace", "default", "table", str(shared.ECMP_TABLE),
+                "proto", str(shared.RT_PROTO)]
+        for m in ecmp:
+            swap += ["nexthop", "via", m["gw"], "dev", m["iface"], "weight", "1"]
+        plan.append(("cmd", swap))
+    elif any(_route_table(r) == shared.ECMP_TABLE and shared.proto_is_ours(r.get("protocol"))
+             for r in (routes_all if isinstance(routes_all, list) else [])):
+        plan.append(("cmd", ["ip", "-4", "route", "del", "default", "table", str(shared.ECMP_TABLE)]))
+
+    # 5. stale cleanup
+    for have in existing:
+        if not any(_same_rule(have, rule) for rule in wanted):
+            plan.append(("cmd", _rule_del_argv(have)))
+    for route in routes_all if isinstance(routes_all, list) else []:
+        table = _route_table(route)
+        if not _owned_table(table) or table == shared.ECMP_TABLE or not _route_is_ours(route, adopted):
+            continue
+        key = (route.get("dst"), route.get("dev"))
+        if key not in tables_wanted.get(table, set()):
+            argv = ["ip", "-4", "route", "del", str(route.get("dst")), "table", str(table)]
+            if route.get("dev"):
+                argv += ["dev", route["dev"]]
+            plan.append(("cmd", argv))
+    return plan
+
+
+def plan_teardown(rules, routes_all) -> list[tuple]:
+    """ECMP route first (NM's defaults take over instantly), then the rest.
+
+    Only wifimimo's own state goes: this runs every 20 s from the dead-man
+    timer (multipath off, or a check that failed or was refused), and a VPN's
+    policy routing may share the numbers. Rules at our priorities that
+    another protocol made stay; radio tables lose only wifimimo's routes
+    (`flush ... proto 211`), except a table adopted from pre-v1.0 hand-made
+    rules, which is flushed whole."""
+    plan: list[tuple] = []
+    routes = routes_all if isinstance(routes_all, list) else []
+    adopted = _adopted_tables(rules)
+    if any(_route_table(r) == shared.ECMP_TABLE and shared.proto_is_ours(r.get("protocol"))
+           for r in routes):
+        plan.append(("cmd", ["ip", "-4", "route", "del", "default", "table", str(shared.ECMP_TABLE)]))
+    for rule in owned_rules(rules):
+        if _rule_is_ours(rule):
+            plan.append(("cmd", _rule_del_argv(rule)))
+    tables = {_route_table(r) for r in routes
+              if _owned_table(_route_table(r)) and _route_is_ours(r, adopted)}
+    for table in sorted(tables - {shared.ECMP_TABLE}):
+        argv = ["ip", "-4", "route", "flush", "table", str(table)]
+        if table not in adopted:
+            argv += ["proto", str(shared.RT_PROTO)]
+        plan.append(("cmd", argv))
+    plan.append(("restore-sysctls",))
+    return plan
+
+
+# ---------------------------------------------------------------------------
+# Multipath: execution
+# ---------------------------------------------------------------------------
+
+
+def read_sysctls(ctx: Ctx, keys) -> dict[str, str]:
+    return {k: _sysfs(ctx.proc_root / "sys" / k) for k in keys}
+
+
+def _saved_sysctls(ctx: Ctx) -> dict[str, str]:
+    try:
+        data = json.loads((ctx.run_dir / shared.SYSCTL_SAVED.name).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_json(ctx: Ctx, path: Path, data) -> None:
+    if ctx.dry_run:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data) + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    tmp.replace(path)
+
+
+def _is_ecmp_swap(argv: list[str]) -> bool:
+    return argv[:7] == ["ip", "-4", "route", "replace", "default", "table", str(shared.ECMP_TABLE)]
+
+
+def execute(ctx: Ctx, plan: list[tuple]) -> list[str]:
+    """Run a plan. Returns error strings (empty = success).
+
+    An apply plan stops at the first error *before* the ECMP swap, so a
+    half-built layout never goes live; the previous route stays in place.
+    A teardown plan (no swap step) is best effort and always runs to the end.
+    """
+    errors: list[str] = []
+    saved = _saved_sysctls(ctx)
+    saved_dirty = False
+    has_swap = any(step[0] == "cmd" and _is_ecmp_swap(step[1]) for step in plan)
+    swapped = False
+    for step in plan:
+        kind = step[0]
+        if kind == "cmd":
+            argv = step[1]
+            is_swap = _is_ecmp_swap(argv)
+            if errors and has_swap and not swapped:
+                break
+            rc, err = ctx.mutate(argv)
+            if rc != 0 and not ("del" in argv and ("No such" in err or "Cannot find" in err)):
+                errors.append(f"{' '.join(argv)}: {err or rc}")
+            swapped = swapped or is_swap
+        elif kind == "sysctl":
+            _, key, value = step
+            path = ctx.proc_root / "sys" / key
+            if key not in saved:
+                saved[key] = _sysfs(path)
+                saved_dirty = True
+            try:
+                ctx.write(path, value)
+            except OSError as exc:
+                errors.append(f"sysctl {key}={value}: {exc}")
+        elif kind == "restore-sysctls":
+            for key, value in saved.items():
+                if value == "":
+                    continue
+                try:
+                    ctx.write(ctx.proc_root / "sys" / key, value)
+                except OSError:
+                    pass  # interface gone: nothing to restore
+            if not ctx.dry_run:
+                try:
+                    (ctx.run_dir / shared.SYSCTL_SAVED.name).unlink()
+                except OSError:
+                    pass
+            saved, saved_dirty = {}, False
+    if saved_dirty:
+        _write_json(ctx, ctx.run_dir / shared.SYSCTL_SAVED.name, saved)
+    return errors
+
+
+def multipath_snapshot(ctx: Ctx) -> tuple:
+    rules = ctx.query_json(["ip", "-j", "-4", "rule", "show"])
+    routes_all = ctx.query_json(["ip", "-j", "-4", "route", "show", "table", "all"])
+    return rules, routes_all
+
+
+def multipath_apply(ctx: Ctx, desired: bool) -> dict:
+    rules, routes_all = multipath_snapshot(ctx)
+    conflicts = foreign_conflicts(rules, routes_all, radio_tables=desired)
+    if conflicts:
+        raise Refused("; ".join(conflicts))
+    result = {"desired": desired, "active": False, "members": [], "excluded": [],
+              "reason": "", "error": "", "applied_at": int(time.time())}
+    if not desired:
+        plan = plan_teardown(rules, routes_all)
+        result["plan"] = plan
+        errors = execute(ctx, plan)
+        result["error"] = "; ".join(errors)
+        return result
+
+    def build() -> tuple[list[tuple], list[str], list[dict], str]:
+        healthy, excluded, routable = discover_members(ctx)
+        if len(routable) < 2:
+            return plan_teardown(rules, routes_all), [], excluded, "needs ≥2 connected radios"
+        sysctl_now = read_sysctls(ctx, desired_sysctls(routable).keys())
+        plan = plan_apply(routable, rules, routes_all, sysctl_now, ecmp=healthy)
+        if len(healthy) == 1:
+            return (plan, [], excluded,
+                    f"failover: only {healthy[0]['iface']} is healthy, all new connections use it")
+        if not healthy:
+            return plan, [], excluded, "waiting for radios to reach full connectivity"
+        return plan, [m["iface"] for m in healthy], excluded, ""
+
+    plan, members, excluded, reason = build()
+    errors = execute(ctx, plan)
+    if errors and any("Cannot find device" in e for e in errors):
+        # rename / hotplug race: rediscover once
+        time.sleep(1)
+        rules, routes_all = multipath_snapshot(ctx)
+        plan, members, excluded, reason = build()
+        errors = execute(ctx, plan)
+    result.update(plan=plan, members=members, excluded=excluded, reason=reason,
+                  error="; ".join(errors))
+    result["active"] = bool(members) and not errors
+    return result
+
+
+def multipath_check(ctx: Ctx, desired: bool) -> dict:
+    """Dead-man (root timer, every 20 s, independent of the user daemon):
+    re-run the membership check with fresh gateway pings so a radio that
+    stopped passing traffic leaves the ECMP route even if nothing else
+    notices; if checking or applying fails for any reason, tear our routing
+    down so NetworkManager's own routes carry everything. The on-switch
+    stays on: the next good check rebuilds it."""
+    try:
+        result = multipath_apply(ctx, desired)
+        failure = result["error"]
+    except Exception as exc:  # the dead-man must not die with the thing it guards
+        result = {"desired": desired, "active": False, "members": [], "excluded": [],
+                  "reason": "", "error": "", "applied_at": int(time.time()), "plan": []}
+        failure = f"{exc.__class__.__name__}: {exc}"
+    if failure:
+        rules, routes_all = multipath_snapshot(ctx)
+        plan = plan_teardown(rules, routes_all)
+        errors = execute(ctx, plan)
+        result.update(plan=result.get("plan", []) + plan, active=False, members=[],
+                      reason=f"dead-man: routing handed back to NetworkManager ({failure})",
+                      error="; ".join(errors))
+    result["quiet"] = not failure
+    return result
+
+
+def _check_changed(prev: dict, result: dict) -> bool:
+    """Apply always re-issues its idempotent `replace` commands, so the plan
+    is never empty; what matters is whether membership or the verdict moved."""
+    def key(r: dict) -> tuple:
+        return (tuple(r.get("members") or []),
+                tuple(sorted(e.get("iface", "") for e in r.get("excluded") or [])),
+                r.get("reason", ""), bool(r.get("error")), bool(r.get("desired")))
+    return not isinstance(prev, dict) or key(prev) != key(result)
+
+
+def cmd_multipath(ctx: Ctx, action: str) -> tuple[int, dict]:
+    flag = ctx.etc_dir / shared.MULTIPATH_FLAG.name
+    if action == "check":
+        result = multipath_check(ctx, flag.exists())
+        try:
+            prev = json.loads((ctx.run_dir / shared.MULTIPATH_STATUS.name).read_text())
+        except (OSError, ValueError):
+            prev = None
+        # Log / write status only when membership or the verdict moved: a
+        # failure that persists (a refusal, say) is logged once, not every 20 s.
+        result["quiet"] = not _check_changed(prev, result)
+        if not ctx.dry_run and not result["quiet"]:
+            status = {k: v for k, v in result.items() if k not in ("plan", "quiet")}
+            _write_json(ctx, ctx.run_dir / shared.MULTIPATH_STATUS.name, status)
+        result["plan"] = [list(s) for s in result["plan"]] if ctx.dry_run else len(result["plan"])
+        return (EXIT_FAILED if result["error"] else EXIT_OK), result
+    if action == "status":
+        _, routes_all = multipath_snapshot(ctx)
+        members = shared.ecmp_members(routes_all)
+        return EXIT_OK, {"desired": flag.exists(), "active": bool(members), "members": members}
+    if action == "enable":
+        desired = True
+        if not ctx.dry_run:
+            ctx.etc_dir.mkdir(parents=True, exist_ok=True)
+            flag.touch()
+    elif action == "disable":
+        desired = False
+        if not ctx.dry_run:
+            try:
+                flag.unlink()
+            except FileNotFoundError:
+                pass
+    else:
+        desired = flag.exists()
+    result = multipath_apply(ctx, desired)
+    if not ctx.dry_run:
+        status = {k: v for k, v in result.items() if k != "plan"}
+        _write_json(ctx, ctx.run_dir / shared.MULTIPATH_STATUS.name, status)
+    result["plan"] = [list(step) for step in result["plan"]] if ctx.dry_run else len(result["plan"])
+    return (EXIT_FAILED if result["error"] else EXIT_OK), result
+
+
+# ---------------------------------------------------------------------------
+# Internal card
+# ---------------------------------------------------------------------------
+
+
+UDEV_HEADER = "# Generated by wifimimo-helper from /etc/wifimimo/internal.conf. Do not edit.\n"
+
+
+def render_udev_rules(entries: list[dict], modprobe: str) -> str:
+    flag = str(shared.INTERNAL_FLAG)
+    lines = [
+        UDEV_HEADER.rstrip("\n"),
+        'ACTION!="add", GOTO="wifimimo_internal_end"',
+        'SUBSYSTEM!="pci", GOTO="wifimimo_internal_end"',
+    ]
+    for e in entries:
+        match = f'ATTR{{vendor}}=="0x{e["vendor"]}", ATTR{{device}}=="0x{e["device"]}"'
+        lines.append(f'{match}, TEST!="{flag}", ATTR{{remove}}="1", GOTO="wifimimo_internal_end"')
+        lines.append(f'{match}, TEST=="{flag}", RUN+="{modprobe} {e["driver"]}"')
+    lines.append('LABEL="wifimimo_internal_end"')
+    return "\n".join(lines) + "\n"
+
+
+def legacy_remove_rules(ctx: Ctx, entries: list[dict]) -> list[str]:
+    """Hand-made udev rules that would remove a managed card regardless of our flag."""
+    hits = []
+    try:
+        files = sorted(ctx.udev_rules_dir.glob("*.rules"))
+    except OSError:
+        return hits
+    for path in files:
+        if path.resolve() == ctx.udev_rule.resolve():
+            continue
+        text = _sysfs(path)
+        if 'ATTR{remove}' not in text:
+            continue
+        if any(f'"0x{e["vendor"]}"' in text and f'"0x{e["device"]}"' in text for e in entries):
+            hits.append(str(path))
+    return hits
+
+
+def internal_status(ctx: Ctx, entries: list[dict]) -> dict:
+    devices = shared.find_internal_devices(entries, ctx.sys_root)
+    return {
+        "managed": bool(entries),
+        "desired": (ctx.etc_dir / shared.INTERNAL_FLAG.name).exists(),
+        "present": bool(devices),
+        "bound": any(d["bound_driver"] for d in devices),
+        "iface": devices[0]["iface"] if devices else "",
+        "legacy_rules": legacy_remove_rules(ctx, entries),
+    }
+
+
+def sync_rules(ctx: Ctx, entries: list[dict]) -> bool:
+    """Write the generated rule if it changed. Returns True when rewritten."""
+    if not entries:
+        if ctx.udev_rule.exists():
+            ctx.log.append(["rm", str(ctx.udev_rule)])
+            if not ctx.dry_run:
+                ctx.udev_rule.unlink()
+            return True
+        return False
+    modprobe = shutil.which("modprobe", path="/usr/bin:/usr/sbin:/bin:/sbin") or "/usr/bin/modprobe"
+    text = render_udev_rules(entries, modprobe)
+    if _sysfs(ctx.udev_rule) + "\n" == text:
+        return False
+    ctx.log.append(["write", str(ctx.udev_rule)])
+    if not ctx.dry_run:
+        tmp = ctx.udev_rule.with_name(ctx.udev_rule.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.chmod(tmp, 0o644)
+        tmp.replace(ctx.udev_rule)
+    return True
+
+
+def internal_enable(ctx: Ctx, entries: list[dict]) -> list[str]:
+    errors = []
+    if not ctx.dry_run:
+        ctx.etc_dir.mkdir(parents=True, exist_ok=True)
+        (ctx.etc_dir / shared.INTERNAL_FLAG.name).touch()
+    present = {d["id"] for d in shared.find_internal_devices(entries, ctx.sys_root)}
+    for e in entries:
+        if e["id"] not in present:
+            bridge = ctx.sys_root / "bus" / "pci" / "devices" / e["bridge"] / "rescan" if e["bridge"] else None
+            target = bridge if bridge is not None and bridge.exists() else ctx.sys_root / "bus" / "pci" / "rescan"
+            try:
+                ctx.write(target, "1")
+            except OSError as exc:
+                errors.append(f"rescan: {exc}")
+    deadline = time.monotonic() + (0 if ctx.dry_run else ctx.settle_s)
+    while True:
+        present = {d["id"] for d in shared.find_internal_devices(entries, ctx.sys_root)}
+        if all(e["id"] in present for e in entries) or time.monotonic() >= deadline:
+            break
+        time.sleep(0.25)
+    for driver in sorted({e["driver"] for e in entries}):
+        rc, err = ctx.mutate(["modprobe", driver])
+        if rc != 0:
+            errors.append(f"modprobe {driver}: {err or rc}")
+    return errors
+
+
+def internal_disable(ctx: Ctx, entries: list[dict]) -> list[str]:
+    errors = []
+    if not ctx.dry_run:
+        try:
+            (ctx.etc_dir / shared.INTERNAL_FLAG.name).unlink()
+        except FileNotFoundError:
+            pass
+    # Never rmmod: e.g. mt7925_common / mt792x_lib are shared with USB sticks.
+    for dev in shared.find_internal_devices(entries, ctx.sys_root):
+        try:
+            ctx.write(ctx.sys_root / "bus" / "pci" / "devices" / dev["addr"] / "remove", "1")
+        except OSError as exc:
+            errors.append(f"remove {dev['addr']}: {exc}")
+    return errors
+
+
+def cmd_internal(ctx: Ctx, action: str) -> tuple[int, dict]:
+    try:
+        entries = shared.parse_internal_conf(
+            (ctx.etc_dir / shared.INTERNAL_CONF.name).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        entries = []
+    except shared.ConfigError as exc:
+        return EXIT_UNCONFIGURED, {"error": str(exc)}
+    if action == "status":
+        return EXIT_OK, internal_status(ctx, entries)
+    if action == "sync-rules":
+        changed = sync_rules(ctx, entries)
+        if changed:
+            ctx.mutate(["udevadm", "control", "--reload"])
+        return EXIT_OK, {"changed": changed, "entries": len(entries)}
+    if not entries:
+        return EXIT_UNCONFIGURED, {"error": "no internal card configured (install.sh --manage-internal)"}
+    sync_rules(ctx, entries)
+    errors = internal_enable(ctx, entries) if action == "enable" else internal_disable(ctx, entries)
+    result = internal_status(ctx, entries)
+    if ctx.dry_run:
+        result["desired"] = action == "enable"
+        result["plan"] = ctx.log
+    result["error"] = "; ".join(errors)
+    if result["legacy_rules"] and action == "enable":
+        result["error"] = (result["error"] + "; " if result["error"] else "") + \
+            "legacy udev rule still removes the card at boot: " + ", ".join(result["legacy_rules"])
+    return (EXIT_FAILED if errors else EXIT_OK), result
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+class Lock:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.handle = None
+
+    def __enter__(self) -> "Lock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.path.parent, 0o755)
+        self.handle = open(self.path, "a")
+        deadline = time.monotonic() + LOCK_TIMEOUT_S
+        while True:
+            try:
+                fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise Refused("another wifimimo-helper run holds the lock")
+                time.sleep(0.1)
+
+    def __exit__(self, *exc) -> bool:
+        if self.handle:
+            self.handle.close()
+        return False
+
+
+def emit(code: int, payload: dict) -> int:
+    payload = dict(payload)
+    payload.setdefault("ok", code == EXIT_OK)
+    print(json.dumps(payload, ensure_ascii=False, default=str))
+    return code
+
+
+def main(argv: list[str]) -> int:
+    os.environ.clear()
+    os.environ.update({"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C"})
+    os.umask(0o022)
+    try:
+        dry_run, verb, action = parse_argv(argv)
+    except UsageError as exc:
+        return emit(EXIT_USAGE, {"error": str(exc)})
+    read_only = dry_run or action in READ_ONLY_ACTIONS
+    if not read_only and os.geteuid() != 0:
+        return emit(EXIT_ROOT, {"error": "must run as root (pkexec)"})
+    ctx = Ctx(dry_run=dry_run)
+    handler = cmd_multipath if verb == "multipath" else cmd_internal
+    try:
+        if read_only:
+            code, result = handler(ctx, action)
+        else:
+            with Lock(ctx.run_dir / shared.HELPER_LOCK.name):
+                code, result = handler(ctx, action)
+                if not result.pop("quiet", False):   # the 20 s dead-man logs only changes
+                    syslog(f"{verb} {action}: {'ok' if code == 0 else result.get('error', code)}"
+                           + (f" ({result['reason']})" if result.get("reason", "").startswith("dead-man")
+                              else ""))
+    except Refused as exc:
+        return emit(EXIT_REFUSED, {"error": str(exc)})
+    result.update(verb=verb, action=action, dry_run=dry_run)
+    return emit(code, result)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Summarise a walk recorded by tools/walk-log.
+
+usage: tools/walk-summary walk-logs/<name> [--all]
+
+Prints every change of radio placement / multipath members / parked radios
+with the planner's reason (--all: every sample), new-connection probe
+failures and outages longer than 2.5 s, and the joins from the follower's
+join log that fall inside the walk.
+"""
+import json
+import sys
+import time
+from pathlib import Path
+
+
+def hms(t: float) -> str:
+    return time.strftime("%H:%M:%S", time.localtime(t))
+
+
+def main(argv: list[str]) -> int:
+    if not argv:
+        print(__doc__.strip())
+        return 2
+    out = Path(argv[0])
+    show_all = "--all" in argv[1:]
+    rows = [json.loads(line) for line in (out / "samples.jsonl").open()]
+    if not rows:
+        print("no samples")
+        return 1
+    t0, t1 = rows[0]["t"], rows[-1]["t"]
+    print(f"{len(rows)} samples, {hms(t0)} -> {hms(t1)}\n")
+
+    prev = None
+    for r in rows:
+        parts = []
+        for dev, v in sorted(r["radios"].items()):
+            sta = v.get("sta", {})
+            sig = sta.get("signal")
+            parts.append(f"{dev}:{sta.get('bssid', '-')[-5:]}" + (f"/{sig}" if sig else ""))
+        nm = (r.get("daemon") or {}).get("nm") or {}
+        key = (tuple(p.split("/")[0] for p in parts), tuple(nm.get("parked") or []),
+               tuple(sorted(r.get("ecmp") or [])))
+        if show_all or key != prev:
+            print(hms(r["t"]), " ".join(parts), "| ecmp", sorted(r.get("ecmp") or []),
+                  "| parked", nm.get("parked") or [], "|", (nm.get("plan") or "")[:70])
+            prev = key
+
+    lines = list((out / "http.csv").open())[1:]
+    n = bad = 0
+    fail, spans = None, []
+    for line in lines:
+        t, code, *_ = line.strip().split(",")
+        t = float(t)
+        n += 1
+        if code != "204":
+            bad += 1
+            fail = fail or t
+        elif fail:
+            spans.append((fail, t))
+            fail = None
+    if fail:
+        spans.append((fail, None))
+    print(f"\nnew-connection probes: {n}, failed {bad}")
+    for a, b in spans:
+        if b is None or b - a > 2.5:
+            print(f"  outage {hms(a)} " + (f"{b - a:.0f} s" if b else "(still failing at the end)"))
+
+    # walk-log copies the join log into the walk; older walks fall back to
+    # this machine's live log
+    joins = out / "joins.jsonl"
+    if not joins.exists():
+        joins = Path.home() / ".local" / "state" / "wifimimo" / "joins.jsonl"
+    if joins.exists():
+        print("\njoins:")
+        for line in joins.open():
+            j = json.loads(line)
+            if t0 <= j["t"] <= t1 + 60:
+                print(f"  {hms(j['t'])} {j['dev']} {j['bssid'][-5:]} {j.get('signal')} dBm "
+                      f"{j['outcome']} {j.get('secs', '')}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

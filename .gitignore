@@ -3,3 +3,4 @@ __pycache__/
 .venv/
 .codex
 .pytest_cache/
+walk-logs/

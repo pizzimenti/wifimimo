@@ -13,12 +13,15 @@ import locale
 import sys
 import time
 
-from wifimimo_core import read_state, safe_ssid
+from wifimimo_core import (
+    ALERT_DIFF_DBM,
+    ALERT_RETRY_PCT,
+    ALERT_SIGNAL_DBM,
+    read_state,
+    safe_ssid,
+)
 
-
-ALERT_DIFF_DBM = 15
-ALERT_SIGNAL_DBM = -75
-ALERT_RETRY_PCT = 30
+SEVERITY_RANK = {"info": 0, "warn": 1, "crit": 2}
 
 COLOR_HEADER = 1
 COLOR_GOOD = 2
@@ -192,7 +195,43 @@ def draw_mcs_ruler(stdscr, row: int, indent: int,
     return row
 
 
-def draw(stdscr, data: dict, hist: History, interval: float) -> None:
+def draw_radios(stdscr, doc: dict, row: int) -> int:
+    """One line per radio plus multipath / internal-card status (schema v4)."""
+    interfaces = doc.get("interfaces") or {}
+    for name in doc.get("ifaces") or []:
+        s = interfaces.get(name) or {}
+        up = bool(s.get("connected"))
+        flags = s.get("flags") or []
+        worst = max((SEVERITY_RANK.get(f.get("severity"), 0) for f in flags), default=-1)
+        speed = s.get("usb_speed_mbps") or 0
+        bus = (f"USB {speed // 1000 if speed >= 1000 else speed}{'G' if speed >= 1000 else 'M'}"
+               if s.get("bus") == "usb" else s.get("bus", "").upper())
+        line = (f" {name:<7} {(s.get('card_name') or '')[:10]:<10} {'up  ' if up else 'down'}"
+                f" {str(s.get('signal_dbm', '')) + ' dBm' if up else '':>8}"
+                f"  ↓{float(s.get('rx_mbps') or 0):7.2f} ↑{float(s.get('tx_mbps') or 0):7.2f} Mb/s"
+                f"  {bus:<7}")
+        safe_addstr(stdscr, row, 0, line, curses.color_pair(COLOR_GOOD if up else COLOR_DIM))
+        if flags:
+            color = COLOR_CRIT if worst == 2 else COLOR_WARN if worst == 1 else COLOR_DIM
+            safe_addstr(stdscr, row, len(line) + 1, ", ".join(f.get("title", "") for f in flags),
+                        curses.color_pair(color))
+        row += 1
+    mp = doc.get("multipath") or {}
+    if not mp.get("desired"):
+        mp_text = "off"
+    elif mp.get("active"):
+        mp_text = f"active ({', '.join(mp.get('members') or [])})"
+    else:
+        mp_text = f"on, waiting: {mp.get('reason') or 're-applying'}"
+    card = doc.get("internal_card") or {}
+    status = f" multipath: {mp_text}"
+    if card.get("managed"):
+        status += f"   internal: {'on' if card.get('present') else 'off'}"
+    safe_addstr(stdscr, row, 0, status, curses.color_pair(COLOR_DIM))
+    return row + 2
+
+
+def draw(stdscr, data: dict, hist: History, interval: float, doc: dict | None = None) -> None:
     max_y, max_x = stdscr.getmaxyx()
     stdscr.erase()
     row = 0
@@ -241,6 +280,14 @@ def draw(stdscr, data: dict, hist: History, interval: float) -> None:
         curses.color_pair(COLOR_DIM),
     )
     row += 2
+
+    if doc and doc.get("ifaces"):
+        row = draw_radios(stdscr, doc, row)
+
+    if data.get("card_name"):
+        safe_addstr(stdscr, row, 1, f"{data['card_name']}  ({data.get('iface', '')})",
+                    curses.color_pair(COLOR_HEADER) | curses.A_BOLD)
+        row += 1
 
     stale = (time.time() - float(data.get("timestamp", 0) or 0)) > 5
     if not data.get("connected"):
@@ -461,14 +508,16 @@ def main(stdscr) -> None:
     interval = 2.0
     last_update = 0.0
     iface = sys.argv[1] if len(sys.argv) > 1 else ""
-    data: dict = pick_iface_state(read_state(), iface)
+    doc: dict = read_state()
+    data: dict = pick_iface_state(doc, iface)
     shown_iface = data.get("iface", "")
     hist = History()
 
     while True:
         now = time.monotonic()
         if now - last_update >= interval:
-            data = pick_iface_state(read_state(), iface)
+            doc = read_state()
+            data = pick_iface_state(doc, iface)
             # In no-argument mode the primary can fail over to another
             # card; min/max history from the old card would silently blend
             # into the new one's bars, so start fresh on any switch.
@@ -478,7 +527,7 @@ def main(stdscr) -> None:
             last_update = now
 
         if data:
-            draw(stdscr, data, hist, interval)
+            draw(stdscr, data, hist, interval, doc)
 
         key = stdscr.getch()
         if key in (ord("q"), ord("Q")):
