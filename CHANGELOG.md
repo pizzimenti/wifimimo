@@ -7,6 +7,28 @@ Each version's heading says whether it was a major, minor or patch change.
 
 ## [Unreleased]
 
+## [1.8.2] - 2026-10-03 (patch)
+
+### Fixed
+
+- **Light themes** (Breeze Light, Breath Light): the panel icon was a fixed
+  white SVG and all but vanished on a light panel. It's now drawn in the
+  panel's own text colour, so it's dark on a light panel and light on a dark
+  one; the gold (MLO) and blue (6 GHz) tiers have a shade per panel lightness,
+  each at least 3:1 against it, and the degraded tier uses the theme's negative
+  colour. Where Plasma shows the applet's icon itself, it's the themed
+  `network-wireless-hotspot-symbolic`.
+- The MCS grid on a light theme: cells seen since the popup opened were a muddy
+  tan that outweighed the current cell, the current cell's number was white on
+  light gold, and the rate beside "MCS n" was light gold text on white. Seen
+  cells are now the current cell's colour at low alpha (pastel on light, deep
+  on dark), the current cell's number is always dark, and the rate text is a
+  deep shade of its hue on light themes (at least 4.5:1).
+
+### Removed
+
+- The four per-tier icon SVGs (`contents/icons/`), replaced by `PanelIcon.qml`.
+
 ## [1.8.1] - 2026-10-03 (patch)
 
 ### Fixed

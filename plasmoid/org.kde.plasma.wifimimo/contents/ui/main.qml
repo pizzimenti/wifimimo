@@ -204,12 +204,12 @@ PlasmoidItem {
     // (phy_modes.SIX_GHZ_FLOOR_MHZ) — not duplicated as a literal here.
     readonly property bool onSixGhz: display.band_label === "6 GHz"
 
-    // Five-tier icon state:
-    //   disabled – no link / wifi off / stale data        (grey, normal SVG @ 45% opacity)
+    // Five-tier icon state (colours: PanelIcon.qml, per panel lightness):
+    //   disabled – no link / wifi off / stale data        (panel text colour, dimmed)
     //   alert    – connected, max(tx,rx) NSS < 2         (red)
     //   good     – connected, 2x2, multi-link MLO        (gold)
     //   wifi6e   – connected, 2x2, 6 GHz, non-MLO        (blue)
-    //   normal   – connected, 2x2, everything else       (white / theme default)
+    //   normal   – connected, 2x2, everything else       (panel text colour)
     readonly property string iconTier: {
         if (!hasRecentData) {
             return "disabled";
@@ -230,20 +230,6 @@ PlasmoidItem {
         }
         return "normal";
     }
-    readonly property url iconSource: {
-        if (iconTier === "alert") {
-            return Qt.resolvedUrl("../icons/network-wireless-hotspot-alert.svg");
-        }
-        if (iconTier === "good") {
-            return Qt.resolvedUrl("../icons/network-wireless-hotspot-good.svg");
-        }
-        if (iconTier === "wifi6e") {
-            return Qt.resolvedUrl("../icons/network-wireless-hotspot-wifi6e.svg");
-        }
-        // "normal" and "disabled" share the white SVG; opacity differentiates.
-        return Qt.resolvedUrl("../icons/network-wireless-hotspot-normal.svg");
-    }
-    readonly property real iconOpacity: iconTier === "disabled" ? 0.45 : 1.0
 
     function pollNow() {
         if (!runtimeDir) {
@@ -878,18 +864,36 @@ PlasmoidItem {
         return value >= 0 ? String(value) : "-";
     }
 
-    function mcsColor(index, current, lo, hi, maxIndex) {
+    // MCS heat ramp: red-orange at MCS 0 to gold at the top index.
+    function mcsHue(index, maxIndex) {
         const t = maxIndex > 0 ? index / maxIndex : 0;
-        const hue = 0.02 + (0.12 - 0.02) * t;
-        const base = Qt.hsla(hue, 0.70, 0.62, 1.0);
+        return 0.02 + (0.12 - 0.02) * t;
+    }
+
+    // The current cell is the full colour; cells seen since the popup opened
+    // are the same colour at low alpha, so they recede into whatever is
+    // behind them (a deep shade on a dark theme, a pastel on a light one)
+    // instead of turning muddy and outweighing the current cell.
+    function mcsColor(index, current, lo, hi, maxIndex) {
+        const hue = mcsHue(index, maxIndex);
         if (current >= 0 && index === current) {
-            return base;
+            return Qt.hsla(hue, 0.70, 0.62, 1.0);
         }
         if (lo >= 0 && hi >= 0 && index >= lo && index <= hi) {
-            return Qt.hsla(hue, 0.55, 0.45, 0.70);
+            return Qt.hsla(hue, 0.70, 0.62, 0.35);
         }
         return Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g, Kirigami.Theme.textColor.b, 0.12);
     }
+
+    // The ramp as text (the rate beside "MCS n"): the cell colour on a dark
+    // theme; on a light one, a deep shade of the same hue (>= 4.5:1).
+    function mcsTextColor(index, maxIndex) {
+        const hue = mcsHue(index, maxIndex);
+        return darkTheme ? Qt.hsla(hue, 0.70, 0.62, 1.0) : Qt.hsla(hue, 0.90, 0.28, 1.0);
+    }
+
+    // The current cell is light in both themes: its number is always dark.
+    readonly property color mcsCurrentInk: darkTheme ? Kirigami.Theme.backgroundColor : Kirigami.Theme.textColor
 
     compactRepresentation: MouseArea {
         acceptedButtons: Qt.LeftButton
@@ -897,14 +901,10 @@ PlasmoidItem {
         implicitHeight: Kirigami.Units.iconSizes.smallMedium
         onClicked: root.expanded = !root.expanded
 
-        Kirigami.Icon {
+        PanelIcon {
             anchors.fill: parent
             anchors.margins: 1
-            source: root.iconSource
-            isMask: false
-            color: "transparent"
-            opacity: root.iconOpacity
-            active: root.expanded
+            tier: root.iconTier
         }
     }
 
@@ -1155,7 +1155,9 @@ PlasmoidItem {
     Plasmoid.status: iconTier === "alert"
         ? PlasmaCore.Types.NeedsAttentionStatus
         : PlasmaCore.Types.ActiveStatus
-    Plasmoid.icon: iconSource
+    // Where Plasma draws the applet's icon itself (widget explorer, panel
+    // edit mode): the themed symbolic, so it's recoloured to fit.
+    Plasmoid.icon: "network-wireless-hotspot-symbolic"
     toolTipMainText: "wifimimo"
     toolTipSubText: stale || !cardData.connected
         ? "No recent antenna data"
