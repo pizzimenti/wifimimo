@@ -14,9 +14,10 @@ Each version's heading says whether it was a major, minor or patch change.
 - **Light themes** (Breeze Light, Breath Light): the panel icon was a fixed
   white SVG and all but vanished on a light panel. It's now drawn in the
   panel's own text colour, so it's dark on a light panel and light on a dark
-  one; the gold (MLO) and blue (6 GHz) tiers have a shade per panel lightness,
-  each at least 3:1 against it, and the degraded tier uses the theme's negative
-  colour. Where Plasma shows the applet's icon itself, it's the themed
+  one; the gold (MLO) and blue (6 GHz) tiers each have a light-panel and a
+  dark-panel shade (at least 3:1 on Breeze / Breath panels), and whichever
+  measures more contrast against the actual panel colour is used, so a mid-tone
+  panel gets the better one. The degraded tier uses the theme's negative colour. Where Plasma shows the applet's icon itself, it's the themed
   `network-wireless-hotspot-symbolic`.
 - The MCS grid on a light theme: cells seen since the popup opened were a muddy
   tan that outweighed the current cell, the current cell's number was white on

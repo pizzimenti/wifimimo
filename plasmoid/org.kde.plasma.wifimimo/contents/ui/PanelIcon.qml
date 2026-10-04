@@ -17,21 +17,40 @@ Item {
 
     property string tier: "normal"
 
-    // Gold and blue have no theme role, so each has a shade per panel
-    // lightness, both at least 3:1 against Breeze / Breath light and dark
-    // panels (the old #f9a825 gold was 1.5:1 on a light one).
-    readonly property bool darkPanel: {
-        const c = Kirigami.Theme.backgroundColor;
-        return (0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b) < 0.5;
+    // Gold and blue have no theme role, so each has a shade for light panels
+    // and one for dark (each at least 3:1 against Breeze / Breath panels; the
+    // old #f9a825 gold was 1.5:1 on a light one). Whichever measures more
+    // contrast against this panel wins, so a mid-tone panel gets the better
+    // of the two rather than what a light/dark cutoff guesses.
+    readonly property color goldForLight: "#9a6c00"
+    readonly property color goldForDark: "#f9a825"
+    readonly property color blueForLight: "#1565c0"
+    readonly property color blueForDark: "#42a5f5"
+
+    function luminance(c) {
+        const lin = v => v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+        return 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b);
     }
+
+    function contrast(a, b) {
+        const la = luminance(a);
+        const lb = luminance(b);
+        return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+    }
+
+    function legible(forLight, forDark) {
+        const bg = Kirigami.Theme.backgroundColor;
+        return contrast(forLight, bg) >= contrast(forDark, bg) ? forLight : forDark;
+    }
+
     readonly property color glyphColor: {
         switch (tier) {
         case "alert":
             return Kirigami.Theme.negativeTextColor;
         case "good":
-            return darkPanel ? "#f9a825" : "#9a6c00";
+            return legible(goldForLight, goldForDark);
         case "wifi6e":
-            return darkPanel ? "#42a5f5" : "#1565c0";
+            return legible(blueForLight, blueForDark);
         default:
             return Kirigami.Theme.textColor;
         }
