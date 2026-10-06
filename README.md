@@ -6,7 +6,7 @@ the full per-MCS rate ladder for **Wi-Fi 4 / 5 / 6 / 6E / 7** links.
 
 ![wifimimo expanded panel](docs/wifimimo-panel.png)
 
-Current version: `1.8.1` · See [CHANGELOG.md](CHANGELOG.md) · Use GitHub Issues for bugs and feature requests.
+Current version: `1.8.2` · See [CHANGELOG.md](CHANGELOG.md) · Use GitHub Issues for bugs and feature requests.
 
 ## What it shows
 
@@ -20,15 +20,17 @@ For every association, in real time:
 - **MCS** — current MCS index per direction with the full rate ladder underneath (12 cells for HE, **14 for EHT** including 4096-QAM MCS 12/13)
 - **Retries** — 10-second sliding window of TX retries / failed packets
 
-The panel icon's colour is the link-state TL;DR:
+The panel icon's colour is the link-state TL;DR (drawn to suit the panel: dark
+on a light panel, light on a dark one, with gold and blue shaded to stay legible
+on either):
 
 | Icon | State |
 |---|---|
-| Grey (dimmed) | No link / wifi off / stale data |
+| Dimmed | No link / wifi off / stale data |
 | **Red** | Connected, both directions collapsed to NSS 1 (real MIMO degradation) |
 | **Gold** | Connected, 2x2, multi-link MLO actively aggregating |
 | **Blue** | Connected, 2x2, single-link 6 GHz |
-| White (default) | Connected, 2x2, anything else |
+| Panel text colour | Connected, 2x2, anything else |
 
 ## Requirements
 

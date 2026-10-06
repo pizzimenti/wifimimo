@@ -259,9 +259,8 @@ ColumnLayout {
                     }
                     PlasmaComponents3.Label {
                         text: panel.live ? Number(mcsBlock.modelData.rate).toFixed(0) + " Mb/s" : "—"
-                        color: panel.app.mcsColor(Math.max(0, mcsBlock.modelData.mcs), mcsBlock.modelData.mcs,
-                                                  mcsBlock.modelData.mcs, mcsBlock.modelData.mcs,
-                                                  Math.max(0, mcsBlock.gridCount - 1))
+                        color: panel.app.mcsTextColor(Math.max(0, mcsBlock.modelData.mcs),
+                                                      Math.max(0, mcsBlock.gridCount - 1))
                         font.family: panel.mono
                     }
                     PlasmaComponents3.Label {
@@ -310,7 +309,7 @@ ColumnLayout {
                                 anchors.centerIn: parent
                                 text: parent.index
                                 color: parent.index === mcsBlock.modelData.mcs
-                                       ? Kirigami.Theme.backgroundColor : Kirigami.Theme.textColor
+                                       ? panel.app.mcsCurrentInk : Kirigami.Theme.textColor
                                 font.family: panel.mono
                                 font.pixelSize: panel.smallFont
                             }
