@@ -383,7 +383,10 @@ back to life on the same hardware.
   into `walk-logs/NAME/`; `tools/walk-summary walk-logs/NAME` prints placements,
   outages and joins. Use them to tune `roam.json` for a new site.
 
-## Tests + CI
+## Tests
+
+Run locally before every commit (there's no CI; this is a single-machine
+desktop tool, and the suite takes well under a second):
 
 ```bash
 pip install -r requirements.txt -r requirements-dev.txt
@@ -397,9 +400,7 @@ port detection on fake trees, health flags, card names, the helper's argument
 validation and routing plans (ordering, idempotency, teardown, refusal of
 foreign state), the internal-card udev rule, NetworkManager follow and tidy
 planning, cross-file packaging facts (polkit path, dispatcher, versions), and a
-QML parity check that fails CI if PHY-mode literals leak back into the QML.
-
-GitHub Actions CI runs on `ubuntu-24.04` with Python `3.12.7`.
+QML parity check that fails if PHY-mode literals leak back into the QML.
 
 Widget development: `tools/pv -t 10` runs the plasmoid in `plasmoidviewer` with
 every QML message on stdout. Qt 6 sends logging to the systemd journal whenever
