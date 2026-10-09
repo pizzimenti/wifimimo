@@ -7,6 +7,14 @@ Each version's heading says whether it was a major, minor or patch change.
 
 ## [Unreleased]
 
+## [1.8.3] - 2026-10-09 (patch)
+
+### Fixed
+
+- `wifimimo-nm-tidy` also collapses unbound duplicates that share the keeper's
+  exact name (the applet lists them as "Net (wifi0)" twice), keeping the most
+  recently used. Differently named copies are still left alone.
+
 ## [1.8.2] - 2026-10-03 (patch)
 
 ### Fixed

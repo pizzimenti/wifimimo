@@ -7,8 +7,9 @@ wifimimo's NM follow makes that unnecessary, and card-bound copies block it.
 
 For every SSID with a card-bound profile, keep one (an unbound one if it
 exists, else the most recently used, with its card binding cleared) and
-delete the other bound ones. Dry run by default; pass --apply to change
-anything.
+delete the other bound ones. Unbound copies with the keeper's exact name
+(shown by the applet as "Net (wifi0)") collapse to the most recently used.
+Dry run by default; pass --apply to change anything.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ def main(argv: list[str] | None = None) -> int:
 
     plan = plan_tidy(list_wifi_profiles())
     if not plan:
-        print("Nothing to tidy: no Wi-Fi profile is tied to one card.")
+        print("Nothing to tidy: no card-bound or same-named duplicate Wi-Fi profiles.")
         return 0
     for group in plan:
         keep = group["keep"]

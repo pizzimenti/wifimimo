@@ -757,12 +757,20 @@ def test_tidy_clears_a_lone_bound_profile():
          "delete": []}]
 
 
-def test_tidy_leaves_plain_duplicates_alone():
-    assert nm.plan_tidy([prof("a", "Phone", "Phone", ts=1), prof("b", "Phone", "Phone", ts=2)]) == []
+def test_tidy_collapses_same_named_duplicates_to_the_latest():
+    # live 2026-10-09: two unbound "AK-Resident" profiles, shown by the
+    # applet as "AK-Resident (wifi0)" twice
+    assert nm.plan_tidy([prof("a", "Phone", "Phone", ts=1), prof("b", "Phone", "Phone", ts=2)]) == [
+        {"ssid": "Phone", "keep": {"uuid": "b", "id": "Phone", "clear_binding": False},
+         "delete": [{"uuid": "a", "id": "Phone"}]}]
+
+
+def test_tidy_leaves_differently_named_duplicates_alone():
+    assert nm.plan_tidy([prof("a", "Phone", "Phone", ts=1), prof("b", "Phone 2", "Phone", ts=2)]) == []
 
 
 def test_tidy_prefers_unbound_keeper_and_spares_plain_duplicates():
-    plan_ = nm.plan_tidy([prof("a", "Net", "Net"), prof("b", "Net", "Net"),
+    plan_ = nm.plan_tidy([prof("a", "Net", "Net"), prof("b", "Net 2", "Net"),
                           prof("c", "Net-stick", "Net", mac="aa:bb:cc:dd:ee:ff", ts=9)])
     assert plan_[0]["keep"]["clear_binding"] is False
     assert [d["uuid"] for d in plan_[0]["delete"]] == ["c"]

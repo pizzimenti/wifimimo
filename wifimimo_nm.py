@@ -1480,13 +1480,15 @@ def _bound(p: dict) -> bool:
 def plan_tidy(profiles: list[dict]) -> list[dict]:
     """Collapse *card-bound* copies of a Wi-Fi profile.
 
-    Groups profiles by (SSID, key-mgmt). Only groups that contain a
-    card-bound profile (mac-address / interface-name set) are touched, and
-    only bound profiles are ever deleted: plain duplicates the user made for
-    their own reasons (different passwords, settings) are left alone. A
-    lone profile bound by interface-name is kept with its binding cleared.
-    Keeper preference: unbound, then named exactly like the SSID (the
-    original rather than a '-a8000' style copy), then most recently used.
+    Groups profiles by (SSID, key-mgmt). Card-bound profiles (mac-address /
+    interface-name set) are deleted in favour of the keeper; a lone profile
+    bound by interface-name is kept with its binding cleared. Unbound
+    duplicates are deleted only when they carry the keeper's exact name
+    (the applet can't tell those apart and shows them as "Net (wifi0)");
+    differently named ones the user made for their own reasons (another
+    password, other settings) are left alone. Keeper preference: unbound,
+    then named exactly like the SSID (the original rather than a '-a8000'
+    style copy), then most recently used.
     """
     groups: dict[tuple, list[dict]] = {}
     for p in profiles:
@@ -1495,13 +1497,12 @@ def plan_tidy(profiles: list[dict]) -> list[dict]:
         groups.setdefault((p["ssid"], p.get("key_mgmt", "")), []).append(p)
     plan = []
     for (ssid, _key_mgmt), members in sorted(groups.items()):
-        if not any(_bound(p) for p in members):
-            continue
         if len(members) == 1 and members[0].get("mac_address"):
             continue    # a lone MAC binding is deliberate (see plan_follow)
         keep = max(members, key=lambda p: (not _bound(p), p.get("id") == ssid,
                                            p.get("timestamp", 0), p.get("id", "")))
-        doomed = [p for p in members if p is not keep and _bound(p)]
+        doomed = [p for p in members if p is not keep
+                  and (_bound(p) or p.get("id") == keep.get("id"))]
         if not doomed and not _bound(keep):
             continue
         plan.append({
