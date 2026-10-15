@@ -3,6 +3,8 @@ nmcli parsing, and profile tidy."""
 
 import json
 
+import pytest
+
 import wifimimo_nm as nm
 import wifimimo_roam as roam
 
@@ -1131,7 +1133,8 @@ def test_failsafe_hands_every_radio_to_nm_after_a_minute_without_traffic(tmp_pat
     monkeypatch.setattr(nm.subprocess, "Popen", no_helper)
     calls = []
     show = ("GENERAL.DEVICE:wifi1\nGENERAL.TYPE:wifi\nGENERAL.STATE:100 (connected)\n"
-            "GENERAL.CON-UUID:" + P + "\nGENERAL.IP4-CONNECTIVITY:1 (none)\n")
+            "GENERAL.CON-UUID:" + P + "\nGENERAL.IP4-CONNECTIVITY:1 (none)\n"
+            "\nGENERAL.DEVICE:wifi2\nGENERAL.TYPE:wifi\nGENERAL.STATE:30 (disconnected)\n")
 
     def fake_nmcli(args, timeout=5):
         calls.append(" ".join(args))
@@ -1155,3 +1158,123 @@ def test_failsafe_hands_every_radio_to_nm_after_a_minute_without_traffic(tmp_pat
     assert status["failsafe"] and not [c for c in calls if "autoconnect no" in c]
     later = follower.step({}, 1000.0 + nm.FAILSAFE_AFTER_S + nm.FAILSAFE_HOLDOFF_S + 1)
     assert "failsafe" not in later
+
+
+@pytest.fixture
+def topology_follower(tmp_path, monkeypatch):
+    """Exercise step() without touching the host's NM, probes or helper."""
+    flag = tmp_path / "multipath-enabled"
+    flag.touch()
+    monkeypatch.setattr(nm.shared, "MULTIPATH_FLAG", flag)
+    calls, topology = [], []
+
+    def fake_nmcli(args, timeout=5):
+        calls.append(args)
+        return 0, ""
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("single-radio operation entered multipath planning/probing")
+
+    monkeypatch.setattr(nm, "run_nmcli", fake_nmcli)
+    monkeypatch.setattr(nm, "parse_dev_show", lambda _: topology)
+    monkeypatch.setattr(nm, "feed_context", unexpected)
+    monkeypatch.setattr(nm, "plan_follow", unexpected)
+    follower = nm.Follower(tmp_path / "follow.json")
+    follower.tuning = nm.Tuning(tmp_path / "none.json")
+    follower.liveness = nm.Liveness(spawn=unexpected)
+    monkeypatch.setattr(follower, "heal", unexpected)
+    return follower, topology, calls
+
+
+@pytest.mark.parametrize("state,signal", [(100, -42), (100, -80), (70, -42), (30, 0)])
+def test_single_radio_leaves_roaming_and_dhcp_to_nm(topology_follower, state, signal):
+    follower, topology, calls = topology_follower
+    topology.extend([dev("wifi0", P if state >= 70 else "", state=state),
+                     dict(dev("wifi1", state=20), type="wifi"),  # unavailable USB radio
+                     dict(dev("p2p-dev-wifi0"), type="wifi-p2p")])
+    follower.memory = {"leader": {"uuid": P, "device": "wifi0"},
+                       "held_ac": ["wifi0"], "modified": {P: "0"},
+                       "moves": {"wifi0": {"target": P, "at": 100, "bssid": A2}},
+                       "bad": {"wifi0": {A1: nm.AVOID_FOREVER}}, "swap": {"step": 1}}
+    follower.ctx.alive = {"wifi0": False}  # missing pings must not tear down the sole link
+    follower.no_traffic_since = 100.0
+    follower.failsafe_until = 1000.0
+    follower.wants_fast = True
+    states = {"wifi0": {"connected": state == 100, "ipv4": "10.7.10.10",
+                        "gateway": "10.7.10.1", "signal_dbm": signal}}
+    status = follower.step(states, 200.0)   # old pending join is well past its 15 s deadline
+    assert "NetworkManager manages roaming" in status["plan"]
+    assert status["actions"] == [["multi", P, "0"], ["release", "wifi0"]]
+    assert ["device", "set", "wifi0", "autoconnect", "yes"] in calls
+    assert not follower.memory and not follower.ctx.alive
+    assert not follower.wants_fast and follower.no_traffic_since is None
+    assert follower.failsafe_until == 0
+    assert json.loads(follower.path.read_text()) == {}
+    calls.clear()
+    assert follower.step(states, 205.0)["actions"] == []
+    assert len(calls) == 1  # only read NM state; no repeated release or reconnect
+
+
+def test_single_radio_retries_failed_restoration(topology_follower, monkeypatch):
+    follower, topology, calls = topology_follower
+    topology.append(dev("wifi0", P))
+    follower.memory = {"held_ac": ["wifi0"], "modified": {P: "0"}}
+    monkeypatch.setattr(follower, "_run", lambda action: "NM restarting")
+    monkeypatch.setattr(nm, "run_nmcli", lambda *args, **kw: (0, P + "\n"))
+    follower.step({}, 200.0)
+    assert follower.memory == {"modified": {P: "0"}, "held_ac": ["wifi0"]}
+
+    def succeed(action):
+        calls.append(action)
+        return ""
+
+    monkeypatch.setattr(follower, "_run", succeed)
+    follower.step({}, 205.0)
+    assert ("multi", P, "0") in calls and ("release", "wifi0") in calls
+    assert follower.memory == {}
+
+
+def test_single_radio_forgets_deleted_profiles_but_retries_when_nm_unavailable(topology_follower, monkeypatch):
+    follower, topology, calls = topology_follower
+    topology.append(dev("wifi0", P))
+    follower.memory = {"modified": {Q: "0"}}
+    monkeypatch.setattr(follower, "_run", lambda action: "restore failed")
+    monkeypatch.setattr(nm, "run_nmcli", lambda args, **kw:
+                        (8, "") if args[:2] == ["-g", "UUID"] else (0, ""))
+    # A failed list is not evidence of deletion.
+    follower.step({}, 200.0)
+    assert follower.memory == {"modified": {Q: "0"}}
+    monkeypatch.setattr(nm, "run_nmcli", lambda *args, **kw: (0, P + "\n"))
+    follower.step({}, 205.0)
+    assert follower.memory == {}
+
+
+def test_usb_removal_hands_back_and_replug_resumes_from_current_choice(topology_follower, monkeypatch):
+    follower, topology, calls = topology_follower
+    topology.append(dev("wifi0", P))
+    follower.memory = {"held_ac": ["wifi0", "wifi1"], "parked": {"wifi1": 100.0},
+                       "leader": {"uuid": Q, "device": "wifi1"}}
+    follower.step({}, 200.0)
+    assert ["device", "set", "wifi0", "autoconnect", "yes"] in calls
+    assert ["device", "set", "wifi1", "autoconnect", "yes"] in calls
+    assert follower.memory == {}
+    topology.append(dev("wifi1"))
+    monkeypatch.setattr(nm, "feed_context", lambda *args: None)
+    planned = []
+
+    def plan_again(devices, memory, now, *args):
+        planned.append((devices[:], memory.copy()))
+        return [], {}, {"plan": "resumed"}
+
+    monkeypatch.setattr(nm, "plan_follow", plan_again)
+    monkeypatch.setattr(follower, "heal", lambda *args: [])
+    monkeypatch.setattr(nm, "primary_wifi_device", lambda states: "wifi0")
+    assert follower.step({}, 205.0)["plan"] == "resumed"
+    assert planned == [(topology, {})]
+
+
+def test_no_available_radios_releases_old_holds(topology_follower):
+    follower, topology, calls = topology_follower
+    follower.memory = {"held_ac": ["wifi0"]}
+    assert follower.step({}, 200.0)["actions"] == [["release", "wifi0"]]
+    assert follower.memory == {}

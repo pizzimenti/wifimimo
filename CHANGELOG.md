@@ -7,6 +7,19 @@ Each version's heading says whether it was a major, minor or patch change.
 
 ## [Unreleased]
 
+## [1.8.4] - 2026-10-14 (patch)
+
+### Fixed
+
+- With fewer than two available Wi-Fi radios, leave roaming and DHCP to
+  NetworkManager. Previously, leaving Multipath on let the planner disconnect
+  the sole radio after a short gateway-ping gap or signal dip, then cancel its
+  replacement connection after 15 seconds without an address. Restore temporary
+  profile settings and autoconnect holds without dropping the link; discard old
+  joins, AP bans and failsafe timers before resuming with a second radio.
+- Retry failed temporary-profile restorations as well as failed autoconnect
+  releases when handing control back to NetworkManager.
+
 ## [1.8.3] - 2026-10-09 (patch)
 
 ### Fixed

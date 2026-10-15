@@ -6,7 +6,7 @@ the full per-MCS rate ladder for **Wi-Fi 4 / 5 / 6 / 6E / 7** links.
 
 ![wifimimo expanded panel](docs/wifimimo-panel.png)
 
-Current version: `1.8.3` · See [CHANGELOG.md](CHANGELOG.md) · Use GitHub Issues for bugs and feature requests.
+Current version: `1.8.4` · See [CHANGELOG.md](CHANGELOG.md) · Use GitHub Issues for bugs and feature requests.
 
 ## What it shows
 
@@ -168,6 +168,12 @@ Recovery, if anything ever goes wrong: `pkexec /usr/local/lib/wifimimo/wifimimo-
 or just `sudo ip rule del pref 32090`.
 
 ### Following your network choice (NetworkManager)
+
+With fewer than two available Wi-Fi radios, NetworkManager handles roaming and
+DHCP. Wifimimo continues collecting telemetry, restores its temporary profile
+settings and releases its autoconnect holds without disconnecting the remaining
+radio. Multipath can stay switched on: placement resumes when a second radio
+becomes available, following the network currently selected in NetworkManager.
 
 While multipath is on, the daemon makes one click in the Plasma network applet
 drive every radio: the network you pick becomes the leader and the other radios
