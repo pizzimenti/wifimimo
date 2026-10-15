@@ -10,6 +10,9 @@ disk, once (see "unbind" in `plan_follow`).
 
 Model
 -----
+* With fewer than two available Wi-Fi radios, NetworkManager owns roaming
+  and DHCP. The follower restores its temporary settings and releases its
+  autoconnect holds without disconnecting the remaining radio.
 * The **leader** is the most recent profile the *user* activated on any
   radio (an activation wifimimo didn't start itself).
 * Where each radio sits is decided by the slot planner (wifimimo_roam):
@@ -1389,18 +1392,46 @@ class Follower:
             return f"unknown action {kind}"
         return "" if rc == 0 else f"{' '.join(map(str, action))}: nmcli exit {rc}"
 
+    def _stand_down(self) -> list[tuple]:
+        """Restore NM control without deactivating a connection, retrying failures.
+
+        Forget old joins, bans and leaders so a later second radio starts
+        from NM's current network choice rather than a cancelled move.
+        """
+        actions = plan_release(self.memory)
+        pending: dict = {}
+        for action in actions:
+            if not self._run(action):
+                continue
+            if action[0] == "release":
+                pending.setdefault("held_ac", []).append(action[1])
+            elif action[0] == "multi":
+                pending.setdefault("modified", {})[action[1]] = self.memory["modified"][action[1]]
+        if pending.get("modified"):
+            # Profiles can be deleted while the daemon is running. They
+            # have nothing left to restore; don't retry them every poll.
+            rc, out = run_nmcli(["-g", "UUID", "connection", "show"])
+            if rc == 0:
+                existing = set(out.splitlines())
+                pending["modified"] = {uuid: value for uuid, value in pending["modified"].items()
+                                       if uuid in existing}
+                if not pending["modified"]:
+                    del pending["modified"]
+        if pending != self.memory:
+            self.memory = pending
+            self._save()
+        self.liveness.update({})
+        self.ctx = RoamContext()
+        self.wants_fast = False
+        self.no_traffic_since = None
+        self.failsafe_until = 0.0
+        return actions
+
     def step(self, states: dict, now: float | None = None) -> dict:
         now = time.time() if now is None else now
         enabled = shared.MULTIPATH_FLAG.exists()
         if not enabled:
-            self.wants_fast = False
-            self.liveness.update({})    # stops every probe
-            if (self.was_enabled or self.memory.get("modified") or self.memory.get("parked")
-                    or self.memory.get("held_ac")):
-                failed = [a[1] for a in plan_release(self.memory)
-                          if self._run(a) and a[0] == "release"]
-                self.memory = keep_unreleased({}, failed)   # retried next poll
-                self._save()
+            self._stand_down()
             self.was_enabled = False
             return {}
         self.was_enabled = True
@@ -1410,6 +1441,16 @@ class Follower:
             return {"error": "nmcli unavailable"}
 
         devices = parse_dev_show(out)
+        available = [d for d in devices if d.get("type") == "wifi"
+                     and d.get("state", 0) >= STATE_DISCONNECTED]
+        if len(available) < 2:
+            # No placement or multipath gain with one radio. Dropping that
+            # sole link on a short ping gap forces a fresh DHCP exchange;
+            # the planner's 15 s give-up can then prolong the outage. Let
+            # NM/supplicant roam and finish DHCP, including after USB removal.
+            actions = self._stand_down()
+            return {"plan": "NetworkManager manages roaming (fewer than two available Wi-Fi radios)",
+                    "actions": [list(a) for a in actions]}
         feed_context(self.ctx, states, now)
         self.liveness.update(states)
         raw = {dev: self.liveness.alive(
