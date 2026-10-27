@@ -7,6 +7,39 @@ Each version's heading says whether it was a major, minor or patch change.
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-10-27 (minor)
+
+### Added
+
+- `install.sh` installs all the wireless handling wifimimo needs, so a new
+  machine gets it from `git clone` and `./install.sh` alone:
+  - `/etc/sysctl.d/99-wifimimo-arp-flux.conf` sets `arp_ignore=1` /
+    `arp_announce=2` on `all`, for adapters holding addresses on one subnet,
+    and is applied at install. `--uninstall` removes it and puts the running
+    values back to the kernel's default, or re-applies the sysctl files when
+    another one still sets them.
+  - The dispatcher hook sets wpa_supplicant's background scan to
+    `simple:30:-70:300` on every Wi-Fi connection (scan every 300 s above
+    -70 dBm, every 30 s below), whether or not multipath is on.
+- The installer finds exact hand-placed copies of these (an identical ARP
+  sysctl file, the old standalone bgscan dispatcher script, a modprobe file
+  that only blacklists a managed internal card's driver) and lists them;
+  `--migrate-legacy-rules` moves them to `/etc/wifimimo/legacy/` under their
+  original path, carrying a blacklist line over to `wifimimo-internal.conf`
+  first, so `--uninstall` leaves nothing behind.
+
+### Changed
+
+- `--uninstall` lists every file kept in `/etc/wifimimo/legacy/` with the path
+  it came from.
+- The README's install table lists the dead-man timer, the internal-card udev
+  rule and the modprobe blacklist.
+
+### Fixed
+
+- `install.sh --help` printed the script's `set -euo pipefail` line after the
+  options; it now prints the option header alone, however long it grows.
+
 ## [1.8.4] - 2026-10-14 (patch)
 
 ### Fixed

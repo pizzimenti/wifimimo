@@ -7,7 +7,10 @@
 #                                        vendor:device=driver; comma-separate
 #                                        several; or "auto" for present cards)
 #   ./install.sh --migrate-legacy-rules  move hand-made udev rules that remove a
-#                                        managed card to /etc/wifimimo/legacy/
+#                                        managed card, and hand-placed copies of
+#                                        what wifimimo installs itself (ARP
+#                                        sysctls, bgscan hook, a managed card's
+#                                        driver blacklist), to /etc/wifimimo/legacy/
 #   ./install.sh --uninstall             remove everything wifimimo installed
 set -euo pipefail
 
@@ -28,6 +31,9 @@ TARGET_POLICY="/usr/share/polkit-1/actions/io.github.pizzimenti.wifimimo.policy"
 TARGET_DISPATCHER_DIR="/etc/NetworkManager/dispatcher.d"
 TARGET_DISPATCHER="$TARGET_DISPATCHER_DIR/90-wifimimo"
 TARGET_RT_PROTOS="/etc/iproute2/rt_protos.d/wifimimo.conf"
+TARGET_SYSCTL="/etc/sysctl.d/99-wifimimo-arp-flux.conf"
+SYSCTL_CONF="/etc/sysctl.conf"
+SYSCTL_DIRS=(/etc/sysctl.d /run/sysctl.d /usr/local/lib/sysctl.d /usr/lib/sysctl.d)
 DEADMAN_UNIT="wifimimo-deadman"
 TARGET_DEADMAN_DIR="/etc/systemd/system"
 ETC_DIR="/etc/wifimimo"
@@ -41,6 +47,146 @@ PLASMOID_PLUGIN_ID="org.kde.plasma.wifimimo"
 PY_MODULES=(phy_modes.py wifimimo_core.py wifimimo_shared.py wifimimo_radio.py wifimimo_nm.py wifimimo_roam.py)
 PY_SCRIPTS=(wifimimo-daemon.py wifimimo-mon.py wifimimo-plasmoid-source.py wifimimo-nm-tidy.py)
 
+# ---------------------------------------------------------------------------
+# System settings for several radios: the ARP sysctls, and adopting
+# hand-placed copies of what wifimimo now installs itself. Defined ahead of
+# the argument handling so the tests can source this file for them alone.
+# ---------------------------------------------------------------------------
+
+install_arp_flux_sysctl() {
+    install -Dm644 -o root -g root "$ROOT_DIR/sysctl/99-wifimimo-arp-flux.conf" "$TARGET_SYSCTL"
+    sysctl -q -p "$TARGET_SYSCTL" >/dev/null \
+        || echo "Note: sysctl could not apply $TARGET_SYSCTL now; it applies at the next boot." >&2
+}
+
+remove_arp_flux_sysctl() {
+    local d f files=()
+    [[ -e "$TARGET_SYSCTL" ]] || return 0
+    rm -f -- "$TARGET_SYSCTL"
+    # Deleting the file leaves the running kernel as it was. If no other sysctl
+    # file sets these keys, put back the kernel's default (0); if one does,
+    # re-apply the sysctl files so it wins, as it will at the next boot.
+    if [[ -f "$SYSCTL_CONF" ]]; then files+=("$SYSCTL_CONF"); fi
+    for d in "${SYSCTL_DIRS[@]}"; do
+        for f in "$d"/*.conf; do
+            if [[ -f "$f" ]]; then files+=("$f"); fi
+        done
+    done
+    if [[ ${#files[@]} -gt 0 ]] && grep -qsE \
+            '^[[:space:]]*-?net[./]ipv4[./]conf[./]all[./]arp_(ignore|announce)[[:space:]]*=' "${files[@]}"; then
+        sysctl -q --system >/dev/null || true
+    else
+        sysctl -q -w net.ipv4.conf.all.arp_ignore=0 net.ipv4.conf.all.arp_announce=0 >/dev/null || true
+    fi
+}
+
+effective_lines() {  # file -> its lines without comments, blanks or edge spaces
+    sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -- "$1" | grep -vE '^([#;]|$)' || true
+}
+
+sysctl_settings() {  # file -> its settings as sorted key=value lines, keys dotted
+    effective_lines "$1" | awk '{
+        i = index($0, "="); k = substr($0, 1, i - 1); v = substr($0, i + 1)
+        sub(/[ \t]+$/, "", k); sub(/^[ \t]+/, "", v); gsub("/", ".", k)
+        print k "=" v
+    }' | sort
+}
+
+legacy_bgscan_hook() {  # the hand-placed bgscan dispatcher that 90-wifimimo replaces
+    cat <<'EOF2'
+INTERFACE="$1"
+EVENT="$2"
+[ "$EVENT" = "up" ] || exit 0
+TYPE=$(nmcli -g GENERAL.TYPE dev show "$INTERFACE" 2>/dev/null)
+[ "$TYPE" = "wifi" ] || exit 0
+wpa_cli -i "$INTERFACE" set_network 0 bgscan '"simple:30:-70:300"' >/dev/null 2>&1
+EOF2
+}
+
+managed_drivers() {  # drivers of the managed internal cards, one per line
+    [[ -s "$INTERNAL_CONF" ]] || return 0
+    awk '$1 !~ /^#/ && NF >= 2 { print $2 }' "$INTERNAL_CONF" | sort -u
+}
+
+only_blacklists() {  # file drivers -> true when every line blacklists one of them
+    local line seen=0
+    while IFS= read -r line; do
+        [[ "$line" =~ ^blacklist[[:space:]]+([a-z0-9_]+)$ ]] || return 1
+        grep -qxF -- "${BASH_REMATCH[1]}" <<< "$2" || return 1
+        seen=1
+    done < <(effective_lines "$1")
+    [[ $seen == 1 ]]
+}
+
+find_hand_placed_copies() {  # prints "<kind> <path>" per hand-placed copy
+    # Only exact copies (comments and spacing aside) of what wifimimo installs
+    # itself; a file that does anything more is somebody else's and left alone.
+    local f want drivers
+    want="$(sysctl_settings "$ROOT_DIR/sysctl/99-wifimimo-arp-flux.conf")"
+    for f in "$(dirname "$TARGET_SYSCTL")"/*.conf; do
+        [[ -f "$f" && "$f" != "$TARGET_SYSCTL" ]] || continue
+        if [[ "$(sysctl_settings "$f")" == "$want" ]]; then echo "sysctl $f"; fi
+    done
+    want="$(legacy_bgscan_hook)"
+    for f in "$TARGET_DISPATCHER_DIR"/*; do
+        [[ -f "$f" && ! -L "$f" && "$f" != "$TARGET_DISPATCHER" ]] || continue
+        if [[ "$(effective_lines "$f")" == "$want" ]]; then echo "dispatcher $f"; fi
+    done
+    # A managed card's driver must stay blacklisted so the generated udev rule is
+    # its only loader; that line belongs in wifimimo's own modprobe file, which
+    # --uninstall removes along with the rule.
+    drivers="$(managed_drivers)"
+    [[ -n "$drivers" ]] || return 0
+    for f in "$(dirname "$WIFIMIMO_BLACKLIST")"/*.conf; do
+        [[ -f "$f" && "$f" != "$WIFIMIMO_BLACKLIST" ]] || continue
+        if only_blacklists "$f" "$drivers"; then echo "blacklist $f"; fi
+    done
+    return 0
+}
+
+move_to_legacy() {  # path -> $LEGACY_DIR<path>, so it keeps its original path
+    install -d -m755 "$(dirname "$LEGACY_DIR$1")"
+    mv -v -- "$1" "$LEGACY_DIR$1"
+}
+
+handle_hand_placed_copies() {  # 1: move them to $LEGACY_DIR; 0: only say so
+    local copies kind path line
+    copies="$(find_hand_placed_copies)"
+    [[ -n "$copies" ]] || return 0
+    if [[ $1 != 1 ]]; then
+        echo
+        echo "Note: hand-placed copies of what wifimimo now installs itself:" >&2
+        sed 's/^[a-z]* /         /' <<< "$copies" >&2
+        echo "      They duplicate wifimimo's own and would outlive --uninstall. Re-run" >&2
+        echo "      with --migrate-legacy-rules to move them to $LEGACY_DIR/." >&2
+        return 0
+    fi
+    while read -r kind path; do
+        if [[ "$kind" == blacklist ]]; then
+            while IFS= read -r line; do
+                grep -qsxF -- "$line" "$WIFIMIMO_BLACKLIST" || printf '%s\n' "$line" >> "$WIFIMIMO_BLACKLIST"
+            done < <(effective_lines "$path" | sed -E 's/[[:space:]]+/ /')
+            chmod 644 "$WIFIMIMO_BLACKLIST"
+        fi
+        move_to_legacy "$path"
+    done <<< "$copies"
+}
+
+report_kept_legacy() {  # true (and lists them) when $LEGACY_DIR holds files
+    local f rel
+    [[ -d "$LEGACY_DIR" ]] && [[ -n "$(find "$LEGACY_DIR" -type f -print -quit)" ]] || return 1
+    echo "Files wifimimo replaced were kept in $LEGACY_DIR:"
+    while IFS= read -r f; do
+        rel="${f#"$LEGACY_DIR"/}"
+        # udev rules were moved flat; everything else keeps its original path
+        if [[ "$rel" == */* ]]; then echo "  $f  (was /$rel)"; else echo "  $f  (was /etc/udev/rules.d/$rel)"; fi
+    done < <(find "$LEGACY_DIR" -type f | sort)
+    echo "Move back any you still want; $ETC_DIR is left in place."
+}
+
+# Sourced (by the tests): definitions only.
+[[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
+
 MANAGE_INTERNAL=""
 MIGRATE_LEGACY=0
 UNINSTALL=0
@@ -50,7 +196,7 @@ while [[ $# -gt 0 ]]; do
         --manage-internal=*) MANAGE_INTERNAL="${1#*=}"; shift ;;
         --migrate-legacy-rules) MIGRATE_LEGACY=1; shift ;;
         --uninstall) UNINSTALL=1; shift ;;
-        -h|--help) sed -n '2,13p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,/^set /{/^#/p}' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -227,19 +373,14 @@ if [[ $UNINSTALL == 1 ]]; then
     rm -f -- "$TARGET_DEADMAN_DIR/$DEADMAN_UNIT.service" "$TARGET_DEADMAN_DIR/$DEADMAN_UNIT.timer"
     systemctl daemon-reload
     rm -f -- "$TARGET_DISPATCHER" "$TARGET_POLICY" "$INTERNAL_RULE" "$WIFIMIMO_BLACKLIST" "$TARGET_RT_PROTOS"
+    remove_arp_flux_sysctl
     udevadm control --reload 2>/dev/null || true
     run_as_user systemctl --user disable --now "$USER_SERVICE_NAME" 2>/dev/null || true
     run_as_user rm -f -- "$HOME/.config/systemd/user/$USER_SERVICE_NAME"
     run_as_user kpackagetool6 -t Plasma/Applet --remove "$PLASMOID_PLUGIN_ID" 2>/dev/null || true
     rm -f -- "$TARGET_DAEMON" "$TARGET_MON" "$TARGET_PLASMOID_SOURCE" "$TARGET_TIDY" "$TARGET_DESKTOP"
     rm -rf -- "$TARGET_LIB_DIR"
-    if [[ -d "$LEGACY_DIR" ]] && compgen -G "$LEGACY_DIR/*" >/dev/null; then
-        echo "Your pre-wifimimo udev rules were kept in $LEGACY_DIR:"
-        ls -1 "$LEGACY_DIR" | sed 's/^/  /'
-        echo "Move them back to /etc/udev/rules.d/ if you still want them; $ETC_DIR is left in place."
-    else
-        rm -rf -- "$ETC_DIR"
-    fi
+    report_kept_legacy || rm -rf -- "$ETC_DIR"
     rm -rf -- /run/wifimimo
     echo "wifimimo uninstalled."
     exit 0
@@ -284,8 +425,10 @@ if [[ -d "$TARGET_DISPATCHER_DIR" ]]; then
     # NM ignores dispatcher scripts that aren't root-owned 0755.
     install -Dm755 -o root -g root "$ROOT_DIR/nm/90-wifimimo" "$TARGET_DISPATCHER"
 else
-    echo "Note: $TARGET_DISPATCHER_DIR not found; multipath won't re-apply itself on network changes."
+    echo "Note: $TARGET_DISPATCHER_DIR not found; multipath won't re-apply itself on network changes"
+    echo "      and Wi-Fi connections keep NetworkManager's background-scan setting."
 fi
+install_arp_flux_sysctl
 
 if [[ -n "$MANAGE_INTERNAL" ]]; then
     write_internal_conf
@@ -297,6 +440,7 @@ if [[ -s "$INTERNAL_CONF" ]]; then
         udevadm verify "$INTERNAL_RULE" >/dev/null 2>&1 || echo "Note: udevadm verify reported problems in $INTERNAL_RULE" >&2
     fi
 fi
+handle_hand_placed_copies "$MIGRATE_LEGACY"
 if [[ -e "$ETC_DIR/multipath-enabled" ]]; then
     echo "Multipath is enabled; re-applying with the new routing layout..."
     "$TARGET_HELPER" multipath apply || true
@@ -329,7 +473,8 @@ reload_plasmashell
 
 printf 'Installed:\n'
 printf '  %s\n' "$TARGET_LIB_DIR/" "$TARGET_HELPER" "$TARGET_DAEMON" "$TARGET_MON" \
-    "$TARGET_PLASMOID_SOURCE" "$TARGET_TIDY" "$TARGET_DESKTOP" "$TARGET_POLICY" "$TARGET_RT_PROTOS"
+    "$TARGET_PLASMOID_SOURCE" "$TARGET_TIDY" "$TARGET_DESKTOP" "$TARGET_POLICY" "$TARGET_RT_PROTOS" \
+    "$TARGET_SYSCTL"
 [[ -e "$TARGET_DISPATCHER" ]] && printf '  %s\n' "$TARGET_DISPATCHER"
 printf '  %s\n' "$TARGET_DEADMAN_DIR/$DEADMAN_UNIT.timer"
 [[ -e "$INTERNAL_RULE" ]] && printf '  %s\n' "$INTERNAL_RULE"

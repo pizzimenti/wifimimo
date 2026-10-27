@@ -6,7 +6,7 @@ the full per-MCS rate ladder for **Wi-Fi 4 / 5 / 6 / 6E / 7** links.
 
 ![wifimimo expanded panel](docs/wifimimo-panel.png)
 
-Current version: `1.8.4` · See [CHANGELOG.md](CHANGELOG.md) · Use GitHub Issues for bugs and feature requests.
+Current version: `1.9.0` · See [CHANGELOG.md](CHANGELOG.md) · Use GitHub Issues for bugs and feature requests.
 
 ## What it shows
 
@@ -57,8 +57,12 @@ The installer:
 | `/usr/local/bin/wifimimo-nm-tidy` | Clears card bindings and collapses per-card copies of NetworkManager profiles |
 | `/usr/local/bin/wifimimo-plasmoid-source` | One-shot state-file dumper |
 | `/usr/share/polkit-1/actions/io.github.pizzimenti.wifimimo.policy` | polkit action for the helper |
-| `/etc/NetworkManager/dispatcher.d/90-wifimimo` | Re-applies multipath on network changes |
+| `/etc/NetworkManager/dispatcher.d/90-wifimimo` | Sets background scanning on every Wi-Fi connection; re-applies multipath on network changes |
+| `/etc/sysctl.d/99-wifimimo-arp-flux.conf` | `arp_ignore=1` / `arp_announce=2` for adapters sharing a subnet (applied at install) |
 | `/etc/iproute2/rt_protos.d/wifimimo.conf` | Names route protocol 211 `wifimimo` |
+| `/etc/systemd/system/wifimimo-deadman.{service,timer}` | Dead-man check: hands routing back to NetworkManager if anything fails |
+| `/etc/udev/rules.d/70-wifimimo-internal.rules` | Internal-card toggle across reboots (with `--manage-internal`) |
+| `/etc/modprobe.d/wifimimo-internal.conf` | Blacklists a managed internal card's driver, so the rule above is its only loader (with `--manage-internal`, unless already blacklisted) |
 | `/etc/wifimimo/` | Multipath / internal-card state (root-owned) |
 | `~/.config/systemd/user/wifimimo-daemon.service` | User systemd service (auto-enabled) |
 | Plasmoid (via `kpackagetool6`) | Per-user `org.kde.plasma.wifimimo` widget |
@@ -72,9 +76,37 @@ Options:
 ./install.sh --manage-internal 14c3:7925     # let the widget toggle an internal PCI card
 ./install.sh --manage-internal auto          # ...every bound PCI wifi card present now
 ./install.sh --manage-internal 14c3:7925=mt7925e   # card not present: name the driver
-./install.sh --migrate-legacy-rules          # move hand-made "remove this card" udev rules aside
+./install.sh --migrate-legacy-rules          # move hand-made udev rules and hand-placed copies aside
 ./install.sh --uninstall                     # remove everything (restores the internal card)
 ```
+
+### System settings for several radios
+
+Everything wifimimo needs from the system is installed, and removed again, by
+`install.sh`; nothing has to be placed by hand.
+
+- **Background scanning.** On every Wi-Fi connection, multipath or not, the
+  dispatcher hook sets wpa_supplicant's bgscan to `simple:30:-70:300`: scan
+  every 300 s while the signal is above -70 dBm, every 30 s below it, so a
+  fading radio hunts for a better access point without disturbing a good one.
+  (NetworkManager's own default would otherwise apply.)
+- **ARP flux.** With two adapters on one subnet (two radios on one network, or
+  a radio and a wired port on the same LAN), Linux by default answers ARP for
+  any local address on any interface, so replies can leave the wrong adapter.
+  The sysctl file sets `arp_ignore=1` and `arp_announce=2` on `all`, covering
+  every interface at all times; multipath also sets them on its member radios.
+  `--uninstall` deletes the file and puts the running values back to the
+  kernel's default (or re-applies the sysctl files if another one sets them).
+
+Machines set up by hand before wifimimo carried these may still hold their own
+copies: an identical ARP sysctl file in `/etc/sysctl.d/`, the bgscan hook as a
+separate dispatcher script, or a modprobe file that only blacklists a managed
+internal card's driver. The installer lists any exact copies it finds (a file
+that does anything more is left alone); `--migrate-legacy-rules` moves them to
+`/etc/wifimimo/legacy/` under their original path, carrying a blacklist line
+over to `wifimimo-internal.conf` first. Nothing changes in behaviour, and
+`--uninstall` then removes everything, listing what it kept in the legacy
+folder.
 
 ## Daemon
 
@@ -405,8 +437,11 @@ forward-compat), derived display, history-CSV schema rotation, sysfs bus / USB
 port detection on fake trees, health flags, card names, the helper's argument
 validation and routing plans (ordering, idempotency, teardown, refusal of
 foreign state), the internal-card udev rule, NetworkManager follow and tidy
-planning, cross-file packaging facts (polkit path, dispatcher, versions), and a
-QML parity check that fails if PHY-mode literals leak back into the QML.
+planning, cross-file packaging facts (polkit path, dispatcher, versions), the
+installer's system settings (ARP sysctl install and uninstall, hand-placed copy
+detection and migration) and the dispatcher's bgscan against fake system
+commands, and a QML parity check that fails if PHY-mode literals leak back into
+the QML.
 
 Widget development: `tools/pv -t 10` runs the plasmoid in `plasmoidviewer` with
 every QML message on stdout. Qt 6 sends logging to the systemd journal whenever
