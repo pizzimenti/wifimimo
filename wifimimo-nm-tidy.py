@@ -8,7 +8,7 @@ wifimimo's NM follow makes that unnecessary, and card-bound copies block it.
 For every SSID with a card-bound profile, keep one (an unbound one if it
 exists, else the most recently used, with its card binding cleared) and
 delete the other bound ones. Unbound copies with the keeper's exact name
-(shown by the applet as "Net (wifi0)") collapse to the most recently used.
+(shown by the applet as "Net (wlan0)") collapse to the most recently used.
 Dry run by default; pass --apply to change anything.
 """
 

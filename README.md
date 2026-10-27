@@ -34,10 +34,29 @@ on either):
 
 ## Requirements
 
-- Linux with an `nl80211`-based Wi-Fi driver
-- Python 3 with `venv`
-- `iw` userspace utility
-- KDE Plasma 6 (optional, only for the panel widget)
+Any Linux with KDE Plasma 6, NetworkManager and systemd, and one or more
+`nl80211` (cfg80211 / mac80211) Wi-Fi adapters; nothing in wifimimo is tied to a
+particular machine, adapter or chip. On Arch and its derivatives (Manjaro,
+EndeavourOS, CachyOS…):
+
+```bash
+sudo pacman -S --needed python iw iproute2 iputils networkmanager wpa_supplicant \
+    polkit sudo kmod procps-ng hwdata kpackage
+```
+
+| Package | Used for |
+|---|---|
+| `python` (3, with `venv`) | daemon, monitor, root helper; `pyroute2` is installed into wifimimo's own venv from PyPI, so the install needs the internet |
+| `iw`, `iproute2`, `iputils` | link and scan data, routing, per-radio gateway pings |
+| `networkmanager`, `wpa_supplicant` | network following, dispatcher hook, background-scan setting (`wpa_cli`, with wpa_supplicant's control socket, as Arch's `wpa_supplicant.service` provides) |
+| `polkit`, `sudo` | `pkexec` for the installer and the widget's switches; `sudo -u` to set up your user service |
+| `kmod`, `procps-ng`, `systemd` | `modprobe`, `sysctl`, `systemd-sysctl`, `udevadm`, the dead-man timer |
+| `hwdata` (optional) | `usb.ids`, for USB stick vendor names |
+| `kpackage`, Plasma 6 (optional) | `kpackagetool6` and the panel widget |
+
+With NetworkManager's `iwd` backend there's no wpa_supplicant, so the
+background-scan setting is skipped (iwd roams on its own); everything else
+works the same.
 
 ## Install
 
@@ -62,21 +81,28 @@ The installer:
 | `/etc/iproute2/rt_protos.d/wifimimo.conf` | Names route protocol 211 `wifimimo` |
 | `/etc/systemd/system/wifimimo-deadman.{service,timer}` | Dead-man check: hands routing back to NetworkManager if anything fails |
 | `/etc/udev/rules.d/70-wifimimo-internal.rules` | Internal-card toggle across reboots (with `--manage-internal`) |
-| `/etc/modprobe.d/wifimimo-internal.conf` | Blacklists a managed internal card's driver, so the rule above is its only loader (with `--manage-internal`, unless already blacklisted) |
+| `/etc/modprobe.d/wifimimo-internal.conf` | Blacklists each managed internal card's driver (detected), so the rule above is its only loader (with `--manage-internal`) |
 | `/etc/wifimimo/` | Multipath / internal-card state (root-owned) |
 | `~/.config/systemd/user/wifimimo-daemon.service` | User systemd service (auto-enabled) |
 | Plasmoid (via `kpackagetool6`) | Per-user `org.kde.plasma.wifimimo` widget |
 
 The script also restarts `plasma-plasmashell.service` so the new widget code loads
-without you having to log out and back in.
+without you having to log out and back in. `./install.sh --uninstall` removes
+every path above (restoring the internal card and the ARP settings first).
+
+Per user, wifimimo keeps its settings in `~/.config/wifimimo/` (`names.json`,
+`roam.json`, both optional) and its history and join log in
+`~/.local/state/wifimimo/`; uninstall leaves those. While Multipath is on it
+changes NetworkManager profiles only temporarily (restored when it hands
+back); `wifimimo-nm-tidy` changes profiles only when run with `--apply`.
 
 Options:
 
 ```bash
-./install.sh --manage-internal 14c3:7925     # let the widget toggle an internal PCI card
-./install.sh --manage-internal auto          # ...every bound PCI wifi card present now
-./install.sh --manage-internal 14c3:7925=mt7925e   # card not present: name the driver
-./install.sh --migrate-legacy-rules          # move hand-made udev rules and hand-placed copies aside
+./install.sh --manage-internal auto          # let the widget toggle every PCI Wi-Fi card present now
+./install.sh --manage-internal 8086:2725     # ...or one card, by vendor:device (lspci -nn; this is an Intel AX210)
+./install.sh --manage-internal 8086:2725=iwlwifi   # card not present now: name its driver
+./install.sh --migrate-legacy-rules          # move hand-made "remove this card" udev rules aside
 ./install.sh --uninstall                     # remove everything (restores the internal card)
 ```
 
@@ -100,17 +126,12 @@ Everything wifimimo needs from the system is installed, and removed again, by
   next boot would set them. A machine whose wired port or dock shares a subnet
   with its Wi-Fi therefore loses the fix on uninstall, unless another sysctl
   file sets it.
-
-Machines set up by hand before wifimimo carried these may still hold their own
-copies: an identical ARP sysctl file in `/etc/sysctl.d/`, the bgscan hook as a
-separate dispatcher script, or a modprobe file that only blacklists a managed
-internal card's driver. The installer lists any exact copies it finds (a file
-that does anything more is left alone); `--migrate-legacy-rules` moves them to
-`/etc/wifimimo/legacy/` under their original path, carrying a blacklist line
-over to `wifimimo-internal.conf` first. A dispatcher copy that a link under
-`dispatcher.d` points at stays where it is, so the link never dangles. Nothing
-changes in behaviour, and `--uninstall` then removes everything, listing what it
-kept in the legacy folder.
+- **Internal card.** With `--manage-internal`, the card's driver is read from
+  the card itself (its bound driver, or the one module its modalias resolves
+  to); name it as `vendor:device=driver` only when the card isn't present or
+  the match is ambiguous. wifimimo blacklists that driver in its own modprobe
+  file, rewritten from `/etc/wifimimo/internal.conf` on every install, so its
+  udev rule stays the driver's only loader.
 
 ## Daemon
 
@@ -139,7 +160,7 @@ from `iw dev <iface> link` as a structured fallback).
 
 ```bash
 wifimimo-mon            # primary card (the connected one)
-wifimimo-mon wlp3s0f3u2 # a specific card
+wifimimo-mon wlan1      # a specific card
 ```
 
 Same telemetry as the panel, in a terminal. Adds a per-link `LINKS` section when
@@ -160,7 +181,7 @@ nothing shifts when a card goes down or you switch cards. From the top:
 - **Card selector** — one button per card (the first is selected by default); each card shows a
   filled dot when up, a hollow one when down, and `!` when flagged. A switched-off
   internal card keeps a ghost button.
-- **Card panel** — the card's name (e.g. `A9000`, `A8000`, `Built-in`), SSID or
+- **Card panel** — the card's name (e.g. `Built-in`, `NetGear MT7921U`, or your own), SSID or
   the reason it's down, device line (bus, USB speed, driver, MAC, address),
   health-flag chips, then SIGNAL / RATES / MCS / TX RETRIES. A down card keeps
   the same layout with dashes and empty meters instead of collapsing.
@@ -232,7 +253,7 @@ A radio's signal is tracked as a trend: one heading below −75 dBm within about
 six seconds moves early to a fresh, stronger slot while its link still works.
 Scouts scan every 6 s while you're moving (30 s when still); without a scout, a
 weak or fading radio scans itself every 10 s. Cards hear the air differently
-(the built-in mt7925e reads ~20 dB below the A9000 on the same AP), so a reading
+(in one test a built-in card read ~20 dB below a USB stick on the same AP), so a reading
 one radio took is only used for another after a learned per-card correction.
 Changes happen one at a time, the next waiting until the last one has landed;
 a move drops the old link first, then joins.
@@ -318,8 +339,12 @@ impractical (flights, walking around) but you normally keep the internal radio
 off. Off removes the card from the PCI bus (like unplugging it); on rescans the
 bus and loads its driver. The choice survives reboots via a generated udev rule
 (`/etc/udev/rules.d/70-wifimimo-internal.rules`, from `/etc/wifimimo/internal.conf`).
-The driver module is never unloaded, since it can be shared with USB sticks of
-the same chip family.
+The card's driver is detected (see above) and blacklisted in
+`/etc/modprobe.d/wifimimo-internal.conf`, so only that rule loads it. The
+driver module is never unloaded, since its common parts can be shared with USB
+sticks of the same chip family; if a stick uses the very same module (PCIe and
+USB variants are usually separate modules), it won't autoload while the
+internal card is off.
 
 ## Health flags
 
@@ -336,12 +361,13 @@ Each card carries flags the widget shows as chips and the monitor lists:
 
 ## Card names
 
-Cards get short names: known models by USB id (`A9000`, `A8000`), `Built-in` for
-PCI cards, otherwise vendor + chip (e.g. `NetGear MT7921U`). Override any of them
-in `~/.config/wifimimo/names.json`, keyed by permanent MAC:
+Cards get short names: `Built-in` for PCI cards, otherwise vendor + chip for USB
+sticks (e.g. `NetGear MT7921U`, from `usb.ids`). Name a model, or one particular
+card, in `~/.config/wifimimo/names.json`, keyed by vendor:product id (`lsusb` /
+`lspci -nn`) or by the card's permanent MAC; a MAC wins over a model id:
 
 ```json
-{ "28:94:01:bb:f8:96": "Travel stick" }
+{ "0846:9060": "A8000", "00:00:5e:00:53:a1": "Travel stick" }
 ```
 
 ## Security model
@@ -370,9 +396,9 @@ document-level `multipath`, `internal_card`, `nm`, `helper_available` and
 ```jsonc
 {
   "schema_version": 4,
-  "iface": "wlp3s0f3u2",
-  "ifaces": ["wlp1s0", "wlp3s0f3u2"],
-  "interfaces": { "wlp1s0": { /* full per-card state */ }, "wlp3s0f3u2": { /* … */ } },
+  "iface": "wlan1",
+  "ifaces": ["wlan0", "wlan1"],
+  "interfaces": { "wlan0": { /* full per-card state */ }, "wlan1": { /* … */ } },
   "connected": true,
   "ssid": "...", "ssid_display": "...", "bssid": "...",
   "freq_mhz": 6295, "chan_num": 69, "bandwidth_mhz": 160,
@@ -419,7 +445,6 @@ back to life on the same hardware.
 
 - [docs/roaming.md](docs/roaming.md): how radio placement and roaming work, and
   the walk evidence behind each rule.
-- [docs/status.md](docs/status.md): where the v1 branch stands and what's open.
 - `tools/walk-log [SECONDS] [NAME]` records a walk (radio links, scan tables,
   per-radio gateway pings, a new-connection probe, NM / kernel / helper logs)
   into `walk-logs/NAME/`; `tools/walk-summary walk-logs/NAME` prints placements,
@@ -442,9 +467,9 @@ port detection on fake trees, health flags, card names, the helper's argument
 validation and routing plans (ordering, idempotency, teardown, refusal of
 foreign state), the internal-card udev rule, NetworkManager follow and tidy
 planning, cross-file packaging facts (polkit path, dispatcher, versions), the
-installer's system settings (ARP sysctl install and uninstall, hand-placed copy
-detection and migration) and the dispatcher's bgscan against fake system
-commands, and a QML parity check that fails if PHY-mode literals leak back into
+installer's system settings (ARP sysctl install and uninstall, the internal
+card's driver detection and blacklist) and the dispatcher's bgscan against fake
+system commands, and a QML parity check that fails if PHY-mode literals leak back into
 the QML.
 
 Widget development: `tools/pv -t 10` runs the plasmoid in `plasmoidviewer` with

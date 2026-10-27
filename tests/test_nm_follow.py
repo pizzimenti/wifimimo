@@ -464,7 +464,7 @@ def test_nothing_starts_while_a_radio_is_connecting():
 
 
 def test_locked_profile_is_skipped_and_flagged():
-    look = lookup(profiles={P: profile(mac_address="28:94:01:BB:F8:96")})
+    look = lookup(profiles={P: profile(mac_address="00:00:5E:00:53:A1")})
     actions, _, status = plan([dev("wifi1", P), dev("wifi0")], {}, 1.0, look, "wifi1")
     assert actions == []
     assert status["iface_flags"]["wifi1"][0]["code"] == "profile_locked"
@@ -489,7 +489,7 @@ def test_an_unbind_that_did_not_stick_is_flagged_not_retried_every_poll():
 
 
 def test_profile_bound_by_mac_and_name_is_only_flagged():
-    look = lookup(profiles={P: profile(interface_name="wifi1", mac_address="28:94:01:BB:F8:96")})
+    look = lookup(profiles={P: profile(interface_name="wifi1", mac_address="00:00:5E:00:53:A1")})
     actions, _, status = plan([dev("wifi1", P), dev("wifi0")], {}, 1.0, look, "wifi1")
     assert actions == []
     assert status["iface_flags"]["wifi1"][0]["code"] == "profile_locked"
@@ -520,12 +520,12 @@ def test_user_pinned_profile_is_left_alone():
 
 
 def test_owe_transition_network_joins_through_the_hidden_twin():
-    scan = [ap("04:cd:c0:18:0b:24", 2437, 87, security="OWE-TM"),
-            ap("04:cd:c0:18:0b:2f", 2437, 85, ssid="", security="OWE")]
+    scan = [ap("00:00:5e:00:53:24", 2437, 87, security="OWE-TM"),
+            ap("00:00:5e:00:53:2f", 2437, 85, ssid="", security="OWE")]
     look = lookup(scans={"wifi0": scan})
     actions, _, _ = plan([dev("wifi1", P), dev("wifi0")], {}, 1.0, look, "wifi1",
                          scans={"wifi0": scan})
-    assert ups(actions) == {"wifi0": "04:cd:c0:18:0b:2f"}
+    assert ups(actions) == {"wifi0": "00:00:5e:00:53:2f"}
 
 
 # --- bad-AP avoidance --------------------------------------------------------
@@ -606,9 +606,9 @@ def test_activate_pinned_sets_then_clears_bssid_around_activation():
         calls.append(" ".join(args))
         return 0, ""
 
-    assert nm.activate_pinned(P, "wifi2", "04:cd:c0:18:0b:04", nmcli=fake) == 0
+    assert nm.activate_pinned(P, "wifi2", "00:00:5e:00:53:04", nmcli=fake) == 0
     assert calls == [
-        f"connection modify --temporary uuid {P} 802-11-wireless.bssid 04:cd:c0:18:0b:04",
+        f"connection modify --temporary uuid {P} 802-11-wireless.bssid 00:00:5e:00:53:04",
         f"-w 0 connection up uuid {P} ifname wifi2",
         f"connection modify --temporary uuid {P} 802-11-wireless.bssid ",
     ]
@@ -624,7 +624,7 @@ def test_activate_pinned_clears_bssid_even_if_activation_raises():
         return 0, ""
 
     try:
-        nm.activate_pinned(P, "wifi2", "04:cd:c0:18:0b:04", nmcli=fake)
+        nm.activate_pinned(P, "wifi2", "00:00:5e:00:53:04", nmcli=fake)
     except OSError:
         pass
     assert calls[-1] == ["connection", "modify"]
@@ -715,11 +715,11 @@ def test_split_terse_unescapes_colons():
 
 
 def test_parse_wifi_list_lowercases_bssid_and_reads_width():
-    rows = nm.parse_wifi_list(r"Central_Library:04\:CD\:C0\:18\:0B\:24:6:2437 MHz:87:OWE-TM:40 MHz")
-    assert rows == [{"ssid": "Central_Library", "bssid": "04:cd:c0:18:0b:24", "chan": 6,
+    rows = nm.parse_wifi_list(r"Central_Library:00\:00\:5E\:00\:53\:24:6:2437 MHz:87:OWE-TM:40 MHz")
+    assert rows == [{"ssid": "Central_Library", "bssid": "00:00:5e:00:53:24", "chan": 6,
                      "freq": 2437, "signal": 87, "security": "OWE-TM", "bandwidth": 40}]
     # older nmcli without BANDWIDTH
-    assert nm.parse_wifi_list(r"X:04\:CD\:C0\:18\:0B\:24:6:2437 MHz:87:WPA2")[0]["bandwidth"] == 20
+    assert nm.parse_wifi_list(r"X:00\:00\:5E\:00\:53\:24:6:2437 MHz:87:WPA2")[0]["bandwidth"] == 20
 
 
 def test_primary_wifi_device_is_lowest_metric():
@@ -741,9 +741,9 @@ def prof(uuid, pid, ssid, mac="", ts=0, key="owe"):
 
 def test_tidy_collapses_card_copies_keeping_the_original_name():
     plan_ = nm.plan_tidy([
-        prof("u1", "Central_Library", "Central_Library", mac="28:94:01:BB:F8:96", ts=1),
-        prof("u2", "Central_Library-a8000", "Central_Library", mac="28:94:01:B7:B9:1A", ts=3),
-        prof("u3", "Central_Library-internal", "Central_Library", mac="3C:3B:AD:16:B7:30", ts=5),
+        prof("u1", "Central_Library", "Central_Library", mac="00:00:5E:00:53:A1", ts=1),
+        prof("u2", "Central_Library-a8000", "Central_Library", mac="00:00:5E:00:53:A2", ts=3),
+        prof("u3", "Central_Library-internal", "Central_Library", mac="00:00:5E:00:53:A3", ts=5),
     ])
     assert plan_ == [{"ssid": "Central_Library",
                       "keep": {"uuid": "u1", "id": "Central_Library", "clear_binding": True},

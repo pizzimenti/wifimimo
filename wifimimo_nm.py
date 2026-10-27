@@ -62,14 +62,14 @@ LIMITED_GRACE_S = 60.0       # joined but not fully connected for this long = ba
 # Avoiding an AP after a failed join is two strikes: the first failure avoids
 # it for RETRY_AVOID_S, then it's tried again; failing that retry too avoids
 # it for good (until you choose the network again in the applet). A join
-# that works clears the strikes. (Live: the riverhouse AX1800 dropped DHCP
+# that works clears the strikes. (Live: one AP dropped DHCP
 # replies for a while, then was fixed; a long first avoid would have kept
 # radios off it after the fix.)
 RETRY_AVOID_S = 300.0
 AVOID_FOREVER = 1e12         # "until" timestamp of a permanent avoid
 # A radio's first connection this soon after it appeared (stick replugged,
 # internal card switched on) is NetworkManager's autoconnect, not a choice.
-# Live 2026-09-25: a replugged A9000 was autoconnected 3 s after it came
+# Live 2026-09-25: a replugged USB stick was autoconnected 3 s after it came
 # back, on a duplicate profile, and was taken for a new user choice.
 NEW_RADIO_GRACE_S = 60.0
 JOIN_START_S = 5.0           # a join isn't judged "didn't start" before this
@@ -84,12 +84,12 @@ JOIN_LOG = STATE_DIR / "joins.jsonl"
 # in a row (6 s) and the link is dead however good its signal reads.
 PROBE_INTERVAL_S = 2
 DEAD_AFTER_S = 6.0
-# A card transmitting at the lowest legacy rate is suspect (the mute A8000
-# sat at 6 Mb/s): two misses are enough then.
+# A card transmitting at the lowest legacy rate is suspect (a mute USB
+# stick sat at 6 Mb/s): two misses are enough then.
 SUSPECT_TX_MBPS = 6.5
 SUSPECT_DEAD_AFTER_S = 4.0
 # A join that hasn't reached full activation within JOIN_TIMEOUT_S is given
-# up (NM would wait 45 s for DHCP; live, three riverhouse joins each cost
+# up (NM would wait 45 s for DHCP; live, three joins to one AP each cost
 # ~50 s: associate, AP drops us 3 s later, retry, no lease).
 JOIN_TIMEOUT_S = 15.0
 # Per radio and AP, a failed join raises the signal we require from that AP
@@ -345,7 +345,7 @@ def band_rank(freq: int) -> int:
 
 TUNING_PATH = Path.home() / ".config" / "wifimimo" / "roam.json"
 # key -> (module, constant, min, max). The thresholds were tuned on one
-# property (Anglers Keep, 2026-09-25); another site may want others.
+# multi-building property (2026-09-25); another site may want others.
 TUNABLES = {
     "strong_dbm": ("roam", "STRONG_DBM", -90.0, -40.0),
     "keep_dbm": ("roam", "KEEP_DBM", -95.0, -45.0),
@@ -640,7 +640,7 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
     #     connectivity after LIMITED_GRACE_S, is a strike against that AP for
     #     that radio (RETRY_AVOID_S, then for good on the second); the radio
     #     is re-pinned elsewhere below.
-    #     (Live 2026-09-24: one AP never gave the A8000 a DHCP lease, and
+    #     (Live 2026-09-24: one AP never gave a USB stick a DHCP lease, and
     #     without this the follower re-picked it forever.)
     #     A join to a strong AP that fails is the AP's doing (live 2026-09-25:
     #     the far AP's 5 GHz side timed out the handshake for both sticks at
@@ -706,8 +706,8 @@ def plan_follow(devices: list[dict], memory: dict, now: float, lookup,
             shared_bad[bssid] = now + SHARED_BAD_S
         # Only a join that never got past association / handshake says the AP
         # couldn't hear us. Past that (DHCP, no traffic) it isn't a signal
-        # problem: live, the riverhouse AP heard us at -70 and mistral
-        # answered every DHCP request; the answers never reached the card.
+        # problem: live, one AP heard us at -70 and the router answered
+        # every DHCP request; the answers never reached the card.
         got_to_ip = mv.get("max_state", 0) >= STATE_IP_CONFIG
         if not got_to_ip:
             raise_floor(name, bssid, mv.get("signal"))
@@ -1106,7 +1106,7 @@ class Liveness:
     gateway every PROBE_INTERVAL_S, bound to that radio (-I), per connected
     radio.
 
-    Signal alone can't tell: live 2026-09-25 the A8000 sat associated at
+    Signal alone can't tell: live 2026-09-25 a USB stick sat associated at
     -55 dBm from 14:32 on, passing nothing (every gateway ping lost, link at
     6 Mb/s), while NetworkManager's connectivity check (every few minutes)
     and the neighbour cache still called it fine.
@@ -1525,7 +1525,7 @@ def plan_tidy(profiles: list[dict]) -> list[dict]:
     interface-name set) are deleted in favour of the keeper; a lone profile
     bound by interface-name is kept with its binding cleared. Unbound
     duplicates are deleted only when they carry the keeper's exact name
-    (the applet can't tell those apart and shows them as "Net (wifi0)");
+    (the applet can't tell those apart and shows them as "Net (wlan0)");
     differently named ones the user made for their own reasons (another
     password, other settings) are left alone. Keeper preference: unbound,
     then named exactly like the SSID (the original rather than a '-a8000'

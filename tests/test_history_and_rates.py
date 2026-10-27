@@ -34,10 +34,10 @@ def test_signal_ring_skips_non_negative_readings():
 
 def test_signal_ring_follows_key_not_iface():
     ring = SignalRing()
-    ring.append("28:94:01:bb:f8:96", 1, -50)
+    ring.append("00:00:5e:00:53:a1", 1, -50)
     # the netdev got renamed; the key (perm MAC) did not
-    ring.append("28:94:01:bb:f8:96", 2, -52)
-    assert len(ring.snapshot("28:94:01:bb:f8:96", 2)) == 2
+    ring.append("00:00:5e:00:53:a1", 2, -52)
+    assert len(ring.snapshot("00:00:5e:00:53:a1", 2)) == 2
     assert ring.snapshot("other", 2) == []
 
 

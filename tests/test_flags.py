@@ -70,11 +70,11 @@ def radio(bssid, freq, subnet="172.20.176.0/22", connected=True, links=()):
 
 
 def test_shared_bss_live_pair():
-    # 2026-09-24: wifi0 and wifi1 both on 04:cd:c0:18:0b:c4 @ 6855.
+    # 2026-09-24: wifi0 and wifi1 both on 00:00:5e:00:53:c4 @ 6855.
     states = {
-        "wifi0": radio("04:cd:c0:18:0b:c4", 6855),
-        "wifi1": radio("04:cd:c0:18:0b:c4", 6855),
-        "wifi2": radio("c8:78:67:39:ff:ef", 5220),
+        "wifi0": radio("00:00:5e:00:53:c4", 6855),
+        "wifi1": radio("00:00:5e:00:53:c4", 6855),
+        "wifi2": radio("00:00:5e:00:53:ef", 5220),
     }
     flags = cross_iface_flags(states, GOOD_ARP)
     assert codes(flags["wifi0"]) == ["shared_bss"]

@@ -115,7 +115,7 @@ def ecmp_members(routes) -> list[str]:
 #
 # One managed PCI wifi device per line:
 #   <vendor>:<device> <driver> [<parent bridge address>]
-#   14c3:7925 mt7925e 0000:00:02.2
+#   8086:2725 iwlwifi 0000:00:1c.0      (e.g.)
 # Comments (#) and blank lines are allowed. Anything else is rejected, so a
 # malformed file can never smuggle text into the generated udev rule.
 # ---------------------------------------------------------------------------

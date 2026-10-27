@@ -37,7 +37,7 @@ def _netdev(sys_root: Path, iface: str, devnode: Path, perm_mac: str, mac: str |
 
 def add_pci_radio(sys_root: Path, iface: str = "wifi0", addr: str = "0000:01:00.0",
                   vendor: str = "0x14c3", device: str = "0x7925", driver: str = "mt7925e",
-                  perm_mac: str = "3c:3b:ad:16:b7:30", bridge: str = "0000:00:02.2") -> Path:
+                  perm_mac: str = "00:00:5e:00:53:a3", bridge: str = "0000:00:02.2") -> Path:
     devnode = sys_root / "devices" / "pci0000:00" / bridge / addr
     _write(devnode / "vendor", vendor)
     _write(devnode / "device", device)

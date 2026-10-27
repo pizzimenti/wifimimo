@@ -48,9 +48,9 @@ def test_parse_argv_rejects(argv):
 # ---------------------------------------------------------------------------
 
 MEMBERS = [
-    {"iface": "wifi2", "perm_mac": "28:94:01:b7:b9:1a", "ip": "172.20.179.66",
+    {"iface": "wifi2", "perm_mac": "00:00:5e:00:53:a2", "ip": "172.20.179.66",
      "subnet": "172.20.176.0/22", "gw": "172.20.176.1"},
-    {"iface": "wifi1", "perm_mac": "28:94:01:bb:f8:96", "ip": "172.20.179.76",
+    {"iface": "wifi1", "perm_mac": "00:00:5e:00:53:a1", "ip": "172.20.179.76",
      "subnet": "172.20.176.0/22", "gw": "172.20.176.1"},
 ]
 LEGACY_RULES = [
@@ -119,7 +119,7 @@ def test_plan_apply_is_idempotent():
 
 
 def test_radio_leaving_cleans_its_slot():
-    rules, routes = _as_live(MEMBERS + [{"iface": "wifi0", "perm_mac": "3c:3b:ad:16:b7:30",
+    rules, routes = _as_live(MEMBERS + [{"iface": "wifi0", "perm_mac": "00:00:5e:00:53:a3",
                                          "ip": "172.20.179.201", "subnet": "172.20.176.0/22",
                                          "gw": "172.20.176.1"}])
     cmds = argvs(helper.plan_apply(MEMBERS, rules, routes, GOOD_SYSCTLS))
@@ -145,7 +145,7 @@ def test_unhealthy_radio_gets_routing_but_no_nexthop():
     # strict rp_filter and no source rule, so its replies were dropped and
     # the check could never pass. It must get its table, rule and loose
     # rp_filter; only the nexthop waits for health.
-    third = {"iface": "wifi0", "perm_mac": "3c:3b:ad:16:b7:30", "ip": "172.20.179.201",
+    third = {"iface": "wifi0", "perm_mac": "00:00:5e:00:53:a3", "ip": "172.20.179.201",
              "subnet": "172.20.176.0/22", "gw": "172.20.176.1"}
     routable = MEMBERS + [third]
     plan = helper.plan_apply(routable, [], [], {}, ecmp=MEMBERS)

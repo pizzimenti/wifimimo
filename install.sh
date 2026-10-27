@@ -7,10 +7,7 @@
 #                                        vendor:device=driver; comma-separate
 #                                        several; or "auto" for present cards)
 #   ./install.sh --migrate-legacy-rules  move hand-made udev rules that remove a
-#                                        managed card, and hand-placed copies of
-#                                        what wifimimo installs itself (ARP
-#                                        sysctls, bgscan hook, a managed card's
-#                                        driver blacklist), to /etc/wifimimo/legacy/
+#                                        managed card to /etc/wifimimo/legacy/
 #   ./install.sh --uninstall             remove everything wifimimo installed
 set -euo pipefail
 
@@ -40,6 +37,7 @@ INTERNAL_CONF="$ETC_DIR/internal.conf"
 INTERNAL_FLAG="$ETC_DIR/internal-enabled"
 INTERNAL_RULE="/etc/udev/rules.d/70-wifimimo-internal.rules"
 WIFIMIMO_BLACKLIST="/etc/modprobe.d/wifimimo-internal.conf"
+SYS_PCI_DIR="/sys/bus/pci/devices"
 LEGACY_DIR="$ETC_DIR/legacy"
 USER_SERVICE_NAME="wifimimo-daemon.service"
 PLASMOID_PLUGIN_ID="org.kde.plasma.wifimimo"
@@ -47,9 +45,8 @@ PY_MODULES=(phy_modes.py wifimimo_core.py wifimimo_shared.py wifimimo_radio.py w
 PY_SCRIPTS=(wifimimo-daemon.py wifimimo-mon.py wifimimo-plasmoid-source.py wifimimo-nm-tidy.py)
 
 # ---------------------------------------------------------------------------
-# System settings for several radios: the ARP sysctls, and adopting
-# hand-placed copies of what wifimimo now installs itself. Defined ahead of
-# the argument handling so the tests can source this file for them alone.
+# System settings and internal-card helpers. Defined ahead of the argument
+# handling so the tests can source this file for them alone.
 # ---------------------------------------------------------------------------
 
 install_arp_flux_sysctl() {
@@ -72,129 +69,115 @@ remove_arp_flux_sysctl() {
     fi
 }
 
-effective_lines() {  # file -> its lines without comments, blanks or edge spaces
-    sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -- "$1" | grep -vE '^([#;]|$)' || true
-}
+# Internal card helpers
 
-sysctl_settings() {  # file -> its settings as sorted key=value lines, keys dotted
-    effective_lines "$1" | awk '{
-        i = index($0, "="); k = substr($0, 1, i - 1); v = substr($0, i + 1)
-        sub(/[ \t]+$/, "", k); sub(/^[ \t]+/, "", v); gsub("/", ".", k)
-        print k "=" v
-    }' | sort
-}
-
-legacy_bgscan_hook() {  # the hand-placed bgscan dispatcher that 90-wifimimo replaces
-    cat <<'EOF2'
-INTERFACE="$1"
-EVENT="$2"
-[ "$EVENT" = "up" ] || exit 0
-TYPE=$(nmcli -g GENERAL.TYPE dev show "$INTERFACE" 2>/dev/null)
-[ "$TYPE" = "wifi" ] || exit 0
-wpa_cli -i "$INTERFACE" set_network 0 bgscan '"simple:30:-70:300"' >/dev/null 2>&1
-EOF2
-}
-
-managed_drivers() {  # drivers of the managed internal cards, one per line
-    [[ -s "$INTERNAL_CONF" ]] || return 0
-    awk '$1 !~ /^#/ && NF >= 2 { print $2 }' "$INTERNAL_CONF" | sort -u
-}
-
-only_blacklists() {  # file drivers -> true when every line blacklists one of them
-    local line seen=0
-    while IFS= read -r line; do
-        [[ "$line" =~ ^blacklist[[:space:]]+([a-z0-9_]+)$ ]] || return 1
-        grep -qxF -- "${BASH_REMATCH[1]}" <<< "$2" || return 1
-        seen=1
-    done < <(effective_lines "$1")
-    [[ $seen == 1 ]]
-}
-
-links_to() {  # path dir -> the symlinks under dir, at any depth, that resolve to path
-    local target link
-    target="$(readlink -f -- "$1")"
-    while IFS= read -r -d '' link; do
-        if [[ "$(readlink -f -- "$link")" == "$target" ]]; then echo "$link"; fi
-    done < <(find "$2" -type l -print0 2>/dev/null)
-    return 0
-}
-
-find_hand_placed_copies() {  # prints "<kind> <path>" per hand-placed copy
-    # Only exact copies (comments and spacing aside) of what wifimimo installs
-    # itself; a file that does anything more is somebody else's and left alone.
-    # A dispatcher copy that a link (in pre-up.d, say) points at is "linked":
-    # listed, but never moved, since moving it would leave the link dangling.
-    local f want drivers
-    want="$(sysctl_settings "$ROOT_DIR/sysctl/99-wifimimo-arp-flux.conf")"
-    for f in "$(dirname "$TARGET_SYSCTL")"/*.conf; do
-        [[ -f "$f" && "$f" != "$TARGET_SYSCTL" ]] || continue
-        if [[ "$(sysctl_settings "$f")" == "$want" ]]; then echo "sysctl $f"; fi
-    done
-    want="$(legacy_bgscan_hook)"
-    for f in "$TARGET_DISPATCHER_DIR"/*; do
-        [[ -f "$f" && ! -L "$f" && "$f" != "$TARGET_DISPATCHER" ]] || continue
-        [[ "$(effective_lines "$f")" == "$want" ]] || continue
-        if [[ -n "$(links_to "$f" "$TARGET_DISPATCHER_DIR")" ]]; then
-            echo "linked $f"
-        else
-            echo "dispatcher $f"
+pci_dev_for_id() {  # vendor:device -> first matching wifi-class PCI address
+    local want="$1" dev vendor device
+    for dev in "$SYS_PCI_DIR"/*; do
+        [[ "$(cat "$dev/class" 2>/dev/null)" == 0x0280* ]] || continue
+        vendor="$(cat "$dev/vendor")"; device="$(cat "$dev/device")"
+        if [[ "${vendor#0x}:${device#0x}" == "$want" ]]; then
+            basename "$dev"
+            return 0
         fi
     done
-    # A managed card's driver must stay blacklisted so the generated udev rule is
-    # its only loader; that line belongs in wifimimo's own modprobe file, which
-    # --uninstall removes along with the rule.
-    drivers="$(managed_drivers)"
-    [[ -n "$drivers" ]] || return 0
-    for f in "$(dirname "$WIFIMIMO_BLACKLIST")"/*.conf; do
-        [[ -f "$f" && "$f" != "$WIFIMIMO_BLACKLIST" ]] || continue
-        if only_blacklists "$f" "$drivers"; then echo "blacklist $f"; fi
-    done
-    return 0
+    return 1
 }
 
-move_to_legacy() {  # path -> $LEGACY_DIR<path>, so it keeps its original path
-    install -d -m755 "$(dirname "$LEGACY_DIR$1")"
-    mv -v -- "$1" "$LEGACY_DIR$1"
-}
-
-handle_hand_placed_copies() {  # 1: move them to $LEGACY_DIR; 0: only say so
-    local copies kind path line
-    copies="$(find_hand_placed_copies)"
-    [[ -n "$copies" ]] || return 0
-    if [[ $1 != 1 ]]; then
-        echo
-        echo "Note: hand-placed copies of what wifimimo now installs itself:" >&2
-        sed 's/^[a-z]* /         /' <<< "$copies" >&2
-        echo "      They duplicate wifimimo's own and would outlive --uninstall. Re-run" >&2
-        echo "      with --migrate-legacy-rules to move them to $LEGACY_DIR/." >&2
+detect_pci_driver() {  # PCI address -> the card's driver module, or fail
+    # The bound driver if there is one; otherwise the one module the card's
+    # modalias resolves to (a blacklisted card is present but unbound). More
+    # than one candidate is ambiguous: the user names it as id=driver.
+    local dev="$SYS_PCI_DIR/$1" mods
+    if [[ -e "$dev/driver" ]]; then
+        basename "$(readlink -f "$dev/driver")"
         return 0
     fi
-    while read -r kind path; do
-        if [[ "$kind" == linked ]]; then
-            echo "Kept $path: these links point at it, so it stays until they're gone:" >&2
-            links_to "$path" "$TARGET_DISPATCHER_DIR" | sed 's/^/  /' >&2
-            continue
-        fi
-        if [[ "$kind" == blacklist ]]; then
-            while IFS= read -r line; do
-                grep -qsxF -- "$line" "$WIFIMIMO_BLACKLIST" || printf '%s\n' "$line" >> "$WIFIMIMO_BLACKLIST"
-            done < <(effective_lines "$path" | sed -E 's/[[:space:]]+/ /')
-            chmod 644 "$WIFIMIMO_BLACKLIST"
-        fi
-        move_to_legacy "$path"
-    done <<< "$copies"
+    [[ -r "$dev/modalias" ]] || return 1
+    mods="$(modprobe -R "$(cat "$dev/modalias")" 2>/dev/null | sort -u)" || return 1
+    [[ -n "$mods" && "$mods" != *$'\n'* ]] || return 1
+    echo "$mods"
 }
 
-report_kept_legacy() {  # true (and lists them) when $LEGACY_DIR holds files
-    local f rel
-    [[ -d "$LEGACY_DIR" ]] && [[ -n "$(find "$LEGACY_DIR" -type f -print -quit)" ]] || return 1
-    echo "Files wifimimo replaced were kept in $LEGACY_DIR:"
-    while IFS= read -r f; do
-        rel="${f#"$LEGACY_DIR"/}"
-        # udev rules were moved flat; everything else keeps its original path
-        if [[ "$rel" == */* ]]; then echo "  $f  (was /$rel)"; else echo "  $f  (was /etc/udev/rules.d/$rel)"; fi
-    done < <(find "$LEGACY_DIR" -type f | sort)
-    echo "Move back any you still want; $ETC_DIR is left in place."
+write_internal_conf() {
+    local spec ids=() lines=() id driver addr bridge any_present=0 dev
+    if [[ "$MANAGE_INTERNAL" == auto ]]; then
+        for dev in "$SYS_PCI_DIR"/*; do
+            [[ "$(cat "$dev/class" 2>/dev/null)" == 0x0280* && -e "$dev/driver" ]] || continue
+            ids+=("$(cat "$dev/vendor" | sed 's/^0x//'):$(cat "$dev/device" | sed 's/^0x//')")
+        done
+        [[ ${#ids[@]} -gt 0 ]] || { echo "--manage-internal auto: no bound PCI wifi card found" >&2; exit 3; }
+    else
+        IFS=',' read -r -a ids <<< "$MANAGE_INTERNAL"
+    fi
+    for spec in "${ids[@]}"; do
+        id="${spec%%=*}"; id="${id,,}"
+        driver=""; [[ "$spec" == *=* ]] && driver="${spec#*=}"
+        [[ "$id" =~ ^[0-9a-f]{4}:[0-9a-f]{4}$ ]] || { echo "bad PCI id: $spec" >&2; exit 2; }
+        bridge=""
+        if addr="$(pci_dev_for_id "$id")"; then
+            any_present=1
+            [[ -n "$driver" ]] || driver="$(detect_pci_driver "$addr" || true)"
+            bridge="$(basename "$(dirname "$(readlink -f "$SYS_PCI_DIR/$addr")")")"
+            [[ "$bridge" =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ ]] || bridge=""
+        fi
+        [[ "$driver" =~ ^[a-z0-9_]{1,32}$ ]] || {
+            echo "cannot determine the driver for $id (card not present?). Pass it as $id=<driver>." >&2
+            exit 3
+        }
+        lines+=("$id $driver${bridge:+ $bridge}")
+    done
+    install -d -m755 "$ETC_DIR"
+    printf '# Managed internal Wi-Fi cards: <vendor:device> <driver> [parent bridge]\n' > "$INTERNAL_CONF"
+    printf '%s\n' "${lines[@]}" >> "$INTERNAL_CONF"
+    chmod 644 "$INTERNAL_CONF"
+    echo "Wrote $INTERNAL_CONF:"; sed 's/^/  /' "$INTERNAL_CONF"
+    # Never yank a card that's working right now: if it's present, start "on".
+    if [[ $any_present == 1 && ! -e "$INTERNAL_FLAG" ]]; then
+        touch "$INTERNAL_FLAG"
+        echo "Internal card is present now, so it starts enabled (toggle it off in the widget)."
+    fi
+}
+
+write_internal_blacklist() {  # wifimimo's own blacklist for every managed card's driver
+    # The generated udev rule must be the driver's only loader, or the card
+    # comes back at boot whatever the toggle says. The file is wifimimo's alone
+    # (rewritten from internal.conf on every install, removed by --uninstall),
+    # whatever other modprobe files may also say.
+    local drivers=""
+    if [[ -s "$INTERNAL_CONF" ]]; then
+        drivers="$(awk '$1 !~ /^#/ && NF >= 2 { print $2 }' "$INTERNAL_CONF" | sort -u)"
+    fi
+    if [[ -z "$drivers" ]]; then
+        rm -f -- "$WIFIMIMO_BLACKLIST"
+        return 0
+    fi
+    install -d -m755 "$(dirname "$WIFIMIMO_BLACKLIST")"
+    {
+        echo "# Generated by wifimimo's install.sh from $INTERNAL_CONF; removed by --uninstall."
+        echo "# The internal-card udev rule is the only loader of these drivers."
+        sed 's/^/blacklist /' <<< "$drivers"
+    } > "$WIFIMIMO_BLACKLIST"
+    chmod 644 "$WIFIMIMO_BLACKLIST"
+}
+
+handle_legacy_rules() {
+    local legacy
+    legacy="$("$TARGET_HELPER" internal status | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin).get("legacy_rules", [])))')"
+    [[ -n "$legacy" ]] || return 0
+    if [[ $MIGRATE_LEGACY == 1 ]]; then
+        install -d -m755 "$LEGACY_DIR"
+        while IFS= read -r path; do
+            mv -v -- "$path" "$LEGACY_DIR/"
+        done <<< "$legacy"
+        udevadm control --reload
+    else
+        echo
+        echo "WARNING: hand-made udev rule(s) still remove the internal card at every boot," >&2
+        echo "         overriding wifimimo's toggle:" >&2
+        sed 's/^/           /' <<< "$legacy" >&2
+        echo "         Re-run with --migrate-legacy-rules to move them to $LEGACY_DIR/." >&2
+    fi
 }
 
 # Sourced (by the tests): definitions only.
@@ -281,90 +264,6 @@ upgrade_or_install_plasmoid() {
 }
 
 # ---------------------------------------------------------------------------
-# Internal card helpers
-# ---------------------------------------------------------------------------
-
-pci_dev_for_id() {  # vendor:device -> first matching wifi-class PCI address
-    local want="$1" dev vendor device
-    for dev in /sys/bus/pci/devices/*; do
-        [[ "$(cat "$dev/class" 2>/dev/null)" == 0x0280* ]] || continue
-        vendor="$(cat "$dev/vendor")"; device="$(cat "$dev/device")"
-        if [[ "${vendor#0x}:${device#0x}" == "$want" ]]; then
-            basename "$dev"
-            return 0
-        fi
-    done
-    return 1
-}
-
-write_internal_conf() {
-    local spec ids=() lines=() id driver addr bridge any_present=0
-    if [[ "$MANAGE_INTERNAL" == auto ]]; then
-        for dev in /sys/bus/pci/devices/*; do
-            [[ "$(cat "$dev/class" 2>/dev/null)" == 0x0280* && -e "$dev/driver" ]] || continue
-            ids+=("$(cat "$dev/vendor" | sed 's/^0x//'):$(cat "$dev/device" | sed 's/^0x//')")
-        done
-        [[ ${#ids[@]} -gt 0 ]] || { echo "--manage-internal auto: no bound PCI wifi card found" >&2; exit 3; }
-    else
-        IFS=',' read -r -a ids <<< "$MANAGE_INTERNAL"
-    fi
-    for spec in "${ids[@]}"; do
-        id="${spec%%=*}"; id="${id,,}"
-        driver=""; [[ "$spec" == *=* ]] && driver="${spec#*=}"
-        [[ "$id" =~ ^[0-9a-f]{4}:[0-9a-f]{4}$ ]] || { echo "bad PCI id: $spec" >&2; exit 2; }
-        bridge=""
-        if addr="$(pci_dev_for_id "$id")"; then
-            any_present=1
-            [[ -n "$driver" ]] || driver="$(basename "$(readlink -f "/sys/bus/pci/devices/$addr/driver")" 2>/dev/null || true)"
-            bridge="$(basename "$(dirname "$(readlink -f "/sys/bus/pci/devices/$addr")")")"
-            [[ "$bridge" =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ ]] || bridge=""
-        fi
-        [[ "$driver" =~ ^[a-z0-9_]{1,32}$ ]] || {
-            echo "cannot determine the driver for $id (card not present?). Pass it as $id=<driver>." >&2
-            exit 3
-        }
-        lines+=("$id $driver${bridge:+ $bridge}")
-    done
-    install -d -m755 "$ETC_DIR"
-    printf '# Managed internal Wi-Fi cards: <vendor:device> <driver> [parent bridge]\n' > "$INTERNAL_CONF"
-    printf '%s\n' "${lines[@]}" >> "$INTERNAL_CONF"
-    chmod 644 "$INTERNAL_CONF"
-    echo "Wrote $INTERNAL_CONF:"; sed 's/^/  /' "$INTERNAL_CONF"
-    # Never yank a card that's working right now: if it's present, start "on".
-    if [[ $any_present == 1 && ! -e "$INTERNAL_FLAG" ]]; then
-        touch "$INTERNAL_FLAG"
-        echo "Internal card is present now, so it starts enabled (toggle it off in the widget)."
-    fi
-    # Blacklist the driver so the generated udev rule is its only loader.
-    for line in "${lines[@]}"; do
-        driver="$(awk '{print $2}' <<< "$line")"
-        if ! grep -qsE "^[[:space:]]*blacklist[[:space:]]+$driver([[:space:]]|\$)" /etc/modprobe.d/*.conf; then
-            printf 'blacklist %s\n' "$driver" >> "$WIFIMIMO_BLACKLIST"
-            echo "Added 'blacklist $driver' to $WIFIMIMO_BLACKLIST"
-        fi
-    done
-}
-
-handle_legacy_rules() {
-    local legacy
-    legacy="$("$TARGET_HELPER" internal status | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin).get("legacy_rules", [])))')"
-    [[ -n "$legacy" ]] || return 0
-    if [[ $MIGRATE_LEGACY == 1 ]]; then
-        install -d -m755 "$LEGACY_DIR"
-        while IFS= read -r path; do
-            mv -v -- "$path" "$LEGACY_DIR/"
-        done <<< "$legacy"
-        udevadm control --reload
-    else
-        echo
-        echo "WARNING: hand-made udev rule(s) still remove the internal card at every boot," >&2
-        echo "         overriding wifimimo's toggle:" >&2
-        sed 's/^/           /' <<< "$legacy" >&2
-        echo "         Re-run with --migrate-legacy-rules to move them to $LEGACY_DIR/." >&2
-    fi
-}
-
-# ---------------------------------------------------------------------------
 # Uninstall
 # ---------------------------------------------------------------------------
 
@@ -393,7 +292,13 @@ if [[ $UNINSTALL == 1 ]]; then
     run_as_user kpackagetool6 -t Plasma/Applet --remove "$PLASMOID_PLUGIN_ID" 2>/dev/null || true
     rm -f -- "$TARGET_DAEMON" "$TARGET_MON" "$TARGET_PLASMOID_SOURCE" "$TARGET_TIDY" "$TARGET_DESKTOP"
     rm -rf -- "$TARGET_LIB_DIR"
-    report_kept_legacy || rm -rf -- "$ETC_DIR"
+    if [[ -d "$LEGACY_DIR" ]] && compgen -G "$LEGACY_DIR/*" >/dev/null; then
+        echo "Your pre-wifimimo udev rules were kept in $LEGACY_DIR:"
+        ls -1 "$LEGACY_DIR" | sed 's/^/  /'
+        echo "Move them back to /etc/udev/rules.d/ if you still want them; $ETC_DIR is left in place."
+    else
+        rm -rf -- "$ETC_DIR"
+    fi
     rm -rf -- /run/wifimimo
     echo "wifimimo uninstalled."
     exit 0
@@ -446,6 +351,7 @@ install_arp_flux_sysctl
 if [[ -n "$MANAGE_INTERNAL" ]]; then
     write_internal_conf
 fi
+write_internal_blacklist
 "$TARGET_HELPER" internal sync-rules >/dev/null
 if [[ -s "$INTERNAL_CONF" ]]; then
     handle_legacy_rules
@@ -453,7 +359,6 @@ if [[ -s "$INTERNAL_CONF" ]]; then
         udevadm verify "$INTERNAL_RULE" >/dev/null 2>&1 || echo "Note: udevadm verify reported problems in $INTERNAL_RULE" >&2
     fi
 fi
-handle_hand_placed_copies "$MIGRATE_LEGACY"
 if [[ -e "$ETC_DIR/multipath-enabled" ]]; then
     echo "Multipath is enabled; re-applying with the new routing layout..."
     "$TARGET_HELPER" multipath apply || true

@@ -9,7 +9,7 @@ Re-run when AP / driver / kernel changes uncover a PHY mode or MLO shape
 the suite doesn't yet cover, then promote the output to a named fixture
 (iw_link_eht_mlo.txt, etc.) and add a matching parametrised test case.
 
-Usage:  python tests/capture_fixtures.py [iface]
+Usage:  python tests/capture_fixtures.py [iface]   (default: the first Wi-Fi netdev)
 """
 
 from __future__ import annotations
@@ -72,8 +72,16 @@ def _capture_nl80211(iface: str) -> None:
     print(f"wrote {out} (ifindex={ifindex}, stations={len(stations)})")
 
 
+def _first_wifi_iface() -> str:
+    """The first Wi-Fi netdev (a phy80211 link or wireless/ dir in sysfs)."""
+    for dev in sorted(Path("/sys/class/net").iterdir()):
+        if (dev / "phy80211").exists() or (dev / "wireless").is_dir():
+            return dev.name
+    sys.exit("no Wi-Fi interface found; pass one: capture_fixtures.py <iface>")
+
+
 def main() -> int:
-    iface = sys.argv[1] if len(sys.argv) > 1 else "wlp1s0"
+    iface = sys.argv[1] if len(sys.argv) > 1 else _first_wifi_iface()
     ok = _capture_iw_link(iface)
     _capture_nl80211(iface)
     return 0 if ok else 1

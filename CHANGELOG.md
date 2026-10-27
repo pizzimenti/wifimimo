@@ -11,45 +11,51 @@ Each version's heading says whether it was a major, minor or patch change.
 
 ### Added
 
-- `install.sh` installs all the wireless handling wifimimo needs, so a new
-  machine gets it from `git clone` and `./install.sh` alone:
+- `install.sh` installs, and `--uninstall` removes, all the system handling
+  wifimimo needs, on any NetworkManager + Plasma machine with one or several
+  Wi-Fi adapters:
   - `/etc/sysctl.d/99-wifimimo-arp-flux.conf` sets `arp_ignore=1` /
     `arp_announce=2` on `all`, for adapters holding addresses on one subnet,
-    and is applied at install. `--uninstall` removes it, resets both keys to
-    the kernel's default, then has `systemd-sysctl` re-apply just those two
-    keys from the remaining sysctl files (glob lines included), so they end
-    up exactly as the next boot would set them and nothing else is re-applied.
+    applied at install. `--uninstall` removes it, resets both keys to the
+    kernel's default, then has `systemd-sysctl` re-apply just those two keys
+    from the remaining sysctl files (glob lines included), so they end up as
+    the next boot would set them and nothing else is re-applied. A machine
+    whose wired port or dock shares a subnet with its Wi-Fi loses the fix on
+    uninstall unless another sysctl file sets it.
   - The dispatcher hook sets wpa_supplicant's background scan to
     `simple:30:-70:300` on every Wi-Fi connection (scan every 300 s above
-    -70 dBm, every 30 s below), whether or not multipath is on. It tells a
-    Wi-Fi netdev from sysfs (`phy80211` or `wireless/`, as the daemon does)
-    rather than asking NetworkManager, and caps `wpa_cli` at 5 s, so a stuck
-    NM or wpa_supplicant can't delay the multipath step after it.
-- The installer finds exact hand-placed copies of these (an identical ARP
-  sysctl file, the old standalone bgscan dispatcher script, a modprobe file
-  that only blacklists a managed internal card's driver) and lists them;
-  `--migrate-legacy-rules` moves them to `/etc/wifimimo/legacy/` under their
-  original path, carrying a blacklist line over to `wifimimo-internal.conf`
-  first, so `--uninstall` leaves nothing behind. A copy of the bgscan hook that
-  a link under `dispatcher.d` (in `pre-up.d`, say) points at is listed but not
-  moved, since moving it would leave NetworkManager a dangling script.
-- Once the copies are migrated, the ARP-flux settings are wifimimo's: the
-  hand-placed file sits in `/etc/wifimimo/legacy/`, so `--uninstall` takes
-  `arp_ignore` / `arp_announce` away with it. A machine whose wired port or
-  dock shares a subnet with its Wi-Fi loses that fix on uninstall, until the
-  kept file is moved back to `/etc/sysctl.d/`.
+    -70 dBm, every 30 s below), multipath or not. It tells a Wi-Fi netdev from
+    sysfs (`phy80211` or `wireless/`, as the daemon does) and caps `wpa_cli` at
+    5 s, so a stuck NetworkManager or wpa_supplicant can't delay multipath.
+- README: the packages wifimimo needs on Arch and its derivatives, and every
+  path and setting the installer changes.
 
 ### Changed
 
-- `--uninstall` lists every file kept in `/etc/wifimimo/legacy/` with the path
-  it came from.
+- **Card names**: no model names are built in any more. Name a model in
+  `~/.config/wifimimo/names.json` by its vendor:product id (USB or PCI), or one
+  card by its permanent MAC as before; a MAC wins over a model id. Without an
+  entry a USB stick is named by vendor and chip (`NetGear MT7925U`).
+- **Internal card blacklist**: `/etc/modprobe.d/wifimimo-internal.conf` is
+  wifimimo's own, rewritten from `/etc/wifimimo/internal.conf` on every install
+  (and removed when no card is managed), whatever other modprobe files say.
+  Before, it was skipped when another file already blacklisted the driver, so
+  the toggle depended on that other file staying in place.
 - The README's install table lists the dead-man timer, the internal-card udev
   rule and the modprobe blacklist.
+- Docs, comments and examples name no particular machine, site or adapter;
+  `docs/status.md`, a status note from the v1 branch, is removed.
+  `tests/capture_fixtures.py` defaults to the first Wi-Fi netdev.
 
 ### Fixed
 
+- `--manage-internal ID` on a card that is present but has no driver bound
+  (already blacklisted, say) recorded its driver as `driver`. The driver is now
+  the bound one, else the single module the card's modalias resolves to
+  (`modprobe -R`); when that is ambiguous or unknown, the installer asks for
+  `ID=driver` as it does for an absent card.
 - `install.sh --help` printed the script's `set -euo pipefail` line after the
-  options; it now prints the option header alone, however long it grows.
+  options; it now prints the option header alone.
 
 ## [1.8.4] - 2026-10-14 (patch)
 
