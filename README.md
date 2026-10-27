@@ -101,7 +101,7 @@ Options:
 ```bash
 ./install.sh --manage-internal auto          # let the widget toggle every PCI Wi-Fi card present now
 ./install.sh --manage-internal 8086:2725     # ...or one card, by vendor:device (lspci -nn; this is an Intel AX210)
-./install.sh --manage-internal 8086:2725=iwlwifi   # card not present now: name its driver
+./install.sh --manage-internal 8086:2725=iwlwifi   # internal card not present now: name its PCI driver
 ./install.sh --migrate-legacy-rules          # move hand-made "remove this card" udev rules aside
 ./install.sh --uninstall                     # remove everything (restores the internal card)
 ```
@@ -127,11 +127,20 @@ Everything wifimimo needs from the system is installed, and removed again, by
   with its Wi-Fi therefore loses the fix on uninstall, unless another sysctl
   file sets it.
 - **Internal card.** With `--manage-internal`, the card's driver is read from
-  the card itself (its bound driver, or the one module its modalias resolves
-  to); name it as `vendor:device=driver` only when the card isn't present or
-  the match is ambiguous. wifimimo blacklists that driver in its own modprobe
-  file, rewritten from `/etc/wifimimo/internal.conf` on every install, so its
-  udev rule stays the driver's only loader.
+  the card itself (the module of its bound driver, or the one module its
+  modalias resolves to); name it as `vendor:device=driver` only when the card
+  isn't present or the match is ambiguous. It is for internal PCI cards only:
+  an id that belongs to a USB device, or a driver with no PCI alias in
+  `modinfo`, is refused, since blacklisting a USB driver would stop every stick
+  that uses it. wifimimo blacklists the driver in its own modprobe file,
+  rewritten from `/etc/wifimimo/internal.conf` on every install, so its udev
+  rule stays the driver's only loader; if that driver also runs another device
+  (a second card on the same module), the installer says so, because that
+  device won't load at boot either while the internal card is off.
+  `internal.conf` is read with the helper's own strict parser: a line it
+  rejects stops the install before anything changes. A Broadcom card with no
+  driver bound resolves to the bus module `bcma`, not its Wi-Fi driver: name
+  the driver (`brcmsmac`, `b43` or `wl`) yourself for those.
 
 ## Daemon
 
@@ -181,7 +190,7 @@ nothing shifts when a card goes down or you switch cards. From the top:
 - **Card selector** — one button per card (the first is selected by default); each card shows a
   filled dot when up, a hollow one when down, and `!` when flagged. A switched-off
   internal card keeps a ghost button.
-- **Card panel** — the card's name (e.g. `Built-in`, `NetGear MT7921U`, or your own), SSID or
+- **Card panel** — the card's name (e.g. `Built-in`, `Realtek RTW88_8822BU`, or your own), SSID or
   the reason it's down, device line (bus, USB speed, driver, MAC, address),
   health-flag chips, then SIGNAL / RATES / MCS / TX RETRIES. A down card keeps
   the same layout with dashes and empty meters instead of collapsing.
@@ -362,12 +371,12 @@ Each card carries flags the widget shows as chips and the monitor lists:
 ## Card names
 
 Cards get short names: `Built-in` for PCI cards, otherwise vendor + chip for USB
-sticks (e.g. `NetGear MT7921U`, from `usb.ids`). Name a model, or one particular
+sticks (e.g. `Realtek RTW88_8822BU`, from `usb.ids`). Name a model, or one particular
 card, in `~/.config/wifimimo/names.json`, keyed by vendor:product id (`lsusb` /
 `lspci -nn`) or by the card's permanent MAC; a MAC wins over a model id:
 
 ```json
-{ "0846:9060": "A8000", "00:00:5e:00:53:a1": "Travel stick" }
+{ "ffff:00a1": "Desk stick", "00:00:5e:00:53:a1": "Travel stick" }
 ```
 
 ## Security model

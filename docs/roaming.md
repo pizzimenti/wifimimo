@@ -1,12 +1,10 @@
 # Roaming and radio placement
 
 How wifimimo decides where each radio sits while multipath is on, and why each
-rule exists. Every rule below came out of walk tests at one three-building
-property on 2026-09-25 (three access points: AP 1 with 2.4 GHz ch 11 + 5 GHz
-ch 52/80, AP 2 (an AX1800) on 5 GHz ch 36/80 and 2.4 GHz, and AP 3 (an Omada
-EAP720) on 2.4 GHz ch 6 + 5 GHz ch 100/80), with two USB sticks (mt7925u and
-mt7921u) and a built-in mt7925e. The thresholds are defaults for that kind of
-site, not constants: tune them for yours (see "Tuning a site").
+rule exists. Every rule below came out of walk tests on a network of several
+dual-band access points, with three radios (two USB sticks and a built-in
+card). The thresholds are defaults for that kind of network, not constants:
+tune them for yours (see "Tuning a site").
 
 Code: `wifimimo_roam.py` (pure planner), `wifimimo_nm.py` (NetworkManager
 follower: I/O, judging, holds, traffic check, fail-safe), `wifimimo-helper`
@@ -35,7 +33,7 @@ follower: I/O, judging, holds, traffic check, fail-safe), `wifimimo-helper`
 - Each radio's level is sampled every second and tracked as a trend
   (least-squares slope over 8 s, per BSSID). A held slot is graded by where it's
   heading 6 s out, so a fading radio moves while its link still works.
-- Cards hear the air differently (the built-in read ~20 dB below the mt7925u stick on
+- Cards hear the air differently (a built-in card read ~20 dB below a USB stick on
   the same AP). A reading one radio took is used for another only after a learned
   per-card, per-band offset, less a 3 dB uncertainty penalty.
 - Candidates come from each radio's own cfg80211 scan table (`iw dev X scan
@@ -48,24 +46,24 @@ follower: I/O, judging, holds, traffic check, fail-safe), `wifimimo-helper`
 |---|---|
 | One switch at a time: a radio mid-switch is busy until it lands or is judged failed | two overlapping switches left all three radios down for 66 s |
 | A move drops the old link first, then joins | switching in place failed "no secrets" 2 of 2 times; joins from disconnected 0 of 8 |
-| Nothing below −72 dBm is ever tried | APs with a minimum-signal floor (AP 3 drops clients it hears below −75) hear us weaker than we hear them: one AP read at −70 heard the mt7921u stick at −84 |
+| Nothing below −72 dBm is ever tried | APs with a minimum-signal floor (one drops clients it hears below −75) hear us weaker than we hear them: one AP read at −70 heard a stick at −84 |
 | Traffic check: a gateway ping per radio every 2 s, bound to that radio; 3 misses = dead (2 if the card is stuck at the lowest rate) | a card sat associated at −55 dBm passing nothing for minutes; NM's connectivity check and the neighbour cache both still called it fine |
 | The traffic check restarts when a radio changes AP | every AP shares one gateway, so a switched radio kept its pre-switch last reply and read dead 2 s after landing |
 | A join not up within 15 s is cancelled | NM waits 45 s for DHCP; each failed join cost ~50 s |
-| A signal floor is learned only from joins that never got past authentication | a DHCP timeout isn't a signal problem: see "AP 2" below |
+| A signal floor is learned only from joins that never got past authentication | a DHCP timeout isn't a signal problem: see "A DHCP fault in an AP" below |
 | Two strikes: a failed AP is avoided 5 min, then retried; a second failure avoids it until you pick the network again | a long first avoid kept radios off an AP after it was fixed |
 | A working radio moves for speed only to an AP some radio carried traffic on in the last 30 min; the only working radio never moves for speed | a stick left a working AP for an unproven one and lost 56 s |
 | NetworkManager's autoconnect is blocked on every radio while following | a flickering radio was reconnected by NM onto the AP the planner had just given another radio |
 | A replugged card's autoconnect, or a second profile for the same network, isn't a new network choice | a replugged stick autoconnected 3 s after reappearing and pulled every radio onto one AP |
 
-## AP 2: a DHCP fault in the AP (not a wifimimo bug)
+## A DHCP fault in an AP (not a wifimimo bug)
 
-Joins to AP 2 associated fine (even at −24 dBm) but never got an address. A
+Joins to one AP associated fine (even at −24 dBm) but never got an address. A
 DHCP capture showed our requests leaving and nothing coming back; the router's
 logs showed every request answered (unicast, since the client doesn't set the
 broadcast flag). The cause was the AP's switch chip keeping a client's MAC pinned
 to its wired uplink after the client had been on another AP, dropping the
-replies inside the AP. Fixed on the AP side; afterwards every join to AP 2 got
+replies inside the AP. Fixed on the AP side; afterwards every join to it got
 an address in 3–4 s. The 15 s give-up and the rule that DHCP failures teach no
 signal floor are what kept this from wedging the planner.
 

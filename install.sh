@@ -38,6 +38,8 @@ INTERNAL_FLAG="$ETC_DIR/internal-enabled"
 INTERNAL_RULE="/etc/udev/rules.d/70-wifimimo-internal.rules"
 WIFIMIMO_BLACKLIST="/etc/modprobe.d/wifimimo-internal.conf"
 SYS_PCI_DIR="/sys/bus/pci/devices"
+SYS_USB_DIR="/sys/bus/usb/devices"
+SYS_MODULE_DIR="/sys/module"
 LEGACY_DIR="$ETC_DIR/legacy"
 USER_SERVICE_NAME="wifimimo-daemon.service"
 PLASMOID_PLUGIN_ID="org.kde.plasma.wifimimo"
@@ -84,12 +86,28 @@ pci_dev_for_id() {  # vendor:device -> first matching wifi-class PCI address
     return 1
 }
 
+usb_dev_for_id() {  # vendor:product -> true when a USB device carries that id
+    local dev
+    for dev in "$SYS_USB_DIR"/*; do
+        [[ -r "$dev/idVendor" && -r "$dev/idProduct" ]] || continue
+        if [[ "$(cat "$dev/idVendor"):$(cat "$dev/idProduct")" == "$1" ]]; then return 0; fi
+    done
+    return 1
+}
+
+module_drives_pci() {  # module -> true when it has a PCI alias (can bind a PCI card)
+    modinfo -F alias -- "$1" 2>/dev/null | grep -q '^pci:'
+}
+
 detect_pci_driver() {  # PCI address -> the card's driver module, or fail
-    # The bound driver if there is one; otherwise the one module the card's
-    # modalias resolves to (a blacklisted card is present but unbound). More
-    # than one candidate is ambiguous: the user names it as id=driver.
+    # The module behind the bound driver if there is one; otherwise the one
+    # module the card's modalias resolves to (a blacklisted card is present but
+    # unbound). More than one candidate is ambiguous: the user names it.
     local dev="$SYS_PCI_DIR/$1" mods
-    if [[ -e "$dev/driver" ]]; then
+    if [[ -e "$dev/driver/module" ]]; then
+        basename "$(readlink -f "$dev/driver/module")"
+        return 0
+    elif [[ -e "$dev/driver" ]]; then
         basename "$(readlink -f "$dev/driver")"
         return 0
     fi
@@ -115,7 +133,13 @@ write_internal_conf() {
         driver=""; [[ "$spec" == *=* ]] && driver="${spec#*=}"
         [[ "$id" =~ ^[0-9a-f]{4}:[0-9a-f]{4}$ ]] || { echo "bad PCI id: $spec" >&2; exit 2; }
         bridge=""
-        if addr="$(pci_dev_for_id "$id")"; then
+        addr="$(pci_dev_for_id "$id")" || addr=""
+        if [[ -z "$addr" ]] && usb_dev_for_id "$id"; then
+            echo "$id is a USB device. --manage-internal is for internal PCI cards only;" >&2
+            echo "a USB stick is switched off by unplugging it." >&2
+            exit 2
+        fi
+        if [[ -n "$addr" ]]; then
             any_present=1
             [[ -n "$driver" ]] || driver="$(detect_pci_driver "$addr" || true)"
             bridge="$(basename "$(dirname "$(readlink -f "$SYS_PCI_DIR/$addr")")")"
@@ -124,6 +148,13 @@ write_internal_conf() {
         [[ "$driver" =~ ^[a-z0-9_]{1,32}$ ]] || {
             echo "cannot determine the driver for $id (card not present?). Pass it as $id=<driver>." >&2
             exit 3
+        }
+        # The blacklist and the PCI-only udev rule are only right for a PCI
+        # driver: blacklisting a USB driver would stop every stick that uses it.
+        module_drives_pci "$driver" || {
+            echo "$driver is not a PCI driver module (modinfo lists no pci: alias for it);" >&2
+            echo "--manage-internal takes an internal PCI card's driver, e.g. $id=iwlwifi." >&2
+            exit 2
         }
         lines+=("$id $driver${bridge:+ $bridge}")
     done
@@ -139,15 +170,60 @@ write_internal_conf() {
     fi
 }
 
+managed_internal_entries() {  # "<id> <driver>" per managed card, by the helper's strict parser
+    # The helper reads internal.conf with this same parser and ignores a file
+    # with any bad line, so the installer must never act on a laxer reading.
+    [[ -s "$INTERNAL_CONF" ]] || return 0
+    python3 -I - "$ROOT_DIR" "$INTERNAL_CONF" <<'EOF2'
+import sys
+sys.path.insert(0, sys.argv[1])
+import wifimimo_shared as shared
+try:
+    with open(sys.argv[2], encoding="utf-8") as handle:
+        entries = shared.parse_internal_conf(handle.read())
+except (OSError, shared.ConfigError) as exc:
+    sys.exit(f"{sys.argv[2]}: {exc}")
+for entry in entries:
+    print(entry["id"], entry["driver"])
+EOF2
+}
+
+warn_shared_drivers() {  # "<id> <driver>" lines -> note other devices those modules drive
+    # The blacklist covers the whole module, so any other device it drives
+    # (a second card, say) won't load at boot either while the managed card is off.
+    local ids drivers driver link node others
+    ids="$(awk '{print $1}' <<< "$1")"
+    drivers="$(awk '{print $2}' <<< "$1" | sort -u)"
+    for driver in $drivers; do
+        others=()
+        for link in "$SYS_MODULE_DIR/$driver"/drivers/*/*; do
+            [[ -L "$link" && "${link##*/}" != module ]] || continue
+            node="$(readlink -f "$link")"
+            if [[ -r "$node/vendor" && -r "$node/device" ]] && grep -qxF -- \
+                    "$(sed 's/^0x//' "$node/vendor"):$(sed 's/^0x//' "$node/device")" <<< "$ids"; then
+                continue    # a managed card itself
+            fi
+            others+=("${link##*/}")
+        done
+        if [[ ${#others[@]} -gt 0 ]]; then
+            echo "Note: $driver also drives ${others[*]}. While the internal card is off, the" >&2
+            echo "      blacklist keeps $driver from loading at boot, so those won't come up either." >&2
+        fi
+    done
+}
+
 write_internal_blacklist() {  # wifimimo's own blacklist for every managed card's driver
     # The generated udev rule must be the driver's only loader, or the card
     # comes back at boot whatever the toggle says. The file is wifimimo's alone
     # (rewritten from internal.conf on every install, removed by --uninstall),
     # whatever other modprobe files may also say.
-    local drivers=""
-    if [[ -s "$INTERNAL_CONF" ]]; then
-        drivers="$(awk '$1 !~ /^#/ && NF >= 2 { print $2 }' "$INTERNAL_CONF" | sort -u)"
+    local entries drivers
+    if ! entries="$(managed_internal_entries)"; then
+        echo "WARNING: $INTERNAL_CONF can't be read (above), so the helper treats no card" >&2
+        echo "         as managed; $WIFIMIMO_BLACKLIST was left as it was." >&2
+        return 0
     fi
+    drivers="$(awk 'NF == 2 {print $2}' <<< "$entries" | sort -u)"
     if [[ -z "$drivers" ]]; then
         rm -f -- "$WIFIMIMO_BLACKLIST"
         return 0
@@ -159,6 +235,7 @@ write_internal_blacklist() {  # wifimimo's own blacklist for every managed card'
         sed 's/^/blacklist /' <<< "$drivers"
     } > "$WIFIMIMO_BLACKLIST"
     chmod 644 "$WIFIMIMO_BLACKLIST"
+    warn_shared_drivers "$entries"
 }
 
 handle_legacy_rules() {
@@ -307,6 +384,15 @@ fi
 # ---------------------------------------------------------------------------
 # Install / upgrade
 # ---------------------------------------------------------------------------
+
+# A hand-edited internal.conf with a bad line would leave the helper and the
+# installer disagreeing about which cards are managed: stop before changing
+# anything (--manage-internal rewrites the file, so it may go ahead).
+if [[ -z "$MANAGE_INTERNAL" ]] && ! managed_internal_entries >/dev/null; then
+    echo "Fix or remove $INTERNAL_CONF (or re-run with --manage-internal), then install" >&2
+    echo "again. Nothing was changed." >&2
+    exit 3
+fi
 
 install -d -m755 "$TARGET_LIB_DIR"
 for f in "${PY_MODULES[@]}"; do install -Dm644 "$ROOT_DIR/$f" "$TARGET_LIB_DIR/$f"; done

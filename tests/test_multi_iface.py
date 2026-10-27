@@ -41,9 +41,9 @@ def _state(iface: str, connected: bool) -> dict:
 
 
 def test_discovery_finds_only_wifi_netdevs(tmp_path: Path):
-    base = _fake_sysfs(tmp_path, wifi=["wlp3s0f3u2", "wlp1s0"], wired=["lo", "enp2s0"])
+    base = _fake_sysfs(tmp_path, wifi=["wlan1", "wlan0"], wired=["lo", "enp2s0"])
     assert wifimimo_core.discover_wifi_ifaces(base, iftypes={}) == [
-        "wlp1s0", "wlp3s0f3u2",
+        "wlan0", "wlan1",
     ]
 
 
@@ -87,33 +87,33 @@ def test_discovery_keeps_ifaces_unknown_to_nl80211(tmp_path: Path):
 
 def test_primary_prefers_connected_card():
     states = {
-        "wlp1s0": _state("wlp1s0", connected=False),
-        "wlp3s0f3u2": _state("wlp3s0f3u2", connected=True),
+        "wlan0": _state("wlan0", connected=False),
+        "wlan1": _state("wlan1", connected=True),
     }
-    assert wifimimo_core.select_primary_iface(states) == "wlp3s0f3u2"
+    assert wifimimo_core.select_primary_iface(states) == "wlan1"
 
 
 def test_primary_falls_back_alphabetical_when_nothing_connected():
     states = {
-        "wlp3s0f3u2": _state("wlp3s0f3u2", connected=False),
-        "wlp1s0": _state("wlp1s0", connected=False),
+        "wlan1": _state("wlan1", connected=False),
+        "wlan0": _state("wlan0", connected=False),
     }
-    assert wifimimo_core.select_primary_iface(states) == "wlp1s0"
+    assert wifimimo_core.select_primary_iface(states) == "wlan0"
 
 
 def test_build_multi_state_mirrors_primary_at_top_level():
-    usb = _state("wlp3s0f3u2", connected=True)
-    usb["ssid"] = "Anglers Keep 5"
-    states = {"wlp1s0": _state("wlp1s0", connected=False), "wlp3s0f3u2": usb}
+    usb = _state("wlan1", connected=True)
+    usb["ssid"] = "ExampleSSID 5"
+    states = {"wlan0": _state("wlan0", connected=False), "wlan1": usb}
     doc = wifimimo_core.build_multi_state(states)
-    assert doc["iface"] == "wlp3s0f3u2"
+    assert doc["iface"] == "wlan1"
     assert doc["connected"] is True
-    assert doc["ssid"] == "Anglers Keep 5"
-    assert doc["ifaces"] == ["wlp1s0", "wlp3s0f3u2"]
-    assert set(doc["interfaces"]) == {"wlp1s0", "wlp3s0f3u2"}
+    assert doc["ssid"] == "ExampleSSID 5"
+    assert doc["ifaces"] == ["wlan0", "wlan1"]
+    assert set(doc["interfaces"]) == {"wlan0", "wlan1"}
     # Sub-states don't nest the multi-card keys again.
-    assert "interfaces" not in doc["interfaces"]["wlp3s0f3u2"]
-    assert "ifaces" not in doc["interfaces"]["wlp3s0f3u2"]
+    assert "interfaces" not in doc["interfaces"]["wlan1"]
+    assert "ifaces" not in doc["interfaces"]["wlan1"]
 
 
 def test_build_multi_state_empty_input_is_disconnected_defaults():
@@ -130,18 +130,18 @@ def test_build_multi_state_empty_input_is_disconnected_defaults():
 
 
 def test_interfaces_survive_state_round_trip(tmp_path: Path):
-    usb = _state("wlp3s0f3u2", connected=True)
+    usb = _state("wlan1", connected=True)
     usb["tx_mode"] = "EHT"
     usb["display"] = wifimimo_core.derive_display(usb)
     doc = wifimimo_core.build_multi_state(
-        {"wlp1s0": _state("wlp1s0", connected=False), "wlp3s0f3u2": usb}
+        {"wlan0": _state("wlan0", connected=False), "wlan1": usb}
     )
     path = tmp_path / "state"
     wifimimo_core.write_state(path, doc)
     loaded = wifimimo_core.read_state(path)
-    assert loaded["ifaces"] == ["wlp1s0", "wlp3s0f3u2"]
-    assert loaded["interfaces"]["wlp3s0f3u2"]["tx_mode"] == "EHT"
-    assert loaded["interfaces"]["wlp1s0"]["connected"] is False
+    assert loaded["ifaces"] == ["wlan0", "wlan1"]
+    assert loaded["interfaces"]["wlan1"]["tx_mode"] == "EHT"
+    assert loaded["interfaces"]["wlan0"]["connected"] is False
 
 
 def test_partial_interface_substate_deep_merges(tmp_path: Path):
@@ -190,22 +190,22 @@ def test_malformed_v4_structured_fields_keep_defaults(tmp_path: Path):
 
 
 def test_doc_only_keys_never_leak_into_interfaces():
-    usb = _state("wifi1", connected=True)
+    usb = _state("wlan2", connected=True)
     usb.update(multipath={"active": True}, internal_card={"managed": True},
                helper_available=True, sampled_at=1.0, nm={"x": 1})
-    doc = wifimimo_core.build_multi_state({"wifi1": usb})
+    doc = wifimimo_core.build_multi_state({"wlan2": usb})
     assert doc["multipath"] == {"active": True}
-    assert not set(wifimimo_core.DOC_ONLY_KEYS) & set(doc["interfaces"]["wifi1"])
+    assert not set(wifimimo_core.DOC_ONLY_KEYS) & set(doc["interfaces"]["wlan2"])
 
 
 def test_v4_per_radio_fields_round_trip(tmp_path: Path):
-    usb = _state("wifi1", connected=True)
-    usb.update(card_name="A9000", flags=[{"code": "shared_bss"}],
+    usb = _state("wlan2", connected=True)
+    usb.update(card_name="ExampleStick", flags=[{"code": "shared_bss"}],
                signal_history=[[1.0, -55]], usb_speed_mbps=5000)
     path = tmp_path / "state"
-    wifimimo_core.write_state(path, wifimimo_core.build_multi_state({"wifi1": usb}))
-    sub = wifimimo_core.read_state(path)["interfaces"]["wifi1"]
-    assert sub["card_name"] == "A9000"
+    wifimimo_core.write_state(path, wifimimo_core.build_multi_state({"wlan2": usb}))
+    sub = wifimimo_core.read_state(path)["interfaces"]["wlan2"]
+    assert sub["card_name"] == "ExampleStick"
     assert sub["flags"] == [{"code": "shared_bss"}]
     assert sub["signal_history"] == [[1.0, -55]]
     assert sub["usb_speed_mbps"] == 5000

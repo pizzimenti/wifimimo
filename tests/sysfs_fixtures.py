@@ -35,9 +35,9 @@ def _netdev(sys_root: Path, iface: str, devnode: Path, perm_mac: str, mac: str |
     return net
 
 
-def add_pci_radio(sys_root: Path, iface: str = "wifi0", addr: str = "0000:01:00.0",
-                  vendor: str = "0x14c3", device: str = "0x7925", driver: str = "mt7925e",
-                  perm_mac: str = "00:00:5e:00:53:a3", bridge: str = "0000:00:02.2") -> Path:
+def add_pci_radio(sys_root: Path, iface: str = "wlan0", addr: str = "0000:01:00.0",
+                  vendor: str = "0x17cb", device: str = "0x1103", driver: str = "ath11k_pci",
+                  perm_mac: str = "00:00:5e:00:53:a3", bridge: str = "0000:00:1c.0") -> Path:
     devnode = sys_root / "devices" / "pci0000:00" / bridge / addr
     _write(devnode / "vendor", vendor)
     _write(devnode / "device", device)
@@ -56,7 +56,7 @@ def add_usb_radio(sys_root: Path, iface: str, bus_num: int, port: int, speed: in
                   peer: bool = True, hub_port: int | None = None) -> Path:
     """A USB wifi stick on a root-hub port, or behind an external hub.
 
-    Mirrors e.g. usb7/7-1/7-1:1.0/net/wifi2 with the port node at
+    Mirrors e.g. usb7/7-1/7-1:1.0/net/wlan2 with the port node at
     usb7/7-0:1.0/usb7-port1 (root hub) or 7-1/7-1:1.0/7-1-port2 (hub).
     """
     usb = sys_root / "devices" / "pci0000:00" / "0000:00:08.3" / "0000:05:00.4" / f"usb{bus_num}"

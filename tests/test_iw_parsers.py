@@ -81,7 +81,7 @@ def test_parse_link_blocks_eht_mlo():
 def test_mlo_primary_link_with_width_fallback(monkeypatch):
     text = _load("iw_link_eht_mlo.txt")
     monkeypatch.setattr(wifimimo_core, "_run", lambda cmd: text)
-    freq, width, links = wifimimo_core._parse_mlo_primary_link("wlp1s0")
+    freq, width, links = wifimimo_core._parse_mlo_primary_link("wlan0")
     # First Link block in the fixture is Link 2 (6 GHz), and the MLD-stats
     # bitrate line carries the 320MHz width.
     assert freq == 6295
@@ -91,7 +91,7 @@ def test_mlo_primary_link_with_width_fallback(monkeypatch):
 
 def test_mlo_primary_link_empty_on_non_mlo(monkeypatch):
     monkeypatch.setattr(wifimimo_core, "_run", lambda cmd: _load("iw_link_he_single.txt"))
-    freq, width, links = wifimimo_core._parse_mlo_primary_link("wlp1s0")
+    freq, width, links = wifimimo_core._parse_mlo_primary_link("wlan0")
     assert (freq, width, links) == (0, 0, [])
 
 
@@ -102,8 +102,8 @@ def test_320mhz_width_in_nl80211_table():
 def test_fallback_via_iw_link_populates_connected_state(monkeypatch):
     text = _load("iw_link_eht_mlo.txt")
     monkeypatch.setattr(wifimimo_core, "_run", lambda cmd: text)
-    data = wifimimo_core.default_state("wlp1s0")
-    wifimimo_core._fallback_via_iw_link(data, "wlp1s0")
+    data = wifimimo_core.default_state("wlan0")
+    wifimimo_core._fallback_via_iw_link(data, "wlan0")
     # When netlink station info is missing, iw link must still surface
     # connected=True and the basic identity fields, not leave defaults.
     assert data["connected"] is True
@@ -119,8 +119,8 @@ def test_fallback_via_iw_link_populates_connected_state(monkeypatch):
 
 def test_fallback_via_iw_link_noop_on_disconnected(monkeypatch):
     monkeypatch.setattr(wifimimo_core, "_run", lambda cmd: _load("iw_link_disconnected.txt"))
-    data = wifimimo_core.default_state("wlp1s0")
-    wifimimo_core._fallback_via_iw_link(data, "wlp1s0")
+    data = wifimimo_core.default_state("wlan0")
+    wifimimo_core._fallback_via_iw_link(data, "wlan0")
     assert data["connected"] is False
     assert data["links"] == []
 
@@ -129,18 +129,18 @@ def test_augment_with_iw_link_skips_when_freq_and_width_populated(monkeypatch):
     # Non-MLO: netlink filled freq+width, no need to spawn iw every poll.
     calls = []
     monkeypatch.setattr(wifimimo_core, "_run", lambda cmd: (calls.append(cmd), "")[1])
-    data = wifimimo_core.default_state("wlp1s0")
+    data = wifimimo_core.default_state("wlan0")
     data["freq_mhz"] = 5180
     data["bandwidth_mhz"] = 80
-    wifimimo_core._augment_with_iw_link(data, "wlp1s0")
+    wifimimo_core._augment_with_iw_link(data, "wlan0")
     assert calls == [], "iw should not run when freq/width already populated"
 
 
 def test_augment_with_iw_link_runs_when_freq_missing(monkeypatch):
     monkeypatch.setattr(wifimimo_core, "_run", lambda cmd: _load("iw_link_eht_mlo.txt"))
-    data = wifimimo_core.default_state("wlp1s0")
+    data = wifimimo_core.default_state("wlan0")
     # freq_mhz left at default 0 (MLO MLD signature)
-    wifimimo_core._augment_with_iw_link(data, "wlp1s0")
+    wifimimo_core._augment_with_iw_link(data, "wlan0")
     assert data["freq_mhz"] == 6295
     assert data["bandwidth_mhz"] == 320
     assert len(data["links"]) == 2
@@ -154,7 +154,7 @@ def test_collect_pure_iw_path_promotes_primary_link_freq(monkeypatch):
     monkeypatch.setattr(wifimimo_core, "_collect_via_netlink", lambda iface: None)
     mlo_text = _load("iw_link_eht_mlo.txt")
     monkeypatch.setattr(wifimimo_core, "_run", lambda cmd: mlo_text if "link" in cmd else "")
-    data = wifimimo_core.collect("wlp1s0")
+    data = wifimimo_core.collect("wlan0")
     assert data["connected"] is True
     assert data["freq_mhz"] == 6295
     assert data["chan_num"] == 69
@@ -169,7 +169,7 @@ def test_primary_link_prefers_bssid_match(monkeypatch):
     monkeypatch.setattr(wifimimo_core, "_collect_via_netlink", lambda iface: None)
     text = _load("iw_link_eht_mlo_anchor.txt")
     monkeypatch.setattr(wifimimo_core, "_run", lambda cmd: text if "link" in cmd else "")
-    data = wifimimo_core.collect("wlp1s0")
+    data = wifimimo_core.collect("wlan0")
     # "Connected to" matches Link 0's BSSID — that link is 5180 MHz / ch36
     # even though Link 2 (6295 MHz) appears first in the iw output.
     assert data["bssid"] == "02:00:00:03:55:73"
@@ -183,7 +183,7 @@ def test_parse_link_metrics_mlo_top_level_signal_from_mld_stats_not_link():
     # not whichever Link block's per-link signal appeared first (-70 dBm
     # on the 6 GHz link in this fixture).
     text = (
-        "Connected to 02:00:00:08:55:74 (on wlp1s0)\n"
+        "Connected to 02:00:00:08:55:74 (on wlan0)\n"
         "\tSSID: example-mld-signal\n"
         "\tLink 2 BSSID 02:00:00:09:55:75\n"
         "\t\tfreq: 6295.0\n"
@@ -196,7 +196,7 @@ def test_parse_link_metrics_mlo_top_level_signal_from_mld_stats_not_link():
         "\trx bitrate: 2880.0 MBit/s 320MHz EHT-MCS 11 EHT-NSS 2 EHT-GI 0\n"
         "\ttx bitrate: 1440.0 MBit/s 320MHz EHT-MCS 11 EHT-NSS 1 EHT-GI 0\n"
     )
-    data = wifimimo_core.default_state("wlp1s0")
+    data = wifimimo_core.default_state("wlan0")
     wifimimo_core.parse_link_metrics(data, text)
     assert data["signal_dbm"] == -59, "should be MLD-stats signal, not per-link"
 
@@ -207,13 +207,13 @@ def test_parse_link_metrics_ssid_containing_link_substring_is_not_mlo():
     # the freq extraction would be skipped and freq_mhz/chan_num would
     # stay zero on a perfectly normal 5 GHz single-link connection.
     text = (
-        "Connected to 02:00:00:06:11:22 (on wlp1s0)\n"
+        "Connected to 02:00:00:06:11:22 (on wlan0)\n"
         "\tSSID: My Link 2 BSSID lounge\n"
         "\tfreq: 5180\n"
         "\tsignal: -55 dBm\n"
         "\ttx bitrate: 866.7 MBit/s 80MHz VHT-MCS 9 VHT-NSS 2\n"
     )
-    data = wifimimo_core.default_state("wlp1s0")
+    data = wifimimo_core.default_state("wlan0")
     wifimimo_core.parse_link_metrics(data, text)
     assert data["ssid"] == "My Link 2 BSSID lounge"
     assert data["freq_mhz"] == 5180

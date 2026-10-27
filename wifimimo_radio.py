@@ -189,7 +189,7 @@ def card_name(info: dict, overrides: dict | None = None, usb_ids_paths=USB_IDS_P
 class NameOverrides:
     """~/.config/wifimimo/names.json, re-read on change. Keys are a card's
     permanent MAC ("00:00:5e:00:53:01") or a model's USB/PCI vendor:product
-    id ("1234:5678"); values are the names to show."""
+    id ("ffff:00a1"); values are the names to show."""
 
     def __init__(self, path: Path = NAMES_PATH) -> None:
         self.path = path

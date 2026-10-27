@@ -35,25 +35,35 @@ Each version's heading says whether it was a major, minor or patch change.
 - **Card names**: no model names are built in any more. Name a model in
   `~/.config/wifimimo/names.json` by its vendor:product id (USB or PCI), or one
   card by its permanent MAC as before; a MAC wins over a model id. Without an
-  entry a USB stick is named by vendor and chip (`NetGear MT7925U`).
+  entry a USB stick is named by vendor and chip (e.g. `Realtek RTW88_8822BU`).
 - **Internal card blacklist**: `/etc/modprobe.d/wifimimo-internal.conf` is
   wifimimo's own, rewritten from `/etc/wifimimo/internal.conf` on every install
   (and removed when no card is managed), whatever other modprobe files say.
   Before, it was skipped when another file already blacklisted the driver, so
-  the toggle depended on that other file staying in place.
+  the toggle depended on that other file staying in place. If the driver also
+  runs another device, the installer says that device won't load at boot
+  either while the internal card is off.
+- `internal.conf` is read by the installer with the helper's own strict
+  parser. A line the helper would reject (so managing no card) stops the
+  install before anything changes, and the blacklist is never written from a
+  laxer reading of the file.
 - The README's install table lists the dead-man timer, the internal-card udev
   rule and the modprobe blacklist.
 - Docs, comments and examples name no particular machine, site or adapter;
-  `docs/status.md`, a status note from the v1 branch, is removed.
-  `tests/capture_fixtures.py` defaults to the first Wi-Fi netdev.
+  `docs/status.md`, a status note from the v1 branch, is removed. Test data
+  uses `wlan0`…, example SSIDs, RFC 5737 / RFC 7042 addresses and made-up
+  ids. `tests/capture_fixtures.py` defaults to the first Wi-Fi netdev.
 
 ### Fixed
 
 - `--manage-internal ID` on a card that is present but has no driver bound
   (already blacklisted, say) recorded its driver as `driver`. The driver is now
-  the bound one, else the single module the card's modalias resolves to
-  (`modprobe -R`); when that is ambiguous or unknown, the installer asks for
-  `ID=driver` as it does for an absent card.
+  the module behind the bound driver, else the single module the card's
+  modalias resolves to (`modprobe -R`); when that is ambiguous or unknown, the
+  installer asks for `ID=driver` as it does for an absent card.
+- `--manage-internal` refuses a USB device's id, and a driver with no PCI alias
+  in `modinfo`: `ID=mt7921u` used to blacklist that USB driver, so after a
+  reboot no stick using it loaded, multipath radios included.
 - `install.sh --help` printed the script's `set -euo pipefail` line after the
   options; it now prints the option header alone.
 

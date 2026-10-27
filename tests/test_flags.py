@@ -70,17 +70,17 @@ def radio(bssid, freq, subnet="172.20.176.0/22", connected=True, links=()):
 
 
 def test_shared_bss_live_pair():
-    # 2026-09-24: wifi0 and wifi1 both on 00:00:5e:00:53:c4 @ 6855.
+    # 2026-09-24: wlan0 and wlan1 both on 00:00:5e:00:53:c4 @ 6855.
     states = {
-        "wifi0": radio("00:00:5e:00:53:c4", 6855),
-        "wifi1": radio("00:00:5e:00:53:c4", 6855),
-        "wifi2": radio("00:00:5e:00:53:ef", 5220),
+        "wlan0": radio("00:00:5e:00:53:c4", 6855),
+        "wlan1": radio("00:00:5e:00:53:c4", 6855),
+        "wlan2": radio("00:00:5e:00:53:ef", 5220),
     }
     flags = cross_iface_flags(states, GOOD_ARP)
-    assert codes(flags["wifi0"]) == ["shared_bss"]
-    assert codes(flags["wifi1"]) == ["shared_bss"]
-    assert flags["wifi2"] == []
-    assert "wifi1" in flags["wifi0"][0]["detail"]
+    assert codes(flags["wlan0"]) == ["shared_bss"]
+    assert codes(flags["wlan1"]) == ["shared_bss"]
+    assert flags["wlan2"] == []
+    assert "wlan1" in flags["wlan0"][0]["detail"]
 
 
 def test_shared_channel_different_bss():

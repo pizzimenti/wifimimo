@@ -19,14 +19,14 @@ from sysfs_fixtures import add_pci_radio
 
 ADDR = [
     {"ifname": "lo", "addr_info": [{"family": "inet", "local": "127.0.0.1", "prefixlen": 8, "scope": "host"}]},
-    {"ifname": "wifi1", "addr_info": [{"family": "inet", "local": "172.20.179.76", "prefixlen": 22,
+    {"ifname": "wlan1", "addr_info": [{"family": "inet", "local": "172.20.179.76", "prefixlen": 22,
                                        "scope": "global", "dynamic": True}]},
-    {"ifname": "wifi2", "addr_info": [{"family": "inet", "local": "172.20.179.66", "prefixlen": 22,
+    {"ifname": "wlan2", "addr_info": [{"family": "inet", "local": "172.20.179.66", "prefixlen": 22,
                                        "scope": "global"}]},
 ]
 DEFAULTS_NM = [
-    {"dst": "default", "gateway": "172.20.176.1", "dev": "wifi1", "protocol": "dhcp", "metric": 610},
-    {"dst": "default", "gateway": "172.20.176.1", "dev": "wifi2", "protocol": "dhcp", "metric": 700},
+    {"dst": "default", "gateway": "172.20.176.1", "dev": "wlan1", "protocol": "dhcp", "metric": 610},
+    {"dst": "default", "gateway": "172.20.176.1", "dev": "wlan2", "protocol": "dhcp", "metric": 700},
 ]
 RULES_ACTIVE = [
     {"priority": 0, "src": "all", "table": "local"},
@@ -38,31 +38,31 @@ RULES_ACTIVE = [
     {"priority": 32766, "src": "all", "table": "main"},
 ]
 TABLE100 = [{"dst": "default", "protocol": "wifimimo", "flags": [], "nexthops": [
-    {"gateway": "172.20.176.1", "dev": "wifi1", "weight": 1, "flags": []},
-    {"gateway": "172.20.176.1", "dev": "wifi2", "weight": 1, "flags": []},
+    {"gateway": "172.20.176.1", "dev": "wlan1", "weight": 1, "flags": []},
+    {"gateway": "172.20.176.1", "dev": "wlan2", "weight": 1, "flags": []},
 ]}]
 
 
 def test_parse_ip_addr_global_only():
     assert parse_ip_addr(ADDR) == {
-        "wifi1": {"ipv4": "172.20.179.76", "prefixlen": 22, "subnet": "172.20.176.0/22"},
-        "wifi2": {"ipv4": "172.20.179.66", "prefixlen": 22, "subnet": "172.20.176.0/22"},
+        "wlan1": {"ipv4": "172.20.179.76", "prefixlen": 22, "subnet": "172.20.176.0/22"},
+        "wlan2": {"ipv4": "172.20.179.66", "prefixlen": 22, "subnet": "172.20.176.0/22"},
     }
     assert parse_ip_addr("garbage") == {}
 
 
 def test_parse_default_routes_single_and_multipath():
-    assert parse_default_routes(DEFAULTS_NM) == {"wifi1": "172.20.176.1", "wifi2": "172.20.176.1"}
-    assert parse_default_routes(TABLE100) == {"wifi1": "172.20.176.1", "wifi2": "172.20.176.1"}
+    assert parse_default_routes(DEFAULTS_NM) == {"wlan1": "172.20.176.1", "wlan2": "172.20.176.1"}
+    assert parse_default_routes(TABLE100) == {"wlan1": "172.20.176.1", "wlan2": "172.20.176.1"}
 
 
 def test_multipath_live_active():
-    assert parse_multipath_live(RULES_ACTIVE, TABLE100) == {"active": True, "members": ["wifi1", "wifi2"]}
+    assert parse_multipath_live(RULES_ACTIVE, TABLE100) == {"active": True, "members": ["wlan1", "wlan2"]}
 
 
 def test_single_nexthop_failover_route_is_not_multipath():
-    single = [{"dst": "default", "protocol": "wifimimo", "gateway": "172.20.176.1", "dev": "wifi1"}]
-    assert parse_multipath_live(RULES_ACTIVE, single) == {"active": False, "members": ["wifi1"]}
+    single = [{"dst": "default", "protocol": "wifimimo", "gateway": "172.20.176.1", "dev": "wlan1"}]
+    assert parse_multipath_live(RULES_ACTIVE, single) == {"active": False, "members": ["wlan1"]}
 
 
 def test_multipath_live_route_without_rules_is_inactive():
@@ -84,12 +84,12 @@ def test_multipath_status_merges_helper_result(tmp_path):
     etc.mkdir(), run.mkdir()
     (etc / "multipath-enabled").touch()
     (run / "multipath.json").write_text(json.dumps({
-        "reason": "needs ≥2 radios", "excluded": [{"iface": "wifi0", "reason": "captive portal"}],
+        "reason": "needs ≥2 radios", "excluded": [{"iface": "wlan0", "reason": "captive portal"}],
     }))
     status = read_multipath_status(etc, run, live={"active": False, "members": []})
     assert status["desired"] is True and status["active"] is False
     assert status["reason"] == "needs ≥2 radios"
-    assert status["excluded"][0]["iface"] == "wifi0"
+    assert status["excluded"][0]["iface"] == "wlan0"
 
 
 def test_multipath_status_off_has_no_reason(tmp_path):
@@ -105,11 +105,11 @@ def test_internal_status_unmanaged(tmp_path):
 def test_internal_status_present_and_absent(tmp_path):
     sys_root, etc = tmp_path / "sys", tmp_path / "etc"
     etc.mkdir()
-    (etc / "internal.conf").write_text("14c3:7925 mt7925e 0000:00:02.2\n")
+    (etc / "internal.conf").write_text("17cb:1103 ath11k_pci 0000:00:1c.0\n")
     status = read_internal_status(sys_root, etc)
     assert status["managed"] and not status["present"] and not status["desired"]
     add_pci_radio(sys_root)
     (etc / "internal-enabled").touch()
     status = read_internal_status(sys_root, etc)
     assert status["present"] and status["bound"] and status["desired"]
-    assert status["iface"] == "wifi0" and status["pci_addr"] == "0000:01:00.0"
+    assert status["iface"] == "wlan0" and status["pci_addr"] == "0000:01:00.0"

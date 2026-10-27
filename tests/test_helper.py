@@ -34,7 +34,7 @@ def test_parse_argv_accepts(argv, expected):
 
 
 @pytest.mark.parametrize("argv", [
-    [], ["multipath"], ["multipath", "apply", "wifi0"], ["multipath", "reboot"],
+    [], ["multipath"], ["multipath", "apply", "wlan0"], ["multipath", "reboot"],
     ["internal", "enable;rm -rf /"], ["--dry-run"], ["disk", "enable"],
     ["multipath", "--dry-run", "apply"],
 ])
@@ -48,9 +48,9 @@ def test_parse_argv_rejects(argv):
 # ---------------------------------------------------------------------------
 
 MEMBERS = [
-    {"iface": "wifi2", "perm_mac": "00:00:5e:00:53:a2", "ip": "172.20.179.66",
+    {"iface": "wlan2", "perm_mac": "00:00:5e:00:53:a2", "ip": "172.20.179.66",
      "subnet": "172.20.176.0/22", "gw": "172.20.176.1"},
-    {"iface": "wifi1", "perm_mac": "00:00:5e:00:53:a1", "ip": "172.20.179.76",
+    {"iface": "wlan1", "perm_mac": "00:00:5e:00:53:a1", "ip": "172.20.179.76",
      "subnet": "172.20.176.0/22", "gw": "172.20.176.1"},
 ]
 LEGACY_RULES = [
@@ -73,11 +73,11 @@ def test_plan_apply_order_and_content():
     # legacy rules go first, before any table is reassigned
     assert cmds[0] == "ip -4 rule del priority 5300 from 172.20.179.201 lookup 101"
     assert cmds[1] == "ip -4 rule del priority 5301 from 172.20.179.76 lookup 102"
-    assert "ip -4 route replace default via 172.20.176.1 dev wifi2 table 101 proto 211" in cmds
+    assert "ip -4 route replace default via 172.20.176.1 dev wlan2 table 101 proto 211" in cmds
     assert "ip -4 rule add priority 32001 from 172.20.179.66 lookup 101 protocol 211" in cmds
     assert "ip -4 rule add priority 32002 from 172.20.179.76 lookup 102 protocol 211" in cmds
     swap = ("ip -4 route replace default table 100 proto 211 "
-            "nexthop via 172.20.176.1 dev wifi2 weight 1 nexthop via 172.20.176.1 dev wifi1 weight 1")
+            "nexthop via 172.20.176.1 dev wlan2 weight 1 nexthop via 172.20.176.1 dev wlan1 weight 1")
     assert swap in cmds
     # the swap comes after every table build, rule add and sysctl
     swap_at = [i for i, s in enumerate(plan) if s[0] == "cmd" and " ".join(s[1]) == swap][0]
@@ -119,12 +119,12 @@ def test_plan_apply_is_idempotent():
 
 
 def test_radio_leaving_cleans_its_slot():
-    rules, routes = _as_live(MEMBERS + [{"iface": "wifi0", "perm_mac": "00:00:5e:00:53:a3",
+    rules, routes = _as_live(MEMBERS + [{"iface": "wlan0", "perm_mac": "00:00:5e:00:53:a3",
                                          "ip": "172.20.179.201", "subnet": "172.20.176.0/22",
                                          "gw": "172.20.176.1"}])
     cmds = argvs(helper.plan_apply(MEMBERS, rules, routes, GOOD_SYSCTLS))
     assert "ip -4 rule del priority 32003 from 172.20.179.201 lookup 103" in cmds
-    assert "ip -4 route del default table 103 dev wifi0" in cmds
+    assert "ip -4 route del default table 103 dev wlan0" in cmds
 
 
 def test_teardown_removes_ecmp_route_first_and_restores_sysctls_last():
@@ -145,15 +145,15 @@ def test_unhealthy_radio_gets_routing_but_no_nexthop():
     # strict rp_filter and no source rule, so its replies were dropped and
     # the check could never pass. It must get its table, rule and loose
     # rp_filter; only the nexthop waits for health.
-    third = {"iface": "wifi0", "perm_mac": "00:00:5e:00:53:a3", "ip": "172.20.179.201",
+    third = {"iface": "wlan0", "perm_mac": "00:00:5e:00:53:a3", "ip": "172.20.179.201",
              "subnet": "172.20.176.0/22", "gw": "172.20.176.1"}
     routable = MEMBERS + [third]
     plan = helper.plan_apply(routable, [], [], {}, ecmp=MEMBERS)
     cmds = argvs(plan)
     assert "ip -4 rule add priority 32003 from 172.20.179.201 lookup 103 protocol 211" in cmds
-    assert ("sysctl", "net/ipv4/conf/wifi0/rp_filter", "2") in plan
+    assert ("sysctl", "net/ipv4/conf/wlan0/rp_filter", "2") in plan
     swap = [c for c in cmds if c.startswith("ip -4 route replace default table 100")][0]
-    assert "dev wifi0" not in swap and "dev wifi1" in swap and "dev wifi2" in swap
+    assert "dev wlan0" not in swap and "dev wlan1" in swap and "dev wlan2" in swap
 
 
 def test_one_healthy_radio_gets_all_new_flows():
@@ -163,7 +163,7 @@ def test_one_healthy_radio_gets_all_new_flows():
     plan = helper.plan_apply(MEMBERS, rules, routes, GOOD_SYSCTLS, ecmp=MEMBERS[1:])
     cmds = argvs(plan)
     assert ("ip -4 route replace default table 100 proto 211 "
-            "nexthop via 172.20.176.1 dev wifi1 weight 1") in cmds
+            "nexthop via 172.20.176.1 dev wlan1 weight 1") in cmds
     assert not [c for c in cmds if " rule del " in c]      # radio rules stay
 
 
@@ -189,7 +189,7 @@ def test_teardown_leaves_foreign_routes_in_radio_tables():
 
 
 def test_teardown_flushes_tables_adopted_from_legacy_rules_whole():
-    routes = [{"dst": "default", "dev": "wifi1", "table": "102", "protocol": "boot"}]
+    routes = [{"dst": "default", "dev": "wlan1", "table": "102", "protocol": "boot"}]
     cmds = argvs(helper.plan_teardown(LEGACY_RULES, routes))
     assert "ip -4 route flush table 102" in cmds
 
@@ -257,7 +257,7 @@ def test_teardown_is_best_effort(tmp_path):
 
 def test_sysctls_saved_once_and_restored(tmp_path):
     ctx = FakeCtx(tmp_path)
-    key = "net/ipv4/conf/wifi1/rp_filter"
+    key = "net/ipv4/conf/wlan1/rp_filter"
     path = tmp_path / "proc" / "sys" / key
     path.parent.mkdir(parents=True)
     path.write_text("1\n")
@@ -273,7 +273,7 @@ def test_sysctls_saved_once_and_restored(tmp_path):
 # internal card
 # ---------------------------------------------------------------------------
 
-ENTRIES = shared.parse_internal_conf("14c3:7925 mt7925e 0000:00:02.2\n")
+ENTRIES = shared.parse_internal_conf("17cb:1103 ath11k_pci 0000:00:1c.0\n")
 
 
 def test_render_udev_rules_snapshot():
@@ -282,17 +282,17 @@ def test_render_udev_rules_snapshot():
         "# Generated by wifimimo-helper from /etc/wifimimo/internal.conf. Do not edit.\n"
         'ACTION!="add", GOTO="wifimimo_internal_end"\n'
         'SUBSYSTEM!="pci", GOTO="wifimimo_internal_end"\n'
-        'ATTR{vendor}=="0x14c3", ATTR{device}=="0x7925", TEST!="/etc/wifimimo/internal-enabled", '
+        'ATTR{vendor}=="0x17cb", ATTR{device}=="0x1103", TEST!="/etc/wifimimo/internal-enabled", '
         'ATTR{remove}="1", GOTO="wifimimo_internal_end"\n'
-        'ATTR{vendor}=="0x14c3", ATTR{device}=="0x7925", TEST=="/etc/wifimimo/internal-enabled", '
-        'RUN+="/usr/bin/modprobe mt7925e"\n'
+        'ATTR{vendor}=="0x17cb", ATTR{device}=="0x1103", TEST=="/etc/wifimimo/internal-enabled", '
+        'RUN+="/usr/bin/modprobe ath11k_pci"\n'
         'LABEL="wifimimo_internal_end"\n'
     )
 
 
 @pytest.mark.parametrize("line", [
-    "14c3:792 mt7925e", "14c3:7925 mt7925e; rm", "14c3:7925 MT/7925", "14c3:7925",
-    "14c3:7925 mt7925e 0000:00:02", "14c3:7925 mt7925e 0000:00:02.2 extra",
+    "17cb:110 ath11k_pci", "17cb:1103 ath11k_pci; rm", "17cb:1103 ATH/1103", "17cb:1103",
+    "17cb:1103 ath11k_pci 0000:00:02", "17cb:1103 ath11k_pci 0000:00:1c.0 extra",
     'x" RUN+="/bin/sh',
 ])
 def test_internal_conf_rejects(line):
@@ -301,9 +301,9 @@ def test_internal_conf_rejects(line):
 
 
 def test_internal_conf_accepts_comments_and_optional_bridge():
-    entries = shared.parse_internal_conf("# card\n\n14C3:7925 mt7925e  # upper-case ok\n")
-    assert entries == [{"vendor": "14c3", "device": "7925", "id": "14c3:7925",
-                        "driver": "mt7925e", "bridge": ""}]
+    entries = shared.parse_internal_conf("# card\n\n17CB:1103 ath11k_pci  # upper-case ok\n")
+    assert entries == [{"vendor": "17cb", "device": "1103", "id": "17cb:1103",
+                        "driver": "ath11k_pci", "bridge": ""}]
 
 
 class InternalCtx(helper.Ctx):
@@ -313,7 +313,7 @@ class InternalCtx(helper.Ctx):
                          udev_rules_dir=tmp_path / "rules")
         (tmp_path / "rules").mkdir()
         self.etc_dir.mkdir()
-        (self.etc_dir / "internal.conf").write_text("14c3:7925 mt7925e 0000:00:02.2\n")
+        (self.etc_dir / "internal.conf").write_text("17cb:1103 ath11k_pci 0000:00:1c.0\n")
         self.writes, self.cmds = [], []
 
     def write(self, path, value):
@@ -341,13 +341,13 @@ def test_internal_disable_removes_device_and_clears_flag(tmp_path):
 def test_internal_enable_rescans_bridge_and_loads_driver(tmp_path):
     ctx = InternalCtx(tmp_path)
     ctx.settle_s = 0
-    bridge = ctx.sys_root / "bus" / "pci" / "devices" / "0000:00:02.2"
+    bridge = ctx.sys_root / "bus" / "pci" / "devices" / "0000:00:1c.0"
     bridge.mkdir(parents=True)
     (bridge / "rescan").write_text("")
     helper.cmd_internal(ctx, "enable")
     assert (ctx.etc_dir / "internal-enabled").exists()
     assert (str(bridge / "rescan"), "1") in ctx.writes
-    assert "modprobe mt7925e" in ctx.cmds
+    assert "modprobe ath11k_pci" in ctx.cmds
 
 
 def test_internal_unconfigured_is_exit_3(tmp_path):
@@ -358,10 +358,10 @@ def test_internal_unconfigured_is_exit_3(tmp_path):
 
 def test_legacy_rule_detected(tmp_path):
     ctx = InternalCtx(tmp_path)
-    (ctx.udev_rules_dir / "99-remove-mt7925-pci.rules").write_text(
-        'ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x14c3", ATTR{device}=="0x7925", ATTR{remove}="1"\n')
+    (ctx.udev_rules_dir / "99-remove-wifi-pci.rules").write_text(
+        'ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x17cb", ATTR{device}=="0x1103", ATTR{remove}="1"\n')
     status = helper.internal_status(ctx, ENTRIES)
-    assert status["legacy_rules"] == [str(ctx.udev_rules_dir / "99-remove-mt7925-pci.rules")]
+    assert status["legacy_rules"] == [str(ctx.udev_rules_dir / "99-remove-wifi-pci.rules")]
 
 
 # ---------------------------------------------------------------------------
@@ -439,7 +439,7 @@ def test_a_failure_that_persists_is_logged_once(tmp_path, monkeypatch):
 def test_a_healthy_check_is_quiet_and_touches_nothing(tmp_path, monkeypatch):
     ctx = FakeCtx(tmp_path)
     monkeypatch.setattr(helper, "multipath_apply", lambda ctx, desired: {
-        "desired": True, "active": True, "members": ["wifi1", "wifi2"], "excluded": [],
+        "desired": True, "active": True, "members": ["wlan1", "wlan2"], "excluded": [],
         "reason": "", "error": "", "applied_at": 0, "plan": []})
     result = helper.multipath_check(ctx, True)
     assert result["quiet"] and ctx.ran == []
@@ -450,7 +450,7 @@ def test_the_20s_check_logs_and_writes_status_only_when_something_changed(tmp_pa
     ctx = FakeCtx(tmp_path)
     (tmp_path / "etc").mkdir()
     (tmp_path / "etc" / shared.MULTIPATH_FLAG.name).touch()
-    members = ["wifi2", "wifi1"]
+    members = ["wlan2", "wlan1"]
     monkeypatch.setattr(helper, "multipath_apply", lambda ctx, desired: {
         "desired": True, "active": True, "members": list(members), "excluded": [],
         "reason": "", "error": "", "applied_at": 0, "plan": [("cmd", ["ip", "x"])]})
@@ -461,6 +461,6 @@ def test_the_20s_check_logs_and_writes_status_only_when_something_changed(tmp_pa
     mtime = status.stat().st_mtime_ns
     _, result = helper.cmd_multipath(ctx, "check")
     assert result["quiet"] is True and status.stat().st_mtime_ns == mtime
-    members.remove("wifi1")                                       # a radio dropped out
+    members.remove("wlan1")                                       # a radio dropped out
     _, result = helper.cmd_multipath(ctx, "check")
-    assert result["quiet"] is False and '"wifi1"' not in status.read_text()
+    assert result["quiet"] is False and '"wlan1"' not in status.read_text()

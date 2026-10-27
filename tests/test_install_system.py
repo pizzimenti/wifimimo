@@ -31,13 +31,14 @@ def _write_exe(path: Path, body: str) -> None:
 def fakes(tmp_path):
     """Fake system commands; each appends its argv (one per line) to calls/<name>
     and its name to calls/order. `timeout` runs wpa_cli (only) after logging;
-    `modprobe -R` prints $FAKE_MODALIAS_MODULES (space-separated) one per line."""
+    `modprobe -R` prints $FAKE_MODALIAS_MODULES (space-separated) one per line;
+    `modinfo -F alias` prints $FAKE_MODINFO_ALIASES likewise (a PCI alias unless set)."""
     bin_dir = tmp_path / "bin"
     calls = tmp_path / "calls"
     bin_dir.mkdir()
     calls.mkdir()
     for name in ("sysctl", "systemd-sysctl", "pkexec", "systemctl", "udevadm", "nmcli",
-                 "wpa_cli", "timeout", "systemd-run", "kpackagetool6", "modprobe"):
+                 "wpa_cli", "timeout", "systemd-run", "kpackagetool6", "modprobe", "modinfo"):
         _write_exe(bin_dir / name, f"""#!/bin/sh
 {{ printf '%s\\n' "$@"; echo --; }} >> "{calls}/{name}"
 echo "{name}" >> "{calls}/order"
@@ -52,6 +53,9 @@ case "{name}" in
         [ "$1" = -R ] || exit 0
         [ -n "${{FAKE_MODPROBE_RC:-}}" ] && exit "$FAKE_MODPROBE_RC"
         for m in ${{FAKE_MODALIAS_MODULES:-}}; do echo "$m"; done ;;
+    modinfo)
+        [ -n "${{FAKE_MODINFO_RC:-}}" ] && exit "$FAKE_MODINFO_RC"
+        for a in ${{FAKE_MODINFO_ALIASES-pci:v00008086d00002725sv*sd*bc*sc*i*}}; do echo "$a"; done ;;
 esac
 exit 0
 """)
@@ -85,7 +89,8 @@ def etc(tmp_path):
     root = tmp_path / "etc"
     for d in ("sysctl.d", "NetworkManager/dispatcher.d", "modprobe.d", "wifimimo"):
         (root / d).mkdir(parents=True)
-    (tmp_path / "sys-bus-pci-devices").mkdir()
+    for d in ("sys-bus-pci-devices", "sys-bus-pci-drivers", "sys-bus-usb-devices", "sys-module"):
+        (tmp_path / d).mkdir()
     return root
 
 
@@ -104,6 +109,8 @@ INTERNAL_CONF="$ETC_DIR/internal.conf"
 INTERNAL_FLAG="$ETC_DIR/internal-enabled"
 LEGACY_DIR="$ETC_DIR/legacy"
 SYS_PCI_DIR="{tmp_path}/sys-bus-pci-devices"
+SYS_USB_DIR="{tmp_path}/sys-bus-usb-devices"
+SYS_MODULE_DIR="{tmp_path}/sys-module"
 """
     full_env = {**os.environ, "PATH": f"{bin_dir}:/usr/bin:/bin", **env}
     return subprocess.run(["bash", "-c", prelude + script], env=full_env,
@@ -111,9 +118,10 @@ SYS_PCI_DIR="{tmp_path}/sys-bus-pci-devices"
 
 
 def fake_pci_card(tmp_path, addr: str, vendor: str, device: str, *, driver: str | None,
-                  bridge: str = "0000:00:1c.0", cls: str = "0x028000",
+                  module: str | None = None, bridge: str = "0000:00:1c.0", cls: str = "0x028000",
                   modalias: str | None = "pci:v00008086d00002725sv00008086sd00000024bc02sc80i00"):
-    """A card under a fake /sys/devices tree, linked from the fake /sys/bus/pci/devices."""
+    """A card under a fake /sys/devices tree, linked from the fake /sys/bus/pci/devices;
+    a bound one also appears under its driver and its module, as in sysfs."""
     node = tmp_path / "sys-devices" / "pci0000:00" / bridge / addr
     node.mkdir(parents=True)
     (node / "class").write_text(cls + "\n")
@@ -122,11 +130,26 @@ def fake_pci_card(tmp_path, addr: str, vendor: str, device: str, *, driver: str 
     if modalias is not None:
         (node / "modalias").write_text(modalias + "\n")
     if driver:
-        drv = tmp_path / "sys-drivers" / driver
-        drv.mkdir(parents=True, exist_ok=True)
+        module = module or driver
+        drv = tmp_path / "sys-bus-pci-drivers" / driver
+        mod = tmp_path / "sys-module" / module
+        if not drv.exists():
+            drv.mkdir()
+            (mod / "drivers").mkdir(parents=True, exist_ok=True)
+            (drv / "module").symlink_to(mod)
+            (mod / "drivers" / f"pci:{driver}").symlink_to(drv)
+            (drv / "bind").write_text("")
+        (drv / addr).symlink_to(node)
         (node / "driver").symlink_to(drv)
     (tmp_path / "sys-bus-pci-devices" / addr).symlink_to(node)
     return node
+
+
+def fake_usb_device(tmp_path, name: str, vendor: str, product: str):
+    node = tmp_path / "sys-bus-usb-devices" / name
+    node.mkdir()
+    (node / "idVendor").write_text(vendor + "\n")
+    (node / "idProduct").write_text(product + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +313,14 @@ def test_driver_of_a_bound_card_is_the_bound_one(tmp_path, fakes, etc):
     assert calls_of(calls, "modprobe") == []
 
 
+def test_driver_is_the_module_behind_the_bound_driver(tmp_path, fakes, etc):
+    # e.g. a Broadcom card's bound driver "bcma-pci-bridge" lives in module bcma
+    fake_pci_card(tmp_path, "0000:01:00.0", "14e4", "4331", driver="bcma-pci-bridge", module="bcma")
+    result = run_fn(tmp_path, fakes, etc, "detect_pci_driver 0000:01:00.0")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "bcma\n"
+
+
 def test_driver_of_an_unbound_card_comes_from_its_modalias(tmp_path, fakes, etc):
     _, calls = fakes
     fake_pci_card(tmp_path, "0000:01:00.0", "8086", "2725", driver=None)
@@ -347,6 +378,37 @@ def test_manage_internal_needs_the_driver_named_for_an_absent_card(tmp_path, fak
     assert not (etc / "wifimimo" / "internal-enabled").exists()   # absent: not switched on
 
 
+def test_manage_internal_refuses_a_usb_stick(tmp_path, fakes, etc):
+    fake_usb_device(tmp_path, "3-1", "ffff", "00a2")
+    result = run_fn(tmp_path, fakes, etc, "MANAGE_INTERNAL=ffff:00a2=mt7921u; write_internal_conf",
+                    FAKE_MODINFO_ALIASES="usb:vFFFFp00A2d*")
+    assert result.returncode == 2
+    assert "is a USB device" in result.stderr
+    assert not (etc / "wifimimo" / "internal.conf").exists()
+
+
+@pytest.mark.parametrize("env", [
+    {"FAKE_MODINFO_ALIASES": "usb:vFFFFp00A2d*dc*dsc*dp*icFFiscFFipFFin*"},   # a USB driver
+    {"FAKE_MODINFO_ALIASES": ""},                                          # no aliases at all
+    {"FAKE_MODINFO_RC": "1"},                                              # no such module
+])
+def test_manage_internal_refuses_a_driver_that_cant_drive_a_pci_card(tmp_path, fakes, etc, env):
+    # the stick isn't plugged in, so only the driver gives it away
+    result = run_fn(tmp_path, fakes, etc, "MANAGE_INTERNAL=ffff:00a2=mt7921u; write_internal_conf", **env)
+    assert result.returncode == 2
+    assert "not a PCI driver" in result.stderr
+    assert not (etc / "wifimimo" / "internal.conf").exists()
+    run_fn(tmp_path, fakes, etc, "write_internal_blacklist")
+    assert not (etc / "modprobe.d" / "wifimimo-internal.conf").exists()
+
+
+def test_a_pci_card_is_accepted_even_if_a_usb_device_shares_its_id(tmp_path, fakes, etc):
+    fake_pci_card(tmp_path, "0000:01:00.0", "8086", "2725", driver="iwlwifi")
+    fake_usb_device(tmp_path, "1-4", "8086", "2725")
+    result = run_fn(tmp_path, fakes, etc, "MANAGE_INTERNAL=8086:2725; write_internal_conf")
+    assert result.returncode == 0, result.stderr
+
+
 def test_blacklist_is_written_from_internal_conf_whatever_else_says(tmp_path, fakes, etc):
     (etc / "wifimimo" / "internal.conf").write_text(
         "# Managed internal Wi-Fi cards: <vendor:device> <driver> [parent bridge]\n"
@@ -363,6 +425,54 @@ def test_blacklist_is_written_from_internal_conf_whatever_else_says(tmp_path, fa
     assert body == ["blacklist ath11k_pci", "blacklist iwlwifi"]
     assert stat.S_IMODE(ours.stat().st_mode) == 0o644
     assert (etc / "modprobe.d" / "local.conf").read_text() == "blacklist iwlwifi\n"
+
+
+@pytest.mark.parametrize("bad", ["8086:2725 iwlwifi; rm -rf /", "8086:2725", "usb ffff:00a2 mt7921u"])
+def test_a_line_the_helper_rejects_means_the_blacklist_is_left_alone(tmp_path, fakes, etc, bad):
+    """The helper rejects the whole file on one bad line (and so manages no
+    card); the installer reads it with the same parser and writes nothing."""
+    (etc / "wifimimo" / "internal.conf").write_text(f"17cb:1103 ath11k_pci\n{bad}\n")
+    entries = run_fn(tmp_path, fakes, etc, "managed_internal_entries")
+    assert entries.returncode != 0 and "internal.conf line 2" in entries.stderr
+    ours = etc / "modprobe.d" / "wifimimo-internal.conf"
+    for before in (None, "blacklist iwlwifi\n"):
+        if before is None:
+            ours.unlink(missing_ok=True)
+        else:
+            ours.write_text(before)
+        result = run_fn(tmp_path, fakes, etc, "write_internal_blacklist")
+        assert result.returncode == 0, result.stderr
+        assert "left as it was" in result.stderr
+        assert (ours.read_text() if ours.exists() else None) == before
+
+
+def test_entries_come_from_the_helpers_parser(tmp_path, fakes, etc):
+    (etc / "wifimimo" / "internal.conf").write_text(
+        "# cards\n17CB:1103 ath11k_pci   # upper case is fine\n\n8086:2725 iwlwifi 0000:00:1c.0\n")
+    result = run_fn(tmp_path, fakes, etc, "managed_internal_entries")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["17cb:1103 ath11k_pci", "8086:2725 iwlwifi"]
+
+
+def test_a_malformed_internal_conf_stops_the_install_before_any_change():
+    text = INSTALL.read_text()
+    install_part = text.split("# Install / upgrade")[1]
+    check = install_part.index('! managed_internal_entries >/dev/null')
+    assert check < install_part.index('install -d -m755 "$TARGET_LIB_DIR"')
+    assert '[[ -z "$MANAGE_INTERNAL" ]]' in install_part[:check]   # --manage-internal rewrites it
+
+
+def test_warns_when_the_managed_driver_also_drives_another_device(tmp_path, fakes, etc):
+    fake_pci_card(tmp_path, "0000:01:00.0", "8086", "2725", driver="iwlwifi")
+    (etc / "wifimimo" / "internal.conf").write_text("8086:2725 iwlwifi 0000:00:1c.0\n")
+    quiet = run_fn(tmp_path, fakes, etc, "write_internal_blacklist")
+    assert quiet.returncode == 0, quiet.stderr
+    assert quiet.stderr == ""                                 # only the managed card itself
+    fake_pci_card(tmp_path, "0000:02:00.0", "8086", "51f0", driver="iwlwifi", bridge="0000:00:1d.0")
+    result = run_fn(tmp_path, fakes, etc, "write_internal_blacklist")
+    assert result.returncode == 0, result.stderr
+    assert "iwlwifi also drives 0000:02:00.0" in result.stderr
+    assert "0000:01:00.0" not in result.stderr
 
 
 def test_no_managed_card_means_no_blacklist(tmp_path, fakes, etc):

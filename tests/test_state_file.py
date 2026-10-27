@@ -44,7 +44,7 @@ def test_v1_migration_shim(tmp_path: Path):
     v1 = "\n".join([
         "timestamp=1234",
         "connected=true",
-        "iface=wlp1s0",
+        "iface=wlan0",
         "ssid=legacy",
         "ssid_display=legacy",
         "bssid=02:00:00:00:00:01",

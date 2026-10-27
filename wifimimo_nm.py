@@ -1528,7 +1528,7 @@ def plan_tidy(profiles: list[dict]) -> list[dict]:
     (the applet can't tell those apart and shows them as "Net (wlan0)");
     differently named ones the user made for their own reasons (another
     password, other settings) are left alone. Keeper preference: unbound,
-    then named exactly like the SSID (the original rather than a '-a8000'
+    then named exactly like the SSID (the original rather than a '-stick2'
     style copy), then most recently used.
     """
     groups: dict[tuple, list[dict]] = {}

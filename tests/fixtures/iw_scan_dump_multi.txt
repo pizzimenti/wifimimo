@@ -1,4 +1,4 @@
-BSS 02:00:00:00:00:52(on wifi1) -- associated
+BSS 02:00:00:00:00:52(on wlan1) -- associated
 	last seen: 326728.298s [boottime]
 	freq: 5260.0
 	signal: -29.00 dBm
@@ -17,7 +17,7 @@ BSS 02:00:00:00:00:52(on wifi1) -- associated
 		 * channel width: 1 (80 MHz)
 		 * center freq segment 1: 58
 		 * center freq segment 2: 0
-BSS 02:00:00:00:00:11(on wifi1)
+BSS 02:00:00:00:00:11(on wlan1)
 	last seen: 326721.760s [boottime]
 	freq: 2462.0
 	signal: -33.00 dBm
@@ -32,7 +32,7 @@ BSS 02:00:00:00:00:11(on wifi1)
 		 * primary channel: 11
 		 * secondary channel offset: no secondary
 		 * STA channel width: 20 MHz
-BSS 02:00:00:00:01:36(on wifi1)
+BSS 02:00:00:00:01:36(on wlan1)
 	last seen: 326721.806s [boottime]
 	freq: 5180.0
 	signal: -72.00 dBm
@@ -52,7 +52,7 @@ BSS 02:00:00:00:01:36(on wifi1)
 		HE Operation Parameters: (0x003ff4)
 			Default PE Duration: 4
 		BSS Color: 1
-BSS 02:00:00:00:01:49(on wifi1)
+BSS 02:00:00:00:01:49(on wlan1)
 	last seen: 326725.580s [boottime]
 	freq: 5745.0
 	signal: -67.00 dBm
@@ -67,7 +67,7 @@ BSS 02:00:00:00:01:49(on wifi1)
 		 * center freq segment 2: 0
 	RSN:	 * Version: 1
 		 * Authentication suites: PSK
-BSS 02:00:00:00:06:37(on wifi1)
+BSS 02:00:00:00:06:37(on wlan1)
 	last seen: 326727.100s [boottime]
 	freq: 6135.0
 	signal: -61.00 dBm
