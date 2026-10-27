@@ -15,18 +15,29 @@ Each version's heading says whether it was a major, minor or patch change.
   machine gets it from `git clone` and `./install.sh` alone:
   - `/etc/sysctl.d/99-wifimimo-arp-flux.conf` sets `arp_ignore=1` /
     `arp_announce=2` on `all`, for adapters holding addresses on one subnet,
-    and is applied at install. `--uninstall` removes it and puts the running
-    values back to the kernel's default, or re-applies the sysctl files when
-    another one still sets them.
+    and is applied at install. `--uninstall` removes it, resets both keys to
+    the kernel's default, then has `systemd-sysctl` re-apply just those two
+    keys from the remaining sysctl files (glob lines included), so they end
+    up exactly as the next boot would set them and nothing else is re-applied.
   - The dispatcher hook sets wpa_supplicant's background scan to
     `simple:30:-70:300` on every Wi-Fi connection (scan every 300 s above
-    -70 dBm, every 30 s below), whether or not multipath is on.
+    -70 dBm, every 30 s below), whether or not multipath is on. It tells a
+    Wi-Fi netdev from sysfs (`phy80211` or `wireless/`, as the daemon does)
+    rather than asking NetworkManager, and caps `wpa_cli` at 5 s, so a stuck
+    NM or wpa_supplicant can't delay the multipath step after it.
 - The installer finds exact hand-placed copies of these (an identical ARP
   sysctl file, the old standalone bgscan dispatcher script, a modprobe file
   that only blacklists a managed internal card's driver) and lists them;
   `--migrate-legacy-rules` moves them to `/etc/wifimimo/legacy/` under their
   original path, carrying a blacklist line over to `wifimimo-internal.conf`
-  first, so `--uninstall` leaves nothing behind.
+  first, so `--uninstall` leaves nothing behind. A copy of the bgscan hook that
+  a link under `dispatcher.d` (in `pre-up.d`, say) points at is listed but not
+  moved, since moving it would leave NetworkManager a dangling script.
+- Once the copies are migrated, the ARP-flux settings are wifimimo's: the
+  hand-placed file sits in `/etc/wifimimo/legacy/`, so `--uninstall` takes
+  `arp_ignore` / `arp_announce` away with it. A machine whose wired port or
+  dock shares a subnet with its Wi-Fi loses that fix on uninstall, until the
+  kept file is moved back to `/etc/sysctl.d/`.
 
 ### Changed
 

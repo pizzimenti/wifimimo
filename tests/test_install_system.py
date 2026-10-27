@@ -59,20 +59,24 @@ def _write_exe(path: Path, body: str) -> None:
 
 @pytest.fixture
 def fakes(tmp_path):
-    """Fake system commands; each appends its argv (one per line) to calls/<name>."""
+    """Fake system commands; each appends its argv (one per line) to calls/<name>
+    and its name to calls/order. `timeout` runs wpa_cli (only) after logging."""
     bin_dir = tmp_path / "bin"
     calls = tmp_path / "calls"
     bin_dir.mkdir()
     calls.mkdir()
-    for name in ("sysctl", "pkexec", "systemctl", "udevadm", "nmcli", "wpa_cli",
-                 "timeout", "systemd-run", "kpackagetool6"):
+    for name in ("sysctl", "systemd-sysctl", "pkexec", "systemctl", "udevadm", "nmcli",
+                 "wpa_cli", "timeout", "systemd-run", "kpackagetool6"):
         _write_exe(bin_dir / name, f"""#!/bin/sh
 {{ printf '%s\\n' "$@"; echo --; }} >> "{calls}/{name}"
+echo "{name}" >> "{calls}/order"
 case "{name}" in
     sysctl) exit "${{FAKE_SYSCTL_RC:-0}}" ;;
     pkexec) exit 1 ;;
-    nmcli) [ "$1 $2 $3 $4" = "-g GENERAL.TYPE dev show" ] && echo "${{FAKE_NM_TYPE-wifi}}" ;;
     wpa_cli) exit "${{FAKE_WPA_RC:-0}}" ;;
+    timeout)
+        [ -n "${{FAKE_TIMEOUT_RC:-}}" ] && exit "$FAKE_TIMEOUT_RC"
+        shift; [ "$1" = wpa_cli ] && exec "$@" ;;
 esac
 exit 0
 """)
@@ -106,7 +110,6 @@ def etc(tmp_path):
     root = tmp_path / "etc"
     for d in ("sysctl.d", "NetworkManager/dispatcher.d", "modprobe.d", "wifimimo"):
         (root / d).mkdir(parents=True)
-    (tmp_path / "usr-lib-sysctl.d").mkdir()
     return root
 
 
@@ -116,8 +119,7 @@ def run_fn(tmp_path, fakes, etc, script: str, **env):
     prelude = f"""
 source "{INSTALL}"
 TARGET_SYSCTL="{etc}/sysctl.d/99-wifimimo-arp-flux.conf"
-SYSCTL_CONF="{etc}/sysctl.conf"
-SYSCTL_DIRS=("{etc}/sysctl.d" "{tmp_path}/usr-lib-sysctl.d")
+SYSTEMD_SYSCTL="{bin_dir}/systemd-sysctl"
 TARGET_DISPATCHER_DIR="{etc}/NetworkManager/dispatcher.d"
 TARGET_DISPATCHER="$TARGET_DISPATCHER_DIR/90-wifimimo"
 WIFIMIMO_BLACKLIST="{etc}/modprobe.d/wifimimo-internal.conf"
@@ -146,7 +148,7 @@ def place_hand_copies(etc: Path) -> dict[str, Path]:
     _write_exe(disp / "99-bgscan-tuned", HAND_BGSCAN.replace("-70", "-65"))
     _write_exe(disp / "99-disable-ipv6", "#!/bin/sh\nexit 0\n")
     (disp / "pre-up.d").mkdir()
-    (disp / "99-bgscan-link").symlink_to(paths["bgscan"])
+    (disp / "pre-up.d" / "99-disable-ipv6").symlink_to("../99-disable-ipv6")   # unrelated link
     (etc / "modprobe.d" / "blacklist-unused.conf").write_text("blacklist pcspkr\n")
     (etc / "modprobe.d" / "mixed.conf").write_text("blacklist mt7925e\nblacklist pcspkr\n")
     (etc / "modprobe.d" / "cfg80211.conf").write_text("options cfg80211 ieee80211_regdom=US\n")
@@ -224,33 +226,63 @@ def test_install_sysctl_carries_on_when_sysctl_fails(tmp_path, fakes, etc):
     assert (etc / "sysctl.d" / "99-wifimimo-arp-flux.conf").exists()
 
 
-def test_remove_sysctl_puts_back_the_kernel_default(tmp_path, fakes, etc):
+def test_remove_sysctl_resets_both_keys_then_restores_what_boot_would_give(tmp_path, fakes, etc):
     _, calls = fakes
     target = etc / "sysctl.d" / "99-wifimimo-arp-flux.conf"
     target.write_text(SYSCTL_SRC.read_text())
-    (etc / "sysctl.d" / "99-performance.conf").write_text("net.ipv4.tcp_fastopen = 3\n")
     result = run_fn(tmp_path, fakes, etc, "remove_arp_flux_sysctl")
     assert result.returncode == 0, result.stderr
     assert not target.exists()
     assert calls_of(calls, "sysctl") == [[
         "-q", "-w", "net.ipv4.conf.all.arp_ignore=0", "net.ipv4.conf.all.arp_announce=0"]]
+    # only these two keys, so a file that sets one of them (or a glob line
+    # covering it) gets back exactly that one, and nothing else is re-applied
+    assert calls_of(calls, "systemd-sysctl") == [[
+        "--prefix=/net/ipv4/conf/all/arp_ignore", "--prefix=/net/ipv4/conf/all/arp_announce"]]
+    assert (calls / "order").read_text().split() == ["sysctl", "systemd-sysctl"]
 
 
-@pytest.mark.parametrize("where, line", [
-    ("etc", "net.ipv4.conf.all.arp_ignore = 1"),              # a hand-placed copy kept
-    ("usr", "net/ipv4/conf/all/arp_announce=2"),             # slash form, vendor dir
-    ("conf", "-net.ipv4.conf.all.arp_ignore=1"),             # /etc/sysctl.conf, '-' prefix
-])
-def test_remove_sysctl_reapplies_when_another_file_sets_the_keys(tmp_path, fakes, etc, where, line):
+def test_remove_sysctl_carries_on_without_systemd_sysctl(tmp_path, fakes, etc):
     _, calls = fakes
     (etc / "sysctl.d" / "99-wifimimo-arp-flux.conf").write_text(SYSCTL_SRC.read_text())
-    other = {"etc": etc / "sysctl.d" / "99-arp-flux.conf",
-             "usr": tmp_path / "usr-lib-sysctl.d" / "50-vendor.conf",
-             "conf": etc / "sysctl.conf"}[where]
-    other.write_text(f"# kept\n{line}\n")
-    result = run_fn(tmp_path, fakes, etc, "remove_arp_flux_sysctl")
+    result = run_fn(tmp_path, fakes, etc,
+                    f'SYSTEMD_SYSCTL="{tmp_path}/missing"; remove_arp_flux_sysctl; echo after')
     assert result.returncode == 0, result.stderr
-    assert calls_of(calls, "sysctl") == [["-q", "--system"]]
+    assert result.stdout.strip() == "after"
+    assert len(calls_of(calls, "sysctl")) == 1
+
+
+def _can_run_private_netns() -> bool:
+    if not (shutil.which("unshare") and Path("/usr/lib/systemd/systemd-sysctl").exists()):
+        return False
+    return subprocess.run(["unshare", "-rn", "true"], capture_output=True).returncode == 0
+
+
+@pytest.mark.skipif(not _can_run_private_netns(),
+                    reason="needs unshare -rn and systemd-sysctl")
+@pytest.mark.parametrize("config, ignore, announce", [
+    ("net.ipv4.conf.all.arp_ignore = 1\n", "1", "0"),         # one key: the other stays 0
+    ("net.ipv4.conf.*.arp_ignore = 1\n", "1", "0"),           # glob line
+    ("net/ipv4/conf/all/arp_announce=2\n", "0", "2"),         # slash form
+    ("net.ipv4.conf.all.rp_filter = 2\n", "0", "0"),          # other keys: not applied
+])
+def test_systemd_sysctl_prefixes_restore_only_these_keys(tmp_path, config, ignore, announce):
+    """The real systemd-sysctl, in a private user + network namespace (the
+    host's settings are never touched): what the uninstall relies on."""
+    conf = tmp_path / "other.conf"
+    conf.write_text(config)
+    script = f"""
+P=/proc/sys/net/ipv4/conf
+for k in all/arp_ignore all/arp_announce default/arp_ignore all/rp_filter; do echo 2 > $P/$k; done
+sysctl -q -w net.ipv4.conf.all.arp_ignore=0 net.ipv4.conf.all.arp_announce=0
+/usr/lib/systemd/systemd-sysctl --prefix=/net/ipv4/conf/all/arp_ignore \\
+    --prefix=/net/ipv4/conf/all/arp_announce {conf}
+cat $P/all/arp_ignore $P/all/arp_announce $P/default/arp_ignore $P/all/rp_filter
+"""
+    result = subprocess.run(["unshare", "-rn", "sh", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    # default.arp_ignore and rp_filter keep the 2 written above: nothing else applied
+    assert result.stdout.split() == [ignore, announce, "2", "2"]
 
 
 def test_remove_sysctl_without_our_file_touches_nothing(tmp_path, fakes, etc):
@@ -258,7 +290,7 @@ def test_remove_sysctl_without_our_file_touches_nothing(tmp_path, fakes, etc):
     (etc / "sysctl.d" / "99-arp-flux.conf").write_text(HAND_ARP)
     result = run_fn(tmp_path, fakes, etc, "remove_arp_flux_sysctl")
     assert result.returncode == 0, result.stderr
-    assert calls_of(calls, "sysctl") == []
+    assert calls_of(calls, "sysctl") == [] and calls_of(calls, "systemd-sysctl") == []
     assert (etc / "sysctl.d" / "99-arp-flux.conf").exists()
 
 
@@ -329,7 +361,7 @@ def test_migration_moves_copies_aside_and_adopts_the_blacklist(tmp_path, fakes, 
         assert path.read_text() == text
     disp = etc / "NetworkManager" / "dispatcher.d"
     assert (disp / "99-bgscan-tuned").is_file() and (disp / "99-disable-ipv6").is_file()
-    assert (disp / "99-bgscan-link").is_symlink()     # left alone (now dangling)
+    assert (disp / "pre-up.d" / "99-disable-ipv6").resolve() == disp / "99-disable-ipv6"
     for name in ("blacklist-unused.conf", "mixed.conf", "cfg80211.conf"):
         assert (etc / "modprobe.d" / name).exists()
     # a second run finds nothing more to do
@@ -344,6 +376,28 @@ def test_migration_does_not_repeat_a_blacklist_line_we_already_have(tmp_path, fa
     result = run_fn(tmp_path, fakes, etc, "handle_hand_placed_copies 1")
     assert result.returncode == 0, result.stderr
     assert ours.read_text() == "blacklist mt7925e\n"
+
+
+@pytest.mark.parametrize("link, target", [
+    ("99-bgscan-again", None),                  # absolute link beside it
+    ("pre-up.d/99-bgscan", "../99-bgscan"),     # relative link in a subdirectory
+    ("no-wait.d/deeper/99-bgscan", None),       # any depth
+])
+def test_a_linked_copy_is_listed_but_never_moved(tmp_path, fakes, etc, link, target):
+    paths = place_hand_copies(etc)
+    disp = etc / "NetworkManager" / "dispatcher.d"
+    link_path = disp / link
+    link_path.parent.mkdir(parents=True, exist_ok=True)
+    link_path.symlink_to(target or paths["bgscan"])
+    found = run_fn(tmp_path, fakes, etc, "find_hand_placed_copies")
+    assert f"linked {paths['bgscan']}" in found.stdout.splitlines()
+    listed = run_fn(tmp_path, fakes, etc, "handle_hand_placed_copies 0")
+    assert str(paths["bgscan"]) in listed.stderr
+    result = run_fn(tmp_path, fakes, etc, "handle_hand_placed_copies 1")
+    assert result.returncode == 0, result.stderr
+    assert paths["bgscan"].is_file() and link_path.resolve() == paths["bgscan"]   # not dangling
+    assert f"Kept {paths['bgscan']}" in result.stderr and str(link_path) in result.stderr
+    assert not paths["arp"].exists() and not paths["blacklist"].exists()       # others still move
 
 
 def test_no_copies_means_no_output(tmp_path, fakes, etc):
@@ -387,47 +441,63 @@ def test_install_and_uninstall_paths_call_the_new_pieces():
 # ---------------------------------------------------------------------------
 
 
-def run_dispatcher(fakes, iface: str, action: str, **env):
+def run_dispatcher(tmp_path, fakes, iface: str, action: str, **env):
+    """Run the hook against a fake /sys/class/net: wifi0 has a phy80211 link
+    and a wireless/ dir, wext0 only wireless/, cfg0 only phy80211, ether1 neither."""
     bin_dir, _ = fakes
+    net = tmp_path / "sys-class-net"
+    for name, marks in {"wifi0": ("phy80211", "wireless"), "wext0": ("wireless",),
+                        "cfg0": ("phy80211",), "ether1": ()}.items():
+        (net / name).mkdir(parents=True, exist_ok=True)
+        if "wireless" in marks:
+            (net / name / "wireless").mkdir(exist_ok=True)
+        if "phy80211" in marks and not (net / name / "phy80211").exists():
+            (net / name / "phy80211").symlink_to(tmp_path)
     return subprocess.run(["sh", str(DISPATCHER), iface, action], capture_output=True, text=True,
-                          env={**os.environ, "PATH": f"{bin_dir}:/usr/bin:/bin", **env})
+                          env={**os.environ, "PATH": f"{bin_dir}:/usr/bin:/bin",
+                               "WIFIMIMO_TEST_SYS_CLASS_NET": str(net), **env})
 
 
-def test_dispatcher_sets_bgscan_on_a_wifi_connection(fakes):
+BGSCAN_ARGS = ["set_network", "0", "bgscan", '"simple:30:-70:300"']
+
+
+@pytest.mark.parametrize("iface", ["wifi0", "wext0", "cfg0"])
+def test_dispatcher_sets_bgscan_on_a_wifi_connection(tmp_path, fakes, iface):
     _, calls = fakes
-    result = run_dispatcher(fakes, "wifi0", "up")
+    result = run_dispatcher(tmp_path, fakes, iface, "up")
     assert result.returncode == 0
-    assert calls_of(calls, "nmcli") == [["-g", "GENERAL.TYPE", "dev", "show", "wifi0"]]
-    assert calls_of(calls, "wpa_cli") == [
-        ["-i", "wifi0", "set_network", "0", "bgscan", '"simple:30:-70:300"']]
+    assert calls_of(calls, "timeout")[0] == ["5", "wpa_cli", "-i", iface, *BGSCAN_ARGS]
+    assert calls_of(calls, "wpa_cli") == [["-i", iface, *BGSCAN_ARGS]]
+    assert calls_of(calls, "nmcli") == []          # no D-Bus round trip to NM
 
 
-@pytest.mark.parametrize("nm_type", ["ethernet", "wifi-p2p", "tun", ""])
-def test_dispatcher_leaves_other_devices_alone(fakes, nm_type):
+@pytest.mark.parametrize("iface", ["ether1", "tailscale0", "lo", ""])
+def test_dispatcher_leaves_other_devices_alone(tmp_path, fakes, iface):
     _, calls = fakes
-    assert run_dispatcher(fakes, "ether1", "up", FAKE_NM_TYPE=nm_type).returncode == 0
+    assert run_dispatcher(tmp_path, fakes, iface, "up").returncode == 0
     assert calls_of(calls, "wpa_cli") == []
 
 
 @pytest.mark.parametrize("action", ["down", "pre-up", "dhcp4-change", "connectivity-change", "reapply"])
-def test_dispatcher_sets_bgscan_only_on_up(fakes, action):
+def test_dispatcher_sets_bgscan_only_on_up(tmp_path, fakes, action):
     _, calls = fakes
-    assert run_dispatcher(fakes, "wifi0", action).returncode == 0
-    assert calls_of(calls, "nmcli") == []
+    assert run_dispatcher(tmp_path, fakes, "wifi0", action).returncode == 0
     assert calls_of(calls, "wpa_cli") == []
 
 
-def test_dispatcher_exits_0_when_wpa_cli_fails(fakes):
-    assert run_dispatcher(fakes, "wifi0", "up", FAKE_WPA_RC="255").returncode == 0
+@pytest.mark.parametrize("env", [{"FAKE_WPA_RC": "255"}, {"FAKE_TIMEOUT_RC": "124"}])
+def test_dispatcher_exits_0_when_wpa_cli_fails_or_hangs(tmp_path, fakes, env):
+    assert run_dispatcher(tmp_path, fakes, "wifi0", "up", **env).returncode == 0
 
 
 @pytest.mark.skipif(Path("/etc/wifimimo/multipath-enabled").exists(),
                     reason="multipath is enabled on this machine")
-def test_dispatcher_sets_bgscan_with_multipath_off_and_leaves_routing_alone(fakes):
+def test_dispatcher_sets_bgscan_with_multipath_off_and_leaves_routing_alone(tmp_path, fakes):
     _, calls = fakes
-    assert run_dispatcher(fakes, "wifi0", "up").returncode == 0
+    assert run_dispatcher(tmp_path, fakes, "wifi0", "up").returncode == 0
     assert len(calls_of(calls, "wpa_cli")) == 1
-    assert calls_of(calls, "timeout") == [] and calls_of(calls, "systemd-run") == []
+    assert len(calls_of(calls, "timeout")) == 1      # the wpa_cli cap, not the helper
+    assert calls_of(calls, "systemd-run") == []
 
 
 def test_dispatcher_bgscan_matches_the_hook_it_replaces():

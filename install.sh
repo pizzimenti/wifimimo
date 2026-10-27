@@ -32,8 +32,7 @@ TARGET_DISPATCHER_DIR="/etc/NetworkManager/dispatcher.d"
 TARGET_DISPATCHER="$TARGET_DISPATCHER_DIR/90-wifimimo"
 TARGET_RT_PROTOS="/etc/iproute2/rt_protos.d/wifimimo.conf"
 TARGET_SYSCTL="/etc/sysctl.d/99-wifimimo-arp-flux.conf"
-SYSCTL_CONF="/etc/sysctl.conf"
-SYSCTL_DIRS=(/etc/sysctl.d /run/sysctl.d /usr/local/lib/sysctl.d /usr/lib/sysctl.d)
+SYSTEMD_SYSCTL="/usr/lib/systemd/systemd-sysctl"
 DEADMAN_UNIT="wifimimo-deadman"
 TARGET_DEADMAN_DIR="/etc/systemd/system"
 ETC_DIR="/etc/wifimimo"
@@ -60,23 +59,16 @@ install_arp_flux_sysctl() {
 }
 
 remove_arp_flux_sysctl() {
-    local d f files=()
     [[ -e "$TARGET_SYSCTL" ]] || return 0
     rm -f -- "$TARGET_SYSCTL"
-    # Deleting the file leaves the running kernel as it was. If no other sysctl
-    # file sets these keys, put back the kernel's default (0); if one does,
-    # re-apply the sysctl files so it wins, as it will at the next boot.
-    if [[ -f "$SYSCTL_CONF" ]]; then files+=("$SYSCTL_CONF"); fi
-    for d in "${SYSCTL_DIRS[@]}"; do
-        for f in "$d"/*.conf; do
-            if [[ -f "$f" ]]; then files+=("$f"); fi
-        done
-    done
-    if [[ ${#files[@]} -gt 0 ]] && grep -qsE \
-            '^[[:space:]]*-?net[./]ipv4[./]conf[./]all[./]arp_(ignore|announce)[[:space:]]*=' "${files[@]}"; then
-        sysctl -q --system >/dev/null || true
-    else
-        sysctl -q -w net.ipv4.conf.all.arp_ignore=0 net.ipv4.conf.all.arp_announce=0 >/dev/null || true
+    # Deleting the file leaves the running kernel as it was. Put both keys back
+    # to the kernel's default, then have systemd-sysctl apply whatever the
+    # remaining sysctl files say for these two keys alone (glob lines such as
+    # net.ipv4.conf.*.arp_ignore included): exactly what the next boot gives.
+    sysctl -q -w net.ipv4.conf.all.arp_ignore=0 net.ipv4.conf.all.arp_announce=0 >/dev/null || true
+    if [[ -x "$SYSTEMD_SYSCTL" ]]; then
+        "$SYSTEMD_SYSCTL" --prefix=/net/ipv4/conf/all/arp_ignore \
+            --prefix=/net/ipv4/conf/all/arp_announce || true
     fi
 }
 
@@ -118,9 +110,20 @@ only_blacklists() {  # file drivers -> true when every line blacklists one of th
     [[ $seen == 1 ]]
 }
 
+links_to() {  # path dir -> the symlinks under dir, at any depth, that resolve to path
+    local target link
+    target="$(readlink -f -- "$1")"
+    while IFS= read -r -d '' link; do
+        if [[ "$(readlink -f -- "$link")" == "$target" ]]; then echo "$link"; fi
+    done < <(find "$2" -type l -print0 2>/dev/null)
+    return 0
+}
+
 find_hand_placed_copies() {  # prints "<kind> <path>" per hand-placed copy
     # Only exact copies (comments and spacing aside) of what wifimimo installs
     # itself; a file that does anything more is somebody else's and left alone.
+    # A dispatcher copy that a link (in pre-up.d, say) points at is "linked":
+    # listed, but never moved, since moving it would leave the link dangling.
     local f want drivers
     want="$(sysctl_settings "$ROOT_DIR/sysctl/99-wifimimo-arp-flux.conf")"
     for f in "$(dirname "$TARGET_SYSCTL")"/*.conf; do
@@ -130,7 +133,12 @@ find_hand_placed_copies() {  # prints "<kind> <path>" per hand-placed copy
     want="$(legacy_bgscan_hook)"
     for f in "$TARGET_DISPATCHER_DIR"/*; do
         [[ -f "$f" && ! -L "$f" && "$f" != "$TARGET_DISPATCHER" ]] || continue
-        if [[ "$(effective_lines "$f")" == "$want" ]]; then echo "dispatcher $f"; fi
+        [[ "$(effective_lines "$f")" == "$want" ]] || continue
+        if [[ -n "$(links_to "$f" "$TARGET_DISPATCHER_DIR")" ]]; then
+            echo "linked $f"
+        else
+            echo "dispatcher $f"
+        fi
     done
     # A managed card's driver must stay blacklisted so the generated udev rule is
     # its only loader; that line belongs in wifimimo's own modprobe file, which
@@ -162,6 +170,11 @@ handle_hand_placed_copies() {  # 1: move them to $LEGACY_DIR; 0: only say so
         return 0
     fi
     while read -r kind path; do
+        if [[ "$kind" == linked ]]; then
+            echo "Kept $path: these links point at it, so it stays until they're gone:" >&2
+            links_to "$path" "$TARGET_DISPATCHER_DIR" | sed 's/^/  /' >&2
+            continue
+        fi
         if [[ "$kind" == blacklist ]]; then
             while IFS= read -r line; do
                 grep -qsxF -- "$line" "$WIFIMIMO_BLACKLIST" || printf '%s\n' "$line" >> "$WIFIMIMO_BLACKLIST"

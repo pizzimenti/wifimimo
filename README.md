@@ -95,8 +95,11 @@ Everything wifimimo needs from the system is installed, and removed again, by
   any local address on any interface, so replies can leave the wrong adapter.
   The sysctl file sets `arp_ignore=1` and `arp_announce=2` on `all`, covering
   every interface at all times; multipath also sets them on its member radios.
-  `--uninstall` deletes the file and puts the running values back to the
-  kernel's default (or re-applies the sysctl files if another one sets them).
+  `--uninstall` deletes the file, resets both keys, and has `systemd-sysctl`
+  re-apply just those two from any other sysctl file, so they end up as the
+  next boot would set them. A machine whose wired port or dock shares a subnet
+  with its Wi-Fi therefore loses the fix on uninstall, unless another sysctl
+  file sets it.
 
 Machines set up by hand before wifimimo carried these may still hold their own
 copies: an identical ARP sysctl file in `/etc/sysctl.d/`, the bgscan hook as a
@@ -104,9 +107,10 @@ separate dispatcher script, or a modprobe file that only blacklists a managed
 internal card's driver. The installer lists any exact copies it finds (a file
 that does anything more is left alone); `--migrate-legacy-rules` moves them to
 `/etc/wifimimo/legacy/` under their original path, carrying a blacklist line
-over to `wifimimo-internal.conf` first. Nothing changes in behaviour, and
-`--uninstall` then removes everything, listing what it kept in the legacy
-folder.
+over to `wifimimo-internal.conf` first. A dispatcher copy that a link under
+`dispatcher.d` points at stays where it is, so the link never dangles. Nothing
+changes in behaviour, and `--uninstall` then removes everything, listing what it
+kept in the legacy folder.
 
 ## Daemon
 

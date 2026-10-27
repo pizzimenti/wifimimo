@@ -9,8 +9,12 @@
 # disturbed), below it every 30 s (a fading link hunts for a better AP).
 # wpa_supplicant re-arms bgscan for the current association when it changes, and
 # NM writes its own default again on the next connection, so this runs on "up".
-if [ "$2" = up ] && [ "$(nmcli -g GENERAL.TYPE dev show "$1" 2>/dev/null)" = wifi ]; then
-    wpa_cli -i "$1" set_network 0 bgscan '"simple:30:-70:300"' >/dev/null 2>&1 || true
+# A Wi-Fi netdev is one the daemon would poll (phy80211 link or wireless/ dir),
+# read from sysfs rather than asked of NM over D-Bus, and wpa_cli is capped at
+# 5 s, so a stuck NM or supplicant can't hold up multipath below.
+net="${WIFIMIMO_TEST_SYS_CLASS_NET:-/sys/class/net}"   # overridden by the tests only
+if [ "$2" = up ] && { [ -e "$net/$1/phy80211" ] || [ -d "$net/$1/wireless" ]; }; then
+    timeout 5 wpa_cli -i "$1" set_network 0 bgscan '"simple:30:-70:300"' >/dev/null 2>&1 || true
 fi
 
 # Multipath. The helper ignores $1 and rebuilds from live state, so a stale or
