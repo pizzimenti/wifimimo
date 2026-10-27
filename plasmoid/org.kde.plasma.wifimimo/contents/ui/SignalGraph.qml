@@ -71,7 +71,7 @@ Item {
             ? [seg[0], Qt.point(seg[0].x + 3, seg[0].y)] : seg);
     }
 
-    // End labels ("A9000 -56"), nudged apart so they never overlap.
+    // End labels ("Built-in -56"), nudged apart so they never overlap.
     readonly property var labelSlots: {
         const rows = [];
         for (let i = 0; i < series.length; ++i) {

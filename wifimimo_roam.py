@@ -32,8 +32,8 @@ from collections import deque
 
 STRONG_DBM = -70        # a slot is only joined at or above this while any radio is up
 MIN_JOIN_DBM = -72      # never tried below this: APs with a minimum-signal floor
-                        # (the EAP720 drops clients it hears below -75) refuse it,
-                        # and the AP hears our weaker transmit (A8000: ~10 dB less)
+                        # (one tested AP drops clients it hears below -75) refuse it,
+                        # and the AP hears our weaker transmit (one USB stick: ~10 dB less)
 KEEP_DBM = -75          # a held slot keeps counting as strong down to here
 DEAD_DBM = -82          # a held slot below this is dead weight
 FRESH_S = 10.0          # scan data older than this isn't acted on
@@ -336,8 +336,8 @@ class Trend:
 class Offsets:
     """How much stronger radio A hears the air than radio B, per band.
 
-    Cards differ a lot (live 2026-09-25: the built-in mt7925e read ~20 dB
-    below the A9000 on the same AP), so a reading one radio took is only
+    Cards differ a lot (live 2026-09-25: a built-in card read ~20 dB
+    below a USB stick on the same AP), so a reading one radio took is only
     useful to another after correction. Learned from moments when both
     radios measured the same BSS within a couple of seconds.
     """

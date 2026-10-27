@@ -1,4 +1,4 @@
-Connected to 02:00:00:05:ee:ff (on wlp1s0)
+Connected to 02:00:00:05:ee:ff (on wlan0)
 	SSID: example-legacy
 	freq: 5180
 	RX: 1234567 bytes (4567 packets)

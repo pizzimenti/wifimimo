@@ -20,7 +20,7 @@
         "Id": "org.kde.plasma.wifimimo",
         "License": "MIT",
         "Name": "wifimimo",
-        "Version": "1.8.4",
+        "Version": "1.9.0",
         "Website": "https://github.com/pizzimenti/wifimimo"
     }
 }

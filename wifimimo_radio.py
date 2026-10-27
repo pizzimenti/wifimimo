@@ -38,13 +38,10 @@ USB3_CAPABLE_DRIVERS = frozenset({
     "8812au", "88XXau", "88x2bu",
 })
 
-# Friendly names for known models. USB product strings are useless for this
-# ("Wireless_Device" from "MediaTek Inc." on both Netgear sticks), so the
-# vendor:product id is the only reliable key.
-KNOWN_MODELS = {
-    "0846:9072": "A9000",   # Netgear Nighthawk BE6500 (mt7925u)
-    "0846:9060": "A8000",   # Netgear Nighthawk AXE3000 (mt7921u)
-}
+# Model names come from ~/.config/wifimimo/names.json, keyed by the card's
+# vendor:product id (or one card's permanent MAC). USB product strings are
+# useless for this (many sticks report "Wireless_Device" from the chip maker),
+# so without an entry a stick is named after its vendor and chip.
 BUILTIN_NAME = "Built-in"
 
 USB_IDS_PATHS = (
@@ -169,13 +166,15 @@ def lookup_usb_vendor(vendor_id: str, paths=USB_IDS_PATHS) -> str:
 
 
 def card_name(info: dict, overrides: dict | None = None, usb_ids_paths=USB_IDS_PATHS) -> str:
-    """Human name for a radio: override > known model > Built-in > vendor+chip."""
+    """Human name for a radio: names.json by permanent MAC > names.json by
+    vendor:product id > Built-in > vendor + chip."""
+    overrides = overrides or {}
     perm_mac = info.get("perm_mac", "")
-    if overrides and perm_mac in overrides:
+    if perm_mac and perm_mac in overrides:
         return overrides[perm_mac]
-    dev_id = info.get("dev_id", "")
-    if dev_id in KNOWN_MODELS:
-        return KNOWN_MODELS[dev_id]
+    dev_id = info.get("dev_id", "").lower()
+    if dev_id and dev_id in overrides:
+        return overrides[dev_id]
     bus = info.get("bus", "")
     if bus in ("pci", "sdio", "platform"):
         return BUILTIN_NAME
@@ -188,7 +187,9 @@ def card_name(info: dict, overrides: dict | None = None, usb_ids_paths=USB_IDS_P
 
 
 class NameOverrides:
-    """~/.config/wifimimo/names.json ({"<perm mac>": "name"}), re-read on change."""
+    """~/.config/wifimimo/names.json, re-read on change. Keys are a card's
+    permanent MAC ("00:00:5e:00:53:01") or a model's USB/PCI vendor:product
+    id ("ffff:00a1"); values are the names to show."""
 
     def __init__(self, path: Path = NAMES_PATH) -> None:
         self.path = path
@@ -210,8 +211,8 @@ class NameOverrides:
                 loaded = None
             if isinstance(loaded, dict):
                 self._names = {
-                    str(mac).lower(): str(name).strip()[:32]
-                    for mac, name in loaded.items()
+                    str(key).strip().lower(): str(name).strip()[:32]
+                    for key, name in loaded.items()
                     if isinstance(name, str) and name.strip()
                 }
         return self._names

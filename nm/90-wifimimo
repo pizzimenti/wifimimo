@@ -1,9 +1,24 @@
 #!/bin/sh
-# wifimimo: rebuild wifi ECMP multipath after NetworkManager link events.
-# Installed root:root 0755 in /etc/NetworkManager/dispatcher.d (NM ignores
-# scripts with any other owner or mode). Always exits 0 so a routing hiccup
-# never blocks NM. The helper ignores $1 and rebuilds from live state, so a
-# stale or re-ordered event can't leave the wrong layout behind.
+# wifimimo: per-radio settings and the wifi ECMP multipath after NetworkManager
+# link events. Installed root:root 0755 in /etc/NetworkManager/dispatcher.d (NM
+# ignores scripts with any other owner or mode). Always exits 0 so a routing
+# hiccup never blocks NM.
+
+# Background scan, on every Wi-Fi connection whether or not multipath is on:
+# while the signal is above -70 dBm scan every 300 s (a good link isn't
+# disturbed), below it every 30 s (a fading link hunts for a better AP).
+# wpa_supplicant re-arms bgscan for the current association when it changes, and
+# NM writes its own default again on the next connection, so this runs on "up".
+# A Wi-Fi netdev is one the daemon would poll (phy80211 link or wireless/ dir),
+# read from sysfs rather than asked of NM over D-Bus, and wpa_cli is capped at
+# 5 s, so a stuck NM or supplicant can't hold up multipath below.
+net="${WIFIMIMO_TEST_SYS_CLASS_NET:-/sys/class/net}"   # overridden by the tests only
+if [ "$2" = up ] && { [ -e "$net/$1/phy80211" ] || [ -d "$net/$1/wireless" ]; }; then
+    timeout 5 wpa_cli -i "$1" set_network 0 bgscan '"simple:30:-70:300"' >/dev/null 2>&1 || true
+fi
+
+# Multipath. The helper ignores $1 and rebuilds from live state, so a stale or
+# re-ordered event can't leave the wrong layout behind.
 [ -e /etc/wifimimo/multipath-enabled ] || exit 0
 case "$2" in
     up|down|dhcp4-change|reapply|connectivity-change) ;;
